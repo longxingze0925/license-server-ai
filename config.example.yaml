@@ -80,6 +80,18 @@ security:
     - "https://your-domain.com"
     - "https://admin.your-domain.com"
 
+  # 上传与请求限制
+  max_release_upload_mb: 500    # 发布版本上传上限（MB）
+  max_request_body_mb: 1024     # 全局请求体上限（MB）
+  multipart_memory_mb: 32       # multipart 解析内存上限（MB）
+  max_script_upload_mb: 20      # 普通脚本上传上限（MB）
+  max_secure_script_upload_mb: 20 # 安全脚本上传上限（MB）
+
+  # 客户端下载 token（短时令牌）
+  # 留空则复用 jwt.secret；生产环境建议单独配置
+  download_token_secret: ""
+  download_token_expire_seconds: 300
+
 # ============================================
 # 生产环境部署检查清单
 # ============================================

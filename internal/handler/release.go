@@ -2,7 +2,9 @@ package handler
 
 import (
 	"fmt"
+	"io"
 	"license-server/internal/config"
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"os"
@@ -30,9 +32,10 @@ type CreateReleaseRequest struct {
 // Create 创建版本（不带文件）
 func (h *ReleaseHandler) Create(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", appID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
@@ -76,9 +79,10 @@ func (h *ReleaseHandler) Create(c *gin.Context) {
 // Upload 上传版本文件
 func (h *ReleaseHandler) Upload(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", appID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
@@ -106,11 +110,24 @@ func (h *ReleaseHandler) Upload(c *gin.Context) {
 
 	// 保存文件并计算哈希（流式处理，避免大文件占用过多内存）
 	cfg := config.Get()
+	maxReleaseUploadBytes := int64(cfg.Security.MaxReleaseUploadMB) << 20
+	if maxReleaseUploadBytes <= 0 {
+		maxReleaseUploadBytes = 500 << 20
+	}
+	if header.Size > maxReleaseUploadBytes {
+		response.BadRequest(c, fmt.Sprintf("版本文件过大，最大支持 %dMB", maxReleaseUploadBytes>>20))
+		return
+	}
 	filename := fmt.Sprintf("%s_%s%s", app.AppKey, version, filepath.Ext(header.Filename))
 	filePath := filepath.Join(cfg.Storage.ReleasesDir, filename)
-	fileSize, fileHash, err := saveUploadedFile(file, filePath)
+	fileSize, fileHash, err := saveUploadedFile(&io.LimitedReader{R: file, N: maxReleaseUploadBytes + 1}, filePath)
 	if err != nil {
 		response.ServerError(c, "保存文件失败: "+err.Error())
+		return
+	}
+	if fileSize > maxReleaseUploadBytes {
+		os.Remove(filePath)
+		response.BadRequest(c, fmt.Sprintf("版本文件过大，最大支持 %dMB", maxReleaseUploadBytes>>20))
 		return
 	}
 
@@ -169,6 +186,13 @@ func (h *ReleaseHandler) Upload(c *gin.Context) {
 // List 获取版本列表
 func (h *ReleaseHandler) List(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
+		response.NotFound(c, "应用不存在")
+		return
+	}
 
 	var releases []model.AppRelease
 	model.DB.Where("app_id = ?", appID).Order("version_code DESC").Find(&releases)
@@ -196,9 +220,12 @@ func (h *ReleaseHandler) List(c *gin.Context) {
 // Get 获取版本详情
 func (h *ReleaseHandler) Get(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var release model.AppRelease
-	if err := model.DB.First(&release, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = app_releases.app_id").
+		Where("app_releases.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&release).Error; err != nil {
 		response.NotFound(c, "版本不存在")
 		return
 	}
@@ -222,9 +249,12 @@ func (h *ReleaseHandler) Get(c *gin.Context) {
 // Update 更新版本
 func (h *ReleaseHandler) Update(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var release model.AppRelease
-	if err := model.DB.First(&release, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = app_releases.app_id").
+		Where("app_releases.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&release).Error; err != nil {
 		response.NotFound(c, "版本不存在")
 		return
 	}
@@ -258,9 +288,12 @@ func (h *ReleaseHandler) Update(c *gin.Context) {
 // Publish 发布版本
 func (h *ReleaseHandler) Publish(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var release model.AppRelease
-	if err := model.DB.First(&release, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = app_releases.app_id").
+		Where("app_releases.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&release).Error; err != nil {
 		response.NotFound(c, "版本不存在")
 		return
 	}
@@ -281,9 +314,12 @@ func (h *ReleaseHandler) Publish(c *gin.Context) {
 // Deprecate 废弃版本
 func (h *ReleaseHandler) Deprecate(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var release model.AppRelease
-	if err := model.DB.First(&release, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = app_releases.app_id").
+		Where("app_releases.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&release).Error; err != nil {
 		response.NotFound(c, "版本不存在")
 		return
 	}
@@ -297,9 +333,12 @@ func (h *ReleaseHandler) Deprecate(c *gin.Context) {
 // Delete 删除版本
 func (h *ReleaseHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var release model.AppRelease
-	if err := model.DB.First(&release, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = app_releases.app_id").
+		Where("app_releases.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&release).Error; err != nil {
 		response.NotFound(c, "版本不存在")
 		return
 	}
@@ -319,7 +358,24 @@ func (h *ReleaseHandler) Delete(c *gin.Context) {
 
 // DownloadRelease 下载版本文件（客户端）
 func (h *ReleaseHandler) DownloadRelease(c *gin.Context) {
-	filename := c.Param("filename")
+	filename, ok := getSafeDownloadFilename(c)
+	if !ok {
+		return
+	}
+
+	app, _, ok := validateClientDownloadContext(c, filename, downloadTokenKindRelease)
+	if !ok {
+		return
+	}
+
+	var release model.AppRelease
+	if err := model.DB.Where(
+		"app_id = ? AND status = ? AND download_url LIKE ?",
+		app.ID, model.ReleaseStatusPublished, "%/"+filename,
+	).Order("version_code DESC").First(&release).Error; err != nil {
+		response.NotFound(c, "文件不存在")
+		return
+	}
 
 	cfg := config.Get()
 	filePath := filepath.Join(cfg.Storage.ReleasesDir, filename)

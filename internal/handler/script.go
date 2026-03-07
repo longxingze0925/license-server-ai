@@ -3,7 +3,8 @@ package handler
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"io"
+	"fmt"
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"path/filepath"
@@ -20,10 +21,11 @@ func NewScriptHandler() *ScriptHandler {
 // Upload 上传脚本
 func (h *ScriptHandler) Upload(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	// 验证应用是否存在
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", appID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
@@ -42,9 +44,19 @@ func (h *ScriptHandler) Upload(c *gin.Context) {
 		return
 	}
 
-	// 读取文件内容
-	content, err := io.ReadAll(file)
+	maxScriptUploadBytes := getMaxScriptUploadSizeBytes()
+	if header.Size > maxScriptUploadBytes {
+		response.BadRequest(c, fmt.Sprintf("脚本文件过大，最大支持 %dMB", maxScriptUploadBytes>>20))
+		return
+	}
+
+	// 读取文件内容（限制大小，防止内存占用过高）
+	content, err := readUploadedContentWithLimit(file, maxScriptUploadBytes)
 	if err != nil {
+		if err == errUploadFileTooLarge {
+			response.BadRequest(c, fmt.Sprintf("脚本文件过大，最大支持 %dMB", maxScriptUploadBytes>>20))
+			return
+		}
 		response.ServerError(c, "读取文件失败")
 		return
 	}
@@ -106,6 +118,14 @@ func (h *ScriptHandler) Upload(c *gin.Context) {
 // List 获取脚本列表
 func (h *ScriptHandler) List(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	// 验证应用是否属于当前租户
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
+		response.NotFound(c, "应用不存在")
+		return
+	}
 
 	var scripts []model.Script
 	model.DB.Where("app_id = ?", appID).Order("filename ASC").Find(&scripts)
@@ -132,9 +152,12 @@ func (h *ScriptHandler) List(c *gin.Context) {
 // Get 获取脚本详情
 func (h *ScriptHandler) Get(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.Script
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = scripts.app_id").
+		Where("scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -157,9 +180,12 @@ func (h *ScriptHandler) Get(c *gin.Context) {
 // UpdateScript 更新脚本配置
 func (h *ScriptHandler) Update(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.Script
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = scripts.app_id").
+		Where("scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -189,9 +215,12 @@ func (h *ScriptHandler) Update(c *gin.Context) {
 // Delete 删除脚本
 func (h *ScriptHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.Script
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = scripts.app_id").
+		Where("scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -204,9 +233,12 @@ func (h *ScriptHandler) Delete(c *gin.Context) {
 // Download 下载脚本（管理端）
 func (h *ScriptHandler) Download(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.Script
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = scripts.app_id").
+		Where("scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}

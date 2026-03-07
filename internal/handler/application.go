@@ -101,8 +101,10 @@ func (h *ApplicationHandler) Create(c *gin.Context) {
 
 // List 获取应用列表
 func (h *ApplicationHandler) List(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
+
 	var apps []model.Application
-	if err := model.DB.Find(&apps).Error; err != nil {
+	if err := model.DB.Where("tenant_id = ?", tenantID).Find(&apps).Error; err != nil {
 		response.ServerError(c, "获取应用列表失败")
 		return
 	}
@@ -135,9 +137,10 @@ func (h *ApplicationHandler) List(c *gin.Context) {
 // Get 获取应用详情
 func (h *ApplicationHandler) Get(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
@@ -180,6 +183,7 @@ type UpdateAppRequest struct {
 // Update 更新应用
 func (h *ApplicationHandler) Update(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var req UpdateAppRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -188,7 +192,7 @@ func (h *ApplicationHandler) Update(c *gin.Context) {
 	}
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
@@ -232,16 +236,17 @@ func (h *ApplicationHandler) Update(c *gin.Context) {
 // Delete 删除应用
 func (h *ApplicationHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
 
 	// 检查是否有关联的授权
 	var licenseCount int64
-	model.DB.Model(&model.License{}).Where("app_id = ?", id).Count(&licenseCount)
+	model.DB.Model(&model.License{}).Where("app_id = ? AND tenant_id = ?", id, tenantID).Count(&licenseCount)
 	if licenseCount > 0 {
 		response.Error(c, 400, "该应用下存在授权记录，无法删除")
 		return
@@ -258,9 +263,10 @@ func (h *ApplicationHandler) Delete(c *gin.Context) {
 // RegenerateKeys 重新生成密钥对
 func (h *ApplicationHandler) RegenerateKeys(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}

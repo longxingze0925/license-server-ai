@@ -66,6 +66,11 @@ security:
   csrf_token_expiry: 60
   csrf_cookie_name: "csrf_token"
   enable_security_headers: true
+  max_release_upload_mb: ${MAX_RELEASE_UPLOAD_MB}
+  max_request_body_mb: ${MAX_REQUEST_BODY_MB}
+  multipart_memory_mb: ${MULTIPART_MEMORY_MB}
+  max_script_upload_mb: ${MAX_SCRIPT_UPLOAD_MB}
+  max_secure_script_upload_mb: ${MAX_SECURE_SCRIPT_UPLOAD_MB}
   allowed_origins:
     - "http://${SERVER_IP}:80"
     - "https://${SERVER_IP}:443"

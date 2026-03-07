@@ -255,8 +255,12 @@ func (m *ReleaseManager) GetLatestReleaseAndDownload(savePath string, progressCa
 		return nil, fmt.Errorf("没有可用的更新")
 	}
 
-	// 从 DownloadURL 提取文件名
-	filename := filepath.Base(updateInfo.DownloadURL)
+	// 从 DownloadURL 提取文件名（忽略 query 参数）
+	downloadURLParsed, err := url.Parse(updateInfo.DownloadURL)
+	if err != nil {
+		return nil, fmt.Errorf("无效的下载URL: %w", err)
+	}
+	filename := filepath.Base(downloadURLParsed.Path)
 	if filename == "" || filename == "." {
 		return nil, fmt.Errorf("无效的下载URL")
 	}

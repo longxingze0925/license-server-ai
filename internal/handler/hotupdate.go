@@ -3,7 +3,9 @@ package handler
 import (
 	"fmt"
 	"hash/crc32"
+	"io"
 	"license-server/internal/config"
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"os"
@@ -39,9 +41,10 @@ type CreateHotUpdateRequest struct {
 // Create 创建热更新记录（支持同时上传文件）
 func (h *HotUpdateHandler) Create(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", appID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
@@ -84,18 +87,18 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 	}
 
 	hotUpdate := model.HotUpdate{
-		AppID:          appID,
-		FromVersion:    "*", // 默认从任意版本更新
-		ToVersion:      version,
-		VersionCode:    versionCode,
-		PatchType:      patchType,
-		UpdateMode:     updateMode,
-		Changelog:      changelog,
-		ForceUpdate:    forceUpdate,
+		AppID:           appID,
+		FromVersion:     "*", // 默认从任意版本更新
+		ToVersion:       version,
+		VersionCode:     versionCode,
+		PatchType:       patchType,
+		UpdateMode:      updateMode,
+		Changelog:       changelog,
+		ForceUpdate:     forceUpdate,
 		RestartRequired: restartRequired,
-		MinAppVersion:  minAppVersion,
-		RolloutPercent: rolloutPercentage,
-		Status:         model.HotUpdateStatusDraft,
+		MinAppVersion:   minAppVersion,
+		RolloutPercent:  rolloutPercentage,
+		Status:          model.HotUpdateStatusDraft,
 	}
 
 	// 检查是否有上传文件
@@ -105,6 +108,14 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 
 		// 保存文件
 		cfg := config.Get()
+		maxUploadBytes := int64(cfg.Security.MaxReleaseUploadMB) << 20
+		if maxUploadBytes <= 0 {
+			maxUploadBytes = 500 << 20
+		}
+		if header.Size > maxUploadBytes {
+			response.BadRequest(c, fmt.Sprintf("更新包过大，最大支持 %dMB", maxUploadBytes>>20))
+			return
+		}
 		hotUpdateDir := filepath.Join(cfg.Storage.ReleasesDir, "hotupdate")
 		if err := os.MkdirAll(hotUpdateDir, 0755); err != nil {
 			response.ServerError(c, "创建目录失败: "+err.Error())
@@ -120,9 +131,14 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 			app.AppKey, version, uploadType, filepath.Ext(header.Filename))
 		filePath := filepath.Join(hotUpdateDir, filename)
 
-		fileSize, fileHash, err := saveUploadedFile(file, filePath)
+		fileSize, fileHash, err := saveUploadedFile(&io.LimitedReader{R: file, N: maxUploadBytes + 1}, filePath)
 		if err != nil {
 			response.ServerError(c, "保存文件失败: "+err.Error())
+			return
+		}
+		if fileSize > maxUploadBytes {
+			os.Remove(filePath)
+			response.BadRequest(c, fmt.Sprintf("更新包过大，最大支持 %dMB", maxUploadBytes>>20))
 			return
 		}
 
@@ -158,9 +174,10 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 func (h *HotUpdateHandler) Upload(c *gin.Context) {
 	appID := c.Param("id")
 	hotUpdateID := c.Param("hotupdate_id")
+	tenantID := middleware.GetTenantID(c)
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", appID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
@@ -187,6 +204,14 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 
 	// 保存文件
 	cfg := config.Get()
+	maxUploadBytes := int64(cfg.Security.MaxReleaseUploadMB) << 20
+	if maxUploadBytes <= 0 {
+		maxUploadBytes = 500 << 20
+	}
+	if header.Size > maxUploadBytes {
+		response.BadRequest(c, fmt.Sprintf("更新包过大，最大支持 %dMB", maxUploadBytes>>20))
+		return
+	}
 	hotUpdateDir := filepath.Join(cfg.Storage.ReleasesDir, "hotupdate")
 	if err := os.MkdirAll(hotUpdateDir, 0755); err != nil {
 		response.ServerError(c, "创建目录失败: "+err.Error())
@@ -197,9 +222,14 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 		app.AppKey, hotUpdate.FromVersion, hotUpdate.ToVersion, uploadType, filepath.Ext(header.Filename))
 	filePath := filepath.Join(hotUpdateDir, filename)
 
-	fileSize, fileHash, err := saveUploadedFile(file, filePath)
+	fileSize, fileHash, err := saveUploadedFile(&io.LimitedReader{R: file, N: maxUploadBytes + 1}, filePath)
 	if err != nil {
 		response.ServerError(c, "保存文件失败: "+err.Error())
+		return
+	}
+	if fileSize > maxUploadBytes {
+		os.Remove(filePath)
+		response.BadRequest(c, fmt.Sprintf("更新包过大，最大支持 %dMB", maxUploadBytes>>20))
 		return
 	}
 
@@ -230,6 +260,13 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 // List 获取热更新列表
 func (h *HotUpdateHandler) List(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
+		response.NotFound(c, "应用不存在")
+		return
+	}
 
 	var hotUpdates []model.HotUpdate
 	query := model.DB.Where("app_id = ?", appID).Order("created_at DESC")
@@ -277,9 +314,12 @@ func (h *HotUpdateHandler) List(c *gin.Context) {
 // Get 获取热更新详情
 func (h *HotUpdateHandler) Get(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var hotUpdate model.HotUpdate
-	if err := model.DB.First(&hotUpdate, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = hot_updates.app_id").
+		Where("hot_updates.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&hotUpdate).Error; err != nil {
 		response.NotFound(c, "热更新不存在")
 		return
 	}
@@ -312,9 +352,12 @@ func (h *HotUpdateHandler) Get(c *gin.Context) {
 // Update 更新热更新配置
 func (h *HotUpdateHandler) Update(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var hotUpdate model.HotUpdate
-	if err := model.DB.First(&hotUpdate, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = hot_updates.app_id").
+		Where("hot_updates.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&hotUpdate).Error; err != nil {
 		response.NotFound(c, "热更新不存在")
 		return
 	}
@@ -352,9 +395,12 @@ func (h *HotUpdateHandler) Update(c *gin.Context) {
 // Publish 发布热更新
 func (h *HotUpdateHandler) Publish(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var hotUpdate model.HotUpdate
-	if err := model.DB.First(&hotUpdate, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = hot_updates.app_id").
+		Where("hot_updates.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&hotUpdate).Error; err != nil {
 		response.NotFound(c, "热更新不存在")
 		return
 	}
@@ -376,9 +422,12 @@ func (h *HotUpdateHandler) Publish(c *gin.Context) {
 // Deprecate 废弃热更新
 func (h *HotUpdateHandler) Deprecate(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var hotUpdate model.HotUpdate
-	if err := model.DB.First(&hotUpdate, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = hot_updates.app_id").
+		Where("hot_updates.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&hotUpdate).Error; err != nil {
 		response.NotFound(c, "热更新不存在")
 		return
 	}
@@ -392,9 +441,12 @@ func (h *HotUpdateHandler) Deprecate(c *gin.Context) {
 // Rollback 回滚热更新
 func (h *HotUpdateHandler) Rollback(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var hotUpdate model.HotUpdate
-	if err := model.DB.First(&hotUpdate, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = hot_updates.app_id").
+		Where("hot_updates.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&hotUpdate).Error; err != nil {
 		response.NotFound(c, "热更新不存在")
 		return
 	}
@@ -408,9 +460,12 @@ func (h *HotUpdateHandler) Rollback(c *gin.Context) {
 // Delete 删除热更新
 func (h *HotUpdateHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var hotUpdate model.HotUpdate
-	if err := model.DB.First(&hotUpdate, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = hot_updates.app_id").
+		Where("hot_updates.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&hotUpdate).Error; err != nil {
 		response.NotFound(c, "热更新不存在")
 		return
 	}
@@ -440,6 +495,15 @@ func (h *HotUpdateHandler) Delete(c *gin.Context) {
 // GetLogs 获取热更新日志
 func (h *HotUpdateHandler) GetLogs(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	var hotUpdate model.HotUpdate
+	if err := model.DB.Joins("JOIN applications ON applications.id = hot_updates.app_id").
+		Where("hot_updates.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&hotUpdate).Error; err != nil {
+		response.NotFound(c, "热更新不存在")
+		return
+	}
 
 	var logs []model.HotUpdateLog
 	query := model.DB.Where("hot_update_id = ?", id).Order("created_at DESC")
@@ -480,13 +544,20 @@ func (h *HotUpdateHandler) GetLogs(c *gin.Context) {
 // GetStats 获取热更新统计
 func (h *HotUpdateHandler) GetStats(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
+		response.NotFound(c, "应用不存在")
+		return
+	}
 
 	var stats struct {
-		TotalUpdates   int64 `json:"total_updates"`
-		PublishedCount int64 `json:"published_count"`
-		TotalDownloads int64 `json:"total_downloads"`
-		TotalSuccess   int64 `json:"total_success"`
-		TotalFail      int64 `json:"total_fail"`
+		TotalUpdates   int64   `json:"total_updates"`
+		PublishedCount int64   `json:"published_count"`
+		TotalDownloads int64   `json:"total_downloads"`
+		TotalSuccess   int64   `json:"total_success"`
+		TotalFail      int64   `json:"total_fail"`
 		SuccessRate    float64 `json:"success_rate"`
 	}
 
@@ -521,7 +592,7 @@ func (h *HotUpdateHandler) CheckUpdate(c *gin.Context) {
 	currentVersion := c.Query("version")
 	machineID := c.Query("machine_id")
 
-	if appKey == "" || currentVersion == "" {
+	if appKey == "" || currentVersion == "" || machineID == "" {
 		response.BadRequest(c, "缺少参数")
 		return
 	}
@@ -530,6 +601,9 @@ func (h *HotUpdateHandler) CheckUpdate(c *gin.Context) {
 	var app model.Application
 	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
 		response.Error(c, 400, "无效的应用")
+		return
+	}
+	if !validateClientDeviceForApp(c, &app, machineID) {
 		return
 	}
 
@@ -592,12 +666,22 @@ func (h *HotUpdateHandler) CheckUpdate(c *gin.Context) {
 	// 当 from_version 是 "*" 时，表示匹配任意版本
 	fromVersionMatch := hotUpdate.FromVersion == currentVersion || hotUpdate.FromVersion == "*"
 	if hotUpdate.PatchURL != "" && fromVersionMatch {
-		result["download_url"] = hotUpdate.PatchURL
+		downloadURL, err := buildClientDownloadURLWithToken(hotUpdate.PatchURL, app.ID, machineID, downloadTokenKindHotUpdate)
+		if err != nil {
+			response.ServerError(c, "生成下载链接失败")
+			return
+		}
+		result["download_url"] = downloadURL
 		result["file_size"] = hotUpdate.PatchSize
 		result["file_hash"] = hotUpdate.PatchHash
 		result["update_type"] = "patch"
 	} else if hotUpdate.FullURL != "" {
-		result["download_url"] = hotUpdate.FullURL
+		downloadURL, err := buildClientDownloadURLWithToken(hotUpdate.FullURL, app.ID, machineID, downloadTokenKindHotUpdate)
+		if err != nil {
+			response.ServerError(c, "生成下载链接失败")
+			return
+		}
+		result["download_url"] = downloadURL
 		result["file_size"] = hotUpdate.FullSize
 		result["file_hash"] = hotUpdate.FullHash
 		result["update_type"] = "full"
@@ -608,7 +692,24 @@ func (h *HotUpdateHandler) CheckUpdate(c *gin.Context) {
 
 // DownloadUpdate 下载热更新包
 func (h *HotUpdateHandler) DownloadUpdate(c *gin.Context) {
-	filename := c.Param("filename")
+	filename, ok := getSafeDownloadFilename(c)
+	if !ok {
+		return
+	}
+
+	app, _, ok := validateClientDownloadContext(c, filename, downloadTokenKindHotUpdate)
+	if !ok {
+		return
+	}
+
+	var hotUpdate model.HotUpdate
+	if err := model.DB.Where(
+		"app_id = ? AND status = ? AND (patch_url LIKE ? OR full_url LIKE ?)",
+		app.ID, model.HotUpdateStatusPublished, "%/"+filename, "%/"+filename,
+	).Order("created_at DESC").First(&hotUpdate).Error; err != nil {
+		response.NotFound(c, "文件不存在")
+		return
+	}
 
 	cfg := config.Get()
 	filePath := filepath.Join(cfg.Storage.ReleasesDir, "hotupdate", filename)
@@ -623,7 +724,7 @@ func (h *HotUpdateHandler) DownloadUpdate(c *gin.Context) {
 	go func() {
 		// 异步更新下载计数
 		model.DB.Model(&model.HotUpdate{}).
-			Where("patch_url LIKE ? OR full_url LIKE ?", "%"+filename, "%"+filename).
+			Where("id = ? AND app_id = ?", hotUpdate.ID, app.ID).
 			UpdateColumn("download_count", model.DB.Raw("download_count + 1"))
 	}()
 
@@ -649,23 +750,31 @@ func (h *HotUpdateHandler) ReportUpdateStatus(c *gin.Context) {
 
 	// 验证应用
 	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", req.AppKey).Error; err != nil {
+	if err := model.DB.First(&app, "app_key = ? AND status = ?", req.AppKey, model.AppStatusActive).Error; err != nil {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
 
 	// 验证热更新
 	var hotUpdate model.HotUpdate
-	if err := model.DB.First(&hotUpdate, "id = ?", req.HotUpdateID).Error; err != nil {
+	if err := model.DB.First(&hotUpdate, "id = ? AND app_id = ?", req.HotUpdateID, app.ID).Error; err != nil {
 		response.Error(c, 400, "无效的热更新ID")
 		return
 	}
 
 	// 查找设备
-	var deviceID string
 	var device model.Device
-	if err := model.DB.Where("machine_id = ?", req.MachineID).First(&device).Error; err == nil {
-		deviceID = device.ID
+	if err := model.DB.Preload("License").Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ?", req.MachineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
+		response.Error(c, 401, "设备未授权")
+		return
+	}
+	if (device.License == nil || device.License.AppID != app.ID) &&
+		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
+		response.Error(c, 401, "设备未绑定当前应用")
+		return
 	}
 
 	now := time.Now()
@@ -680,7 +789,7 @@ func (h *HotUpdateHandler) ReportUpdateStatus(c *gin.Context) {
 		// 创建新日志
 		log = model.HotUpdateLog{
 			HotUpdateID:  req.HotUpdateID,
-			DeviceID:     deviceID,
+			DeviceID:     device.ID,
 			MachineID:    req.MachineID,
 			FromVersion:  req.FromVersion,
 			ToVersion:    req.ToVersion,
@@ -725,8 +834,22 @@ func (h *HotUpdateHandler) GetUpdateHistory(c *gin.Context) {
 
 	// 验证应用
 	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", appKey).Error; err != nil {
+	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
 		response.Error(c, 400, "无效的应用")
+		return
+	}
+
+	var device model.Device
+	if err := model.DB.Preload("License").Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ?", machineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
+		response.Error(c, 401, "设备未授权")
+		return
+	}
+	if (device.License == nil || device.License.AppID != app.ID) &&
+		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
+		response.Error(c, 401, "设备未绑定当前应用")
 		return
 	}
 

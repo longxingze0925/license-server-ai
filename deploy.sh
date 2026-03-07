@@ -31,6 +31,13 @@ fi
 # 加载环境变量
 source .env
 
+# 上传限制默认值
+: "${MAX_RELEASE_UPLOAD_MB:=500}"
+: "${MAX_REQUEST_BODY_MB:=1024}"
+: "${MULTIPART_MEMORY_MB:=32}"
+: "${MAX_SCRIPT_UPLOAD_MB:=20}"
+: "${MAX_SECURE_SCRIPT_UPLOAD_MB:=20}"
+
 # 检查必要配置
 if [ "$MYSQL_PASSWORD" = "CHANGE_ME_Db@2024!" ] || [ -z "$MYSQL_PASSWORD" ]; then
     log_error "请修改 .env 中的 MYSQL_PASSWORD"
@@ -66,6 +73,11 @@ envsubst < config.docker.yaml.template > config.docker.yaml 2>/dev/null || {
     sed -i "s/\${JWT_SECRET}/${JWT_SECRET}/g" config.docker.yaml
     sed -i "s/\${SERVER_IP}/${SERVER_IP}/g" config.docker.yaml
     sed -i "s/\${FRONTEND_PORT}/${FRONTEND_PORT:-80}/g" config.docker.yaml
+    sed -i "s/\${MAX_RELEASE_UPLOAD_MB}/${MAX_RELEASE_UPLOAD_MB}/g" config.docker.yaml
+    sed -i "s/\${MAX_REQUEST_BODY_MB}/${MAX_REQUEST_BODY_MB}/g" config.docker.yaml
+    sed -i "s/\${MULTIPART_MEMORY_MB}/${MULTIPART_MEMORY_MB}/g" config.docker.yaml
+    sed -i "s/\${MAX_SCRIPT_UPLOAD_MB}/${MAX_SCRIPT_UPLOAD_MB}/g" config.docker.yaml
+    sed -i "s/\${MAX_SECURE_SCRIPT_UPLOAD_MB}/${MAX_SECURE_SCRIPT_UPLOAD_MB}/g" config.docker.yaml
 }
 
 log_info "构建并启动服务..."

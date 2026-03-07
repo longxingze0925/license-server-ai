@@ -133,6 +133,7 @@ func (h *LicenseHandler) Create(c *gin.Context) {
 
 // List 获取授权列表
 func (h *LicenseHandler) List(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	appID := c.Query("app_id")
@@ -145,7 +146,10 @@ func (h *LicenseHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	query := model.DB.Model(&model.License{}).Preload("Application").Preload("Customer")
+	query := model.DB.Model(&model.License{}).
+		Where("tenant_id = ?", tenantID).
+		Preload("Application").
+		Preload("Customer")
 
 	if appID != "" {
 		query = query.Where("app_id = ?", appID)
@@ -163,17 +167,17 @@ func (h *LicenseHandler) List(c *gin.Context) {
 	var result []gin.H
 	for _, license := range licenses {
 		item := gin.H{
-			"id":              license.ID,
-			"license_key":     license.LicenseKey,
-			"app_id":          license.AppID,
-			"license_type":    license.Type,
-			"duration_days":   license.DurationDays,
-			"max_devices":     license.MaxDevices,
-			"status":          license.Status,
-			"activated_at":    license.ActivatedAt,
-			"expires_at":      license.ExpireAt,
-			"remaining_days":  license.RemainingDays(),
-			"created_at":      license.CreatedAt,
+			"id":             license.ID,
+			"license_key":    license.LicenseKey,
+			"app_id":         license.AppID,
+			"license_type":   license.Type,
+			"duration_days":  license.DurationDays,
+			"max_devices":    license.MaxDevices,
+			"status":         license.Status,
+			"activated_at":   license.ActivatedAt,
+			"expires_at":     license.ExpireAt,
+			"remaining_days": license.RemainingDays(),
+			"created_at":     license.CreatedAt,
 		}
 		if license.Application != nil {
 			item["app_name"] = license.Application.Name
@@ -191,9 +195,11 @@ func (h *LicenseHandler) List(c *gin.Context) {
 // Get 获取授权详情
 func (h *LicenseHandler) Get(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var license model.License
-	if err := model.DB.Preload("Application").Preload("Customer").Preload("Devices").First(&license, "id = ?", id).Error; err != nil {
+	if err := model.DB.Preload("Application").Preload("Customer").Preload("Devices").
+		First(&license, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "授权不存在")
 		return
 	}
@@ -237,6 +243,7 @@ type RenewRequest struct {
 // Renew 续费
 func (h *LicenseHandler) Renew(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var req RenewRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -245,7 +252,7 @@ func (h *LicenseHandler) Renew(c *gin.Context) {
 	}
 
 	var license model.License
-	if err := model.DB.First(&license, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&license, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "授权不存在")
 		return
 	}
@@ -308,6 +315,7 @@ func (h *LicenseHandler) Renew(c *gin.Context) {
 // Revoke 吊销授权
 func (h *LicenseHandler) Revoke(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var req struct {
 		Reason string `json:"reason"`
@@ -315,7 +323,7 @@ func (h *LicenseHandler) Revoke(c *gin.Context) {
 	c.ShouldBindJSON(&req)
 
 	var license model.License
-	if err := model.DB.First(&license, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&license, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "授权不存在")
 		return
 	}
@@ -354,6 +362,7 @@ func (h *LicenseHandler) Revoke(c *gin.Context) {
 // Suspend 暂停授权
 func (h *LicenseHandler) Suspend(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var req struct {
 		Reason string `json:"reason"`
@@ -361,7 +370,7 @@ func (h *LicenseHandler) Suspend(c *gin.Context) {
 	c.ShouldBindJSON(&req)
 
 	var license model.License
-	if err := model.DB.First(&license, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&license, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "授权不存在")
 		return
 	}
@@ -395,9 +404,10 @@ func (h *LicenseHandler) Suspend(c *gin.Context) {
 // Resume 恢复授权
 func (h *LicenseHandler) Resume(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var license model.License
-	if err := model.DB.First(&license, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&license, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "授权不存在")
 		return
 	}
@@ -437,6 +447,7 @@ type UpdateLicenseRequest struct {
 // Update 更新授权
 func (h *LicenseHandler) Update(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var req UpdateLicenseRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -445,7 +456,7 @@ func (h *LicenseHandler) Update(c *gin.Context) {
 	}
 
 	var license model.License
-	if err := model.DB.First(&license, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&license, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "授权不存在")
 		return
 	}
@@ -475,9 +486,10 @@ func (h *LicenseHandler) Update(c *gin.Context) {
 // Delete 删除授权
 func (h *LicenseHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var license model.License
-	if err := model.DB.First(&license, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&license, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "授权不存在")
 		return
 	}
@@ -503,15 +515,16 @@ func (h *LicenseHandler) Delete(c *gin.Context) {
 // ResetDevices 重置设备绑定
 func (h *LicenseHandler) ResetDevices(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var license model.License
-	if err := model.DB.First(&license, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&license, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "授权不存在")
 		return
 	}
 
 	// 删除所有绑定的设备
-	result := model.DB.Where("license_id = ?", id).Delete(&model.Device{})
+	result := model.DB.Where("license_id = ? AND tenant_id = ?", id, tenantID).Delete(&model.Device{})
 	if result.Error != nil {
 		response.ServerError(c, "重置失败")
 		return

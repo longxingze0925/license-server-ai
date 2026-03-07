@@ -28,7 +28,7 @@
 import os
 from typing import Optional, Dict, List, Callable, Tuple
 from dataclasses import dataclass
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 
 @dataclass
@@ -247,12 +247,12 @@ class ReleaseManager:
         if not update_info:
             raise Exception("没有可用的更新")
 
-        # 从 download_url 提取文件名
+        # 从 download_url 提取文件名（忽略 query 参数）
         download_url = update_info.get('download_url', '')
         if not download_url:
             raise Exception("无效的下载URL")
 
-        filename = os.path.basename(download_url)
+        filename = os.path.basename(urlparse(download_url).path)
         if not filename or filename == '.':
             raise Exception("无效的下载URL")
 

@@ -114,6 +114,9 @@ func main() {
 
 	// 创建 Gin 引擎
 	r := gin.New()
+	if cfg.Security.MultipartMemoryMB > 0 {
+		r.MaxMultipartMemory = int64(cfg.Security.MultipartMemoryMB) << 20
+	}
 
 	// 设置路由
 	handler.SetupRouter(r)

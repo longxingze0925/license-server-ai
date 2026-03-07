@@ -22,10 +22,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Mode     string `yaml:"mode"`
-	TLS      TLSConfig `yaml:"tls"`
+	Host string    `yaml:"host"`
+	Port int       `yaml:"port"`
+	Mode string    `yaml:"mode"`
+	TLS  TLSConfig `yaml:"tls"`
 }
 
 type TLSConfig struct {
@@ -95,10 +95,10 @@ type EmailConfig struct {
 
 type SecurityConfig struct {
 	// 登录安全
-	MaxLoginAttempts   int `yaml:"max_login_attempts"`    // 最大登录尝试次数
-	LoginLockMinutes   int `yaml:"login_lock_minutes"`    // 登录锁定时间（分钟）
-	IPMaxAttempts      int `yaml:"ip_max_attempts"`       // IP 最大尝试次数
-	IPLockMinutes      int `yaml:"ip_lock_minutes"`       // IP 锁定时间（分钟）
+	MaxLoginAttempts int `yaml:"max_login_attempts"` // 最大登录尝试次数
+	LoginLockMinutes int `yaml:"login_lock_minutes"` // 登录锁定时间（分钟）
+	IPMaxAttempts    int `yaml:"ip_max_attempts"`    // IP 最大尝试次数
+	IPLockMinutes    int `yaml:"ip_lock_minutes"`    // IP 锁定时间（分钟）
 
 	// 密码策略
 	PasswordMinLength  int  `yaml:"password_min_length"`  // 密码最小长度
@@ -106,15 +106,26 @@ type SecurityConfig struct {
 	PasswordRequireSym bool `yaml:"password_require_sym"` // 密码需要特殊字符
 
 	// CSRF 保护
-	CSRFEnabled       bool   `yaml:"csrf_enabled"`        // 是否启用 CSRF 保护
-	CSRFTokenExpiry   int    `yaml:"csrf_token_expiry"`   // CSRF Token 过期时间（分钟）
-	CSRFCookieName    string `yaml:"csrf_cookie_name"`    // CSRF Cookie 名称
+	CSRFEnabled     bool   `yaml:"csrf_enabled"`      // 是否启用 CSRF 保护
+	CSRFTokenExpiry int    `yaml:"csrf_token_expiry"` // CSRF Token 过期时间（分钟）
+	CSRFCookieName  string `yaml:"csrf_cookie_name"`  // CSRF Cookie 名称
 
 	// 安全头
 	EnableSecurityHeaders bool `yaml:"enable_security_headers"` // 是否启用安全响应头
 
 	// 允许的来源（CORS）
 	AllowedOrigins []string `yaml:"allowed_origins"`
+
+	// 上传与请求限制
+	MaxReleaseUploadMB      int `yaml:"max_release_upload_mb"`       // 发布版本上传大小上限（MB）
+	MaxRequestBodyMB        int `yaml:"max_request_body_mb"`         // 全局请求体大小上限（MB）
+	MultipartMemoryMB       int `yaml:"multipart_memory_mb"`         // multipart 解析内存上限（MB）
+	MaxScriptUploadMB       int `yaml:"max_script_upload_mb"`        // 普通脚本上传大小上限（MB）
+	MaxSecureScriptUploadMB int `yaml:"max_secure_script_upload_mb"` // 安全脚本上传大小上限（MB）
+
+	// 客户端下载令牌
+	DownloadTokenSecret        string `yaml:"download_token_secret"`         // 下载 token 密钥（留空复用 JWT Secret）
+	DownloadTokenExpireSeconds int    `yaml:"download_token_expire_seconds"` // 下载 token 过期时间（秒）
 }
 
 var globalConfig *Config
@@ -169,6 +180,24 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Security.CSRFCookieName == "" {
 		cfg.Security.CSRFCookieName = "csrf_token"
+	}
+	if cfg.Security.MaxReleaseUploadMB == 0 {
+		cfg.Security.MaxReleaseUploadMB = 500
+	}
+	if cfg.Security.MaxRequestBodyMB == 0 {
+		cfg.Security.MaxRequestBodyMB = 1024
+	}
+	if cfg.Security.MultipartMemoryMB == 0 {
+		cfg.Security.MultipartMemoryMB = 32
+	}
+	if cfg.Security.MaxScriptUploadMB == 0 {
+		cfg.Security.MaxScriptUploadMB = 20
+	}
+	if cfg.Security.MaxSecureScriptUploadMB == 0 {
+		cfg.Security.MaxSecureScriptUploadMB = 20
+	}
+	if cfg.Security.DownloadTokenExpireSeconds == 0 {
+		cfg.Security.DownloadTokenExpireSeconds = 300
 	}
 }
 

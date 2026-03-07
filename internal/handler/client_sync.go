@@ -202,7 +202,10 @@ func (h *ClientSyncHandler) validateAndGetUser(c *gin.Context, appKey, machineID
 
 	// 通过设备找到订阅
 	var device model.Device
-	if err := model.DB.Where("machine_id = ?", machineID).First(&device).Error; err != nil {
+	if err := model.DB.Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ? AND subscription_id IS NOT NULL", machineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
 		response.Error(c, 400, "设备未注册")
 		return nil, nil, "", err
 	}
@@ -214,14 +217,20 @@ func (h *ClientSyncHandler) validateAndGetUser(c *gin.Context, appKey, machineID
 	}
 
 	var subscription model.Subscription
-	if err := model.DB.First(&subscription, "id = ?", *device.SubscriptionID).Error; err != nil {
+	if device.Subscription != nil {
+		subscription = *device.Subscription
+	} else if err := model.DB.First(&subscription, "id = ? AND tenant_id = ?", *device.SubscriptionID, app.TenantID).Error; err != nil {
 		response.Error(c, 400, "订阅不存在")
 		return nil, nil, "", err
+	}
+	if subscription.AppID != app.ID || subscription.TenantID != app.TenantID {
+		response.Error(c, 400, "设备未绑定当前应用")
+		return nil, nil, "", fmt.Errorf("device app mismatch")
 	}
 
 	// 通过订阅找到客户
 	var customer model.Customer
-	if err := model.DB.First(&customer, "id = ?", subscription.CustomerID).Error; err != nil {
+	if err := model.DB.First(&customer, "id = ? AND tenant_id = ?", subscription.CustomerID, app.TenantID).Error; err != nil {
 		response.Error(c, 400, "客户不存在")
 		return nil, nil, "", err
 	}
@@ -441,8 +450,8 @@ func (h *ClientSyncHandler) AdminGetUserBackups(c *gin.Context) {
 	}
 
 	response.Success(c, gin.H{
-		"user_id":  userID,
-		"backups":  grouped,
+		"user_id": userID,
+		"backups": grouped,
 	})
 }
 

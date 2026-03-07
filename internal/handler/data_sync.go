@@ -33,26 +33,13 @@ func (h *DataSyncHandler) GetChanges(c *gin.Context) {
 	sinceStr := c.Query("since")
 	limitStr := c.DefaultQuery("limit", "100")
 
-	if appKey == "" || machineID == "" {
-		response.BadRequest(c, "缺少 app_key 或 machine_id")
-		return
-	}
-
-	// 验证应用和设备
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", appKey).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
-		return
-	}
-
-	var device model.Device
-	if err := model.DB.First(&device, "machine_id = ?", machineID).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
+	app, device, err := h.validateAppAndDevice(c, appKey, machineID)
+	if err != nil {
 		return
 	}
 
 	// 获取用户ID (通过授权或订阅)
-	userID := h.getUserID(&device)
+	userID := h.getUserID(device)
 	if userID == "" {
 		response.Error(c, 401, "无法确定用户")
 		return
@@ -104,20 +91,12 @@ func (h *DataSyncHandler) PushChanges(c *gin.Context) {
 		return
 	}
 
-	// 验证应用和设备
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", req.AppKey).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	app, device, err := h.validateAppAndDevice(c, req.AppKey, req.MachineID)
+	if err != nil {
 		return
 	}
 
-	var device model.Device
-	if err := model.DB.First(&device, "machine_id = ?", req.MachineID).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
-		return
-	}
-
-	userID := h.getUserID(&device)
+	userID := h.getUserID(device)
 	if userID == "" {
 		response.Error(c, 401, "无法确定用户")
 		return
@@ -205,24 +184,12 @@ func (h *DataSyncHandler) GetSyncStatus(c *gin.Context) {
 	appKey := c.Query("app_key")
 	machineID := c.Query("machine_id")
 
-	if appKey == "" || machineID == "" {
-		response.BadRequest(c, "缺少 app_key 或 machine_id")
+	app, device, err := h.validateAppAndDevice(c, appKey, machineID)
+	if err != nil {
 		return
 	}
 
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", appKey).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
-		return
-	}
-
-	var device model.Device
-	if err := model.DB.First(&device, "machine_id = ?", machineID).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
-		return
-	}
-
-	userID := h.getUserID(&device)
+	userID := h.getUserID(device)
 	if userID == "" {
 		response.Error(c, 401, "无法确定用户")
 		return
@@ -244,9 +211,9 @@ func (h *DataSyncHandler) GetSyncStatus(c *gin.Context) {
 	}
 
 	response.Success(c, gin.H{
-		"stats":          stats,
-		"last_sync":      lastSyncMap,
-		"server_time":    time.Now().Unix(),
+		"stats":       stats,
+		"last_sync":   lastSyncMap,
+		"server_time": time.Now().Unix(),
 	})
 }
 
@@ -339,10 +306,10 @@ func (h *DataSyncHandler) GetWorkflows(c *gin.Context) {
 // SaveWorkflow 保存工作流
 func (h *DataSyncHandler) SaveWorkflow(c *gin.Context) {
 	var req struct {
-		AppKey    string              `json:"app_key" binding:"required"`
-		MachineID string              `json:"machine_id" binding:"required"`
-		Workflow  model.UserWorkflow  `json:"workflow" binding:"required"`
-		Version   int64               `json:"version"`
+		AppKey    string             `json:"app_key" binding:"required"`
+		MachineID string             `json:"machine_id" binding:"required"`
+		Workflow  model.UserWorkflow `json:"workflow" binding:"required"`
+		Version   int64              `json:"version"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -636,9 +603,9 @@ func (h *DataSyncHandler) GetCommentScripts(c *gin.Context) {
 // SaveCommentScriptsBatch 批量保存评论话术
 func (h *DataSyncHandler) SaveCommentScriptsBatch(c *gin.Context) {
 	var req struct {
-		AppKey    string                      `json:"app_key" binding:"required"`
-		MachineID string                      `json:"machine_id" binding:"required"`
-		Scripts   []model.UserCommentScript   `json:"scripts" binding:"required"`
+		AppKey    string                    `json:"app_key" binding:"required"`
+		MachineID string                    `json:"machine_id" binding:"required"`
+		Scripts   []model.UserCommentScript `json:"scripts" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1038,28 +1005,46 @@ func (h *DataSyncHandler) getUserID(device *model.Device) string {
 }
 
 func (h *DataSyncHandler) validateAndGetUser(c *gin.Context, appKey, machineID string) (userID, appID string, err error) {
-	if appKey == "" || machineID == "" {
-		response.BadRequest(c, "缺少 app_key 或 machine_id")
-		return "", "", errors.New("missing params")
-	}
-
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", appKey).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	app, device, err := h.validateAppAndDevice(c, appKey, machineID)
+	if err != nil {
 		return "", "", err
 	}
 
-	var device model.Device
-	if err := model.DB.First(&device, "machine_id = ?", machineID).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
-		return "", "", err
-	}
-
-	userID = h.getUserID(&device)
+	userID = h.getUserID(device)
 	if userID == "" {
 		response.Error(c, 401, "无法确定用户")
 		return "", "", errors.New("user not found")
 	}
 
 	return userID, app.ID, nil
+}
+
+func (h *DataSyncHandler) validateAppAndDevice(c *gin.Context, appKey, machineID string) (*model.Application, *model.Device, error) {
+	if appKey == "" || machineID == "" {
+		response.BadRequest(c, "缺少 app_key 或 machine_id")
+		return nil, nil, errors.New("missing params")
+	}
+
+	var app model.Application
+	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
+		response.Error(c, 400, "无效的应用")
+		return nil, nil, err
+	}
+
+	var device model.Device
+	if err := model.DB.Preload("License").Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ?", machineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
+		response.Error(c, 401, "设备未授权")
+		return nil, nil, err
+	}
+
+	if (device.License == nil || device.License.AppID != app.ID) &&
+		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
+		response.Error(c, 401, "设备未绑定当前应用")
+		return nil, nil, errors.New("device app mismatch")
+	}
+
+	return &app, &device, nil
 }

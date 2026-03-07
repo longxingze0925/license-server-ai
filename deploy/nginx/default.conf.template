@@ -6,7 +6,7 @@ server {
     server_name _;
 
     # 上传文件大小限制（支持大文件上传）
-    client_max_body_size 500M;
+    client_max_body_size ${MAX_RELEASE_UPLOAD_MB}M;
 
     # 前端静态文件
     root /usr/share/nginx/html;

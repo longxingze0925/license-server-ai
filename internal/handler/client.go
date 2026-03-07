@@ -63,7 +63,7 @@ func (h *ClientHandler) Activate(c *gin.Context) {
 
 	// 检查设备是否在黑名单
 	var blacklist model.DeviceBlacklist
-	if err := model.DB.Where("machine_id = ? AND (app_id = ? OR app_id IS NULL)", req.MachineID, app.ID).First(&blacklist).Error; err == nil {
+	if err := model.DB.Where("tenant_id = ? AND machine_id = ? AND (app_id = ? OR app_id IS NULL)", app.TenantID, req.MachineID, app.ID).First(&blacklist).Error; err == nil {
 		response.Error(c, 403, "设备已被禁止使用")
 		return
 	}
@@ -128,11 +128,11 @@ func (h *ClientHandler) Activate(c *gin.Context) {
 
 	// 检查设备数量
 	var deviceCount int64
-	model.DB.Model(&model.Device{}).Where("license_id = ?", license.ID).Count(&deviceCount)
+	model.DB.Model(&model.Device{}).Where("tenant_id = ? AND license_id = ?", license.TenantID, license.ID).Count(&deviceCount)
 
 	// 检查该设备是否已绑定
 	var existingDevice model.Device
-	deviceExists := model.DB.Where("license_id = ? AND machine_id = ?", license.ID, req.MachineID).First(&existingDevice).Error == nil
+	deviceExists := model.DB.Where("tenant_id = ? AND license_id = ? AND machine_id = ?", license.TenantID, license.ID, req.MachineID).First(&existingDevice).Error == nil
 
 	if !deviceExists && int(deviceCount) >= license.MaxDevices {
 		response.Error(c, 403, "设备数量已达上限")
@@ -143,6 +143,10 @@ func (h *ClientHandler) Activate(c *gin.Context) {
 	var device model.Device
 	if deviceExists {
 		device = existingDevice
+		device.TenantID = license.TenantID
+		if license.CustomerID != nil {
+			device.CustomerID = *license.CustomerID
+		}
 		device.DeviceName = req.DeviceInfo.Name
 		device.Hostname = req.DeviceInfo.Hostname
 		device.OSType = req.DeviceInfo.OS
@@ -151,10 +155,19 @@ func (h *ClientHandler) Activate(c *gin.Context) {
 		device.IPAddress = c.ClientIP()
 		now := time.Now()
 		device.LastActiveAt = &now
-		model.DB.Save(&device)
+		if err := model.DB.Save(&device).Error; err != nil {
+			response.ServerError(c, "更新设备失败: "+err.Error())
+			return
+		}
 	} else {
 		now := time.Now()
+		customerID := ""
+		if license.CustomerID != nil {
+			customerID = *license.CustomerID
+		}
 		device = model.Device{
+			TenantID:     license.TenantID,
+			CustomerID:   customerID,
 			LicenseID:    &license.ID,
 			MachineID:    req.MachineID,
 			DeviceName:   req.DeviceInfo.Name,
@@ -166,13 +179,19 @@ func (h *ClientHandler) Activate(c *gin.Context) {
 			Status:       model.DeviceStatusActive,
 			LastActiveAt: &now,
 		}
-		model.DB.Create(&device)
+		if err := model.DB.Create(&device).Error; err != nil {
+			response.ServerError(c, "创建设备失败: "+err.Error())
+			return
+		}
 	}
 
 	// 更新授权验证时间
 	now := time.Now()
 	license.LastValidatedAt = &now
-	model.DB.Save(&license)
+	if err := model.DB.Save(&license).Error; err != nil {
+		response.ServerError(c, "更新授权状态失败: "+err.Error())
+		return
+	}
 
 	// 解析 features
 	var features []string
@@ -224,7 +243,10 @@ func (h *ClientHandler) Verify(c *gin.Context) {
 
 	// 查找设备
 	var device model.Device
-	if err := model.DB.Preload("License").Where("machine_id = ?", req.MachineID).First(&device).Error; err != nil {
+	if err := model.DB.Preload("License").
+		Where("machine_id = ? AND tenant_id = ? AND license_id IS NOT NULL", req.MachineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
 		response.Error(c, 404, "设备未绑定授权")
 		return
 	}
@@ -313,7 +335,7 @@ func (h *ClientHandler) Heartbeat(c *gin.Context) {
 
 	// 查找设备
 	var device model.Device
-	if err := model.DB.Preload("License").Where("machine_id = ?", req.MachineID).First(&device).Error; err != nil {
+	if err := model.DB.Preload("License").Where("machine_id = ? AND tenant_id = ?", req.MachineID, app.TenantID).Order("created_at DESC").First(&device).Error; err != nil {
 		response.Error(c, 404, "设备未绑定")
 		return
 	}
@@ -337,20 +359,27 @@ func (h *ClientHandler) Heartbeat(c *gin.Context) {
 	if req.AppVersion != "" {
 		device.AppVersion = req.AppVersion
 	}
-	model.DB.Save(&device)
+	if err := model.DB.Save(&device).Error; err != nil {
+		response.ServerError(c, "更新设备状态失败: "+err.Error())
+		return
+	}
 
 	// 记录心跳
-	licenseID := ""
-	if device.LicenseID != nil {
-		licenseID = *device.LicenseID
+	if device.LicenseID == nil || *device.LicenseID == "" {
+		response.Error(c, 400, "设备授权信息异常")
+		return
 	}
 	heartbeat := model.Heartbeat{
-		LicenseID:  licenseID,
+		TenantID:   device.TenantID,
+		LicenseID:  *device.LicenseID,
 		DeviceID:   device.ID,
 		IPAddress:  c.ClientIP(),
 		AppVersion: req.AppVersion,
 	}
-	model.DB.Create(&heartbeat)
+	if err := model.DB.Create(&heartbeat).Error; err != nil {
+		response.ServerError(c, "记录心跳失败: "+err.Error())
+		return
+	}
 
 	response.Success(c, gin.H{
 		"valid":          true,
@@ -378,7 +407,10 @@ func (h *ClientHandler) Deactivate(c *gin.Context) {
 
 	// 查找并删除设备
 	var device model.Device
-	if err := model.DB.Preload("License").Where("machine_id = ?", req.MachineID).First(&device).Error; err != nil {
+	if err := model.DB.Preload("License").
+		Where("machine_id = ? AND tenant_id = ? AND license_id IS NOT NULL", req.MachineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
 		response.Error(c, 404, "设备未绑定")
 		return
 	}
@@ -438,7 +470,10 @@ func (h *ClientHandler) DownloadScript(c *gin.Context) {
 
 	// 验证设备授权
 	var device model.Device
-	if err := model.DB.Preload("License").Where("machine_id = ?", machineID).First(&device).Error; err != nil {
+	if err := model.DB.Preload("License").
+		Where("machine_id = ? AND tenant_id = ? AND license_id IS NOT NULL", machineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
 		response.Error(c, 403, "设备未授权")
 		return
 	}
@@ -465,14 +500,18 @@ func (h *ClientHandler) DownloadScript(c *gin.Context) {
 // GetLatestRelease 获取最新版本
 func (h *ClientHandler) GetLatestRelease(c *gin.Context) {
 	appKey := c.Query("app_key")
-	if appKey == "" {
-		response.BadRequest(c, "缺少 app_key")
+	machineID := c.Query("machine_id")
+	if appKey == "" || machineID == "" {
+		response.BadRequest(c, "缺少 app_key 或 machine_id")
 		return
 	}
 
 	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", appKey).Error; err != nil {
+	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
 		response.Error(c, 400, "无效的应用")
+		return
+	}
+	if !validateClientDeviceForApp(c, &app, machineID) {
 		return
 	}
 
@@ -481,11 +520,16 @@ func (h *ClientHandler) GetLatestRelease(c *gin.Context) {
 		response.NotFound(c, "暂无发布版本")
 		return
 	}
+	downloadURL, err := buildClientDownloadURLWithToken(release.DownloadURL, app.ID, machineID, downloadTokenKindRelease)
+	if err != nil {
+		response.ServerError(c, "生成下载链接失败")
+		return
+	}
 
 	response.Success(c, gin.H{
 		"version":      release.Version,
 		"version_code": release.VersionCode,
-		"download_url": release.DownloadURL,
+		"download_url": downloadURL,
 		"changelog":    release.Changelog,
 		"file_size":    release.FileSize,
 		"file_hash":    release.FileHash,
@@ -568,7 +612,7 @@ func (h *ClientHandler) ClientLogin(c *gin.Context) {
 
 	// 检查设备是否在黑名单
 	var blacklist model.DeviceBlacklist
-	if err := model.DB.Where("machine_id = ? AND (app_id = ? OR app_id IS NULL)", req.MachineID, app.ID).First(&blacklist).Error; err == nil {
+	if err := model.DB.Where("tenant_id = ? AND machine_id = ? AND (app_id = ? OR app_id IS NULL)", app.TenantID, req.MachineID, app.ID).First(&blacklist).Error; err == nil {
 		response.Error(c, 403, "设备已被禁止使用")
 		return
 	}
@@ -590,11 +634,11 @@ func (h *ClientHandler) ClientLogin(c *gin.Context) {
 
 	// 检查设备数量
 	var deviceCount int64
-	model.DB.Model(&model.Device{}).Where("subscription_id = ?", subscription.ID).Count(&deviceCount)
+	model.DB.Model(&model.Device{}).Where("tenant_id = ? AND subscription_id = ?", app.TenantID, subscription.ID).Count(&deviceCount)
 
 	// 检查该设备是否已绑定
 	var existingDevice model.Device
-	deviceExists := model.DB.Where("subscription_id = ? AND machine_id = ?", subscription.ID, req.MachineID).First(&existingDevice).Error == nil
+	deviceExists := model.DB.Where("tenant_id = ? AND subscription_id = ? AND machine_id = ?", app.TenantID, subscription.ID, req.MachineID).First(&existingDevice).Error == nil
 
 	if !deviceExists && int(deviceCount) >= subscription.MaxDevices {
 		response.Error(c, 403, "设备数量已达上限")
@@ -761,7 +805,10 @@ func (h *ClientHandler) SubscriptionHeartbeat(c *gin.Context) {
 
 	// 查找设备（订阅模式）- 按 machine_id 查找最新的记录
 	var device model.Device
-	if err := model.DB.Preload("Subscription").Where("machine_id = ?", req.MachineID).Order("created_at DESC").First(&device).Error; err != nil {
+	if err := model.DB.Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ? AND subscription_id IS NOT NULL", req.MachineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
 		response.Error(c, 404, "设备未绑定")
 		return
 	}
@@ -822,7 +869,10 @@ func (h *ClientHandler) SubscriptionVerify(c *gin.Context) {
 
 	// 查找设备（订阅模式）- 按 machine_id 查找最新的记录
 	var device model.Device
-	if err := model.DB.Preload("Subscription").Where("machine_id = ?", req.MachineID).Order("created_at DESC").First(&device).Error; err != nil {
+	if err := model.DB.Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ? AND subscription_id IS NOT NULL", req.MachineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
 		response.Error(c, 404, "设备未绑定")
 		return
 	}

@@ -38,6 +38,13 @@ BACKEND_PORT="8080"
 FRONTEND_PORT="80"
 IMAGE_TAG="main"
 
+# 上传限制（MB）
+MAX_RELEASE_UPLOAD_MB="500"
+MAX_REQUEST_BODY_MB="1024"
+MULTIPART_MEMORY_MB="32"
+MAX_SCRIPT_UPLOAD_MB="20"
+MAX_SECURE_SCRIPT_UPLOAD_MB="20"
+
 ADMIN_EMAIL="admin@example.com"
 ADMIN_PASSWORD=""
 
@@ -76,6 +83,11 @@ SSL & 端口:
   --https-port <port>       HTTPS 端口（默认: 443）
   --backend-port <port>     后端端口（默认: 8080）
   --image-tag <tag>         镜像标签（默认: main）
+  --max-release-upload-mb <mb> 发布/热更新包上传上限（默认: 500）
+  --max-request-body-mb <mb>   全局请求体上限（默认: 1024）
+  --multipart-memory-mb <mb>   multipart 内存上限（默认: 32）
+  --max-script-upload-mb <mb>  普通脚本上传上限（默认: 20）
+  --max-secure-script-upload-mb <mb> 安全脚本上传上限（默认: 20）
   --cert <path>             自定义证书文件路径（custom 模式）
   --key <path>              自定义私钥文件路径（custom 模式）
 
@@ -126,6 +138,16 @@ parse_args() {
                 BACKEND_PORT="$2"; shift 2 ;;
             --image-tag)
                 IMAGE_TAG="$2"; shift 2 ;;
+            --max-release-upload-mb)
+                MAX_RELEASE_UPLOAD_MB="$2"; shift 2 ;;
+            --max-request-body-mb)
+                MAX_REQUEST_BODY_MB="$2"; shift 2 ;;
+            --multipart-memory-mb)
+                MULTIPART_MEMORY_MB="$2"; shift 2 ;;
+            --max-script-upload-mb)
+                MAX_SCRIPT_UPLOAD_MB="$2"; shift 2 ;;
+            --max-secure-script-upload-mb)
+                MAX_SECURE_SCRIPT_UPLOAD_MB="$2"; shift 2 ;;
             --admin-email)
                 ADMIN_EMAIL="$2"; shift 2 ;;
             --admin-password)
@@ -270,6 +292,15 @@ get_server_ip() {
     echo "$PUBLIC_IP"
 }
 
+validate_positive_int() {
+    local name="$1"
+    local value="$2"
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
+        log_error "${name} 必须是大于 0 的整数，当前值: ${value}"
+        exit 1
+    fi
+}
+
 get_env_value() {
     local key="$1"
     if [ ! -f ".env" ]; then
@@ -288,6 +319,11 @@ load_existing_secrets() {
     v=$(get_env_value "MYSQL_PASSWORD" || true); [ -n "$v" ] && MYSQL_PASSWORD="$v"
     v=$(get_env_value "REDIS_PASSWORD" || true); [ -n "$v" ] && REDIS_PASSWORD="$v"
     v=$(get_env_value "JWT_SECRET" || true); [ -n "$v" ] && JWT_SECRET="$v"
+    v=$(get_env_value "MAX_RELEASE_UPLOAD_MB" || true); [ -n "$v" ] && MAX_RELEASE_UPLOAD_MB="$v"
+    v=$(get_env_value "MAX_REQUEST_BODY_MB" || true); [ -n "$v" ] && MAX_REQUEST_BODY_MB="$v"
+    v=$(get_env_value "MULTIPART_MEMORY_MB" || true); [ -n "$v" ] && MULTIPART_MEMORY_MB="$v"
+    v=$(get_env_value "MAX_SCRIPT_UPLOAD_MB" || true); [ -n "$v" ] && MAX_SCRIPT_UPLOAD_MB="$v"
+    v=$(get_env_value "MAX_SECURE_SCRIPT_UPLOAD_MB" || true); [ -n "$v" ] && MAX_SECURE_SCRIPT_UPLOAD_MB="$v"
     return 0
 }
 
@@ -610,6 +646,11 @@ JWT_EXPIRE_HOURS=24
 # 安全配置
 SERVER_MODE=release
 TLS_ENABLED=$([ "$SSL_MODE" = "http" ] && echo false || echo true)
+MAX_RELEASE_UPLOAD_MB=${MAX_RELEASE_UPLOAD_MB}
+MAX_REQUEST_BODY_MB=${MAX_REQUEST_BODY_MB}
+MULTIPART_MEMORY_MB=${MULTIPART_MEMORY_MB}
+MAX_SCRIPT_UPLOAD_MB=${MAX_SCRIPT_UPLOAD_MB}
+MAX_SECURE_SCRIPT_UPLOAD_MB=${MAX_SECURE_SCRIPT_UPLOAD_MB}
 
 # 管理员配置
 ADMIN_EMAIL=${ADMIN_EMAIL}
@@ -721,6 +762,11 @@ security:
   csrf_token_expiry: 60
   csrf_cookie_name: "csrf_token"
   enable_security_headers: true
+  max_release_upload_mb: ${MAX_RELEASE_UPLOAD_MB}
+  max_request_body_mb: ${MAX_REQUEST_BODY_MB}
+  multipart_memory_mb: ${MULTIPART_MEMORY_MB}
+  max_script_upload_mb: ${MAX_SCRIPT_UPLOAD_MB}
+  max_secure_script_upload_mb: ${MAX_SECURE_SCRIPT_UPLOAD_MB}
   allowed_origins:
 ${origin_lines}
 EOF
@@ -979,6 +1025,7 @@ server {
 server {
     listen 443 ssl http2;
     server_name ${host_name};
+    client_max_body_size ${MAX_RELEASE_UPLOAD_MB}M;
 
     ssl_certificate ${SSL_CERT};
     ssl_certificate_key ${SSL_KEY};
@@ -1265,6 +1312,12 @@ main() {
         *)
             log_error "无效的 SSL 模式: $SSL_MODE"; exit 1 ;;
     esac
+
+    validate_positive_int "MAX_RELEASE_UPLOAD_MB" "$MAX_RELEASE_UPLOAD_MB"
+    validate_positive_int "MAX_REQUEST_BODY_MB" "$MAX_REQUEST_BODY_MB"
+    validate_positive_int "MULTIPART_MEMORY_MB" "$MULTIPART_MEMORY_MB"
+    validate_positive_int "MAX_SCRIPT_UPLOAD_MB" "$MAX_SCRIPT_UPLOAD_MB"
+    validate_positive_int "MAX_SECURE_SCRIPT_UPLOAD_MB" "$MAX_SECURE_SCRIPT_UPLOAD_MB"
 
     if [ "$SSL_MODE" = "http" ] && [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
         log_warning "HTTP 模式下无法启用 Nginx 反向代理，已忽略 --nginx-proxy"

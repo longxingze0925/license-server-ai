@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"license-server/internal/model"
+	"strconv"
 	"time"
 )
 
@@ -156,7 +157,7 @@ func (s *DataSyncService) getMaterialChanges(userID, appID string, since time.Ti
 		}
 		items = append(items, SyncItem{
 			DataType:  model.DataTypeMaterial,
-			DataKey:   string(rune(m.MaterialID)),
+			DataKey:   strconv.FormatInt(m.MaterialID, 10),
 			Action:    action,
 			Data:      m,
 			Version:   m.Version,
@@ -248,7 +249,7 @@ func (s *DataSyncService) getVoiceConfigChanges(userID, appID string, since time
 		}
 		items = append(items, SyncItem{
 			DataType:  model.DataTypeVoiceConfig,
-			DataKey:   string(rune(vc.VoiceID)),
+			DataKey:   strconv.FormatInt(vc.VoiceID, 10),
 			Action:    action,
 			Data:      vc,
 			Version:   vc.Version,
@@ -356,7 +357,7 @@ func (s *DataSyncService) pushWorkflow(userID, appID string, item PushItem) Sync
 	json.Unmarshal(item.Data, &workflow)
 
 	var existing model.UserWorkflow
-	err := model.DB.Where("workflow_id = ?", item.DataKey).First(&existing).Error
+	err := model.DB.Where("workflow_id = ? AND user_id = ? AND app_id = ?", item.DataKey, userID, appID).First(&existing).Error
 
 	if err != nil {
 		// 新建
@@ -404,7 +405,7 @@ func (s *DataSyncService) pushBatchTask(userID, appID string, item PushItem) Syn
 	json.Unmarshal(item.Data, &task)
 
 	var existing model.UserBatchTask
-	err := model.DB.Where("task_id = ?", item.DataKey).First(&existing).Error
+	err := model.DB.Where("task_id = ? AND user_id = ? AND app_id = ?", item.DataKey, userID, appID).First(&existing).Error
 
 	if err != nil {
 		if item.Action == "delete" {
@@ -458,7 +459,7 @@ func (s *DataSyncService) pushMaterial(userID, appID string, item PushItem) Sync
 	json.Unmarshal(item.Data, &material)
 
 	var existing model.UserMaterial
-	err := model.DB.Where("material_id = ?", material.MaterialID).First(&existing).Error
+	err := model.DB.Where("material_id = ? AND user_id = ? AND app_id = ?", material.MaterialID, userID, appID).First(&existing).Error
 
 	if err != nil {
 		if item.Action == "delete" {
@@ -503,7 +504,8 @@ func (s *DataSyncService) pushPost(userID, appID string, item PushItem) SyncResu
 	json.Unmarshal(item.Data, &post)
 
 	var existing model.UserPost
-	err := model.DB.Where("id = ? OR (post_link = ? AND group_name = ?)", item.DataKey, post.PostLink, post.GroupName).First(&existing).Error
+	err := model.DB.Where("user_id = ? AND app_id = ? AND (id = ? OR (post_link = ? AND group_name = ?))",
+		userID, appID, item.DataKey, post.PostLink, post.GroupName).First(&existing).Error
 
 	if err != nil {
 		if item.Action == "delete" {
@@ -543,7 +545,7 @@ func (s *DataSyncService) pushComment(userID, appID string, item PushItem) SyncR
 	json.Unmarshal(item.Data, &comment)
 
 	var existing model.UserComment
-	err := model.DB.Where("id = ?", item.DataKey).First(&existing).Error
+	err := model.DB.Where("id = ? AND user_id = ? AND app_id = ?", item.DataKey, userID, appID).First(&existing).Error
 
 	if err != nil {
 		if item.Action == "delete" {
@@ -579,7 +581,7 @@ func (s *DataSyncService) pushCommentScript(userID, appID string, item PushItem)
 	json.Unmarshal(item.Data, &script)
 
 	var existing model.UserCommentScript
-	err := model.DB.Where("id = ?", item.DataKey).First(&existing).Error
+	err := model.DB.Where("id = ? AND user_id = ? AND app_id = ?", item.DataKey, userID, appID).First(&existing).Error
 
 	if err != nil {
 		if item.Action == "delete" {
@@ -621,7 +623,7 @@ func (s *DataSyncService) pushVoiceConfig(userID, appID string, item PushItem) S
 	json.Unmarshal(item.Data, &voiceConfig)
 
 	var existing model.UserVoiceConfig
-	err := model.DB.Where("voice_id = ?", voiceConfig.VoiceID).First(&existing).Error
+	err := model.DB.Where("voice_id = ? AND user_id = ? AND app_id = ?", voiceConfig.VoiceID, userID, appID).First(&existing).Error
 
 	if err != nil {
 		if item.Action == "delete" {

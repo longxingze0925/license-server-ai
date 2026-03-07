@@ -1295,7 +1295,7 @@ func (c *Client) GetLicenseInfo() *LicenseInfo {
 
 // CheckUpdate 检查版本更新
 func (c *Client) CheckUpdate() (*UpdateInfo, error) {
-	url := c.serverURL + "/api/client/releases/latest?app_key=" + c.appKey
+	url := c.serverURL + "/api/client/releases/latest?app_key=" + c.appKey + "&machine_id=" + c.machineID
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, err

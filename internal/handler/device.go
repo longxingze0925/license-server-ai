@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"strconv"
@@ -16,6 +17,7 @@ func NewDeviceHandler() *DeviceHandler {
 
 // List 获取设备列表
 func (h *DeviceHandler) List(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	appID := c.Query("app_id")
@@ -31,6 +33,7 @@ func (h *DeviceHandler) List(c *gin.Context) {
 	}
 
 	query := model.DB.Model(&model.Device{}).
+		Where("devices.tenant_id = ?", tenantID).
 		Preload("License").
 		Preload("License.Application").
 		Preload("Subscription").
@@ -46,8 +49,8 @@ func (h *DeviceHandler) List(c *gin.Context) {
 	if appID != "" {
 		// 同时支持授权码模式和订阅模式的设备
 		query = query.Where(
-			"(license_id IN (SELECT id FROM licenses WHERE app_id = ?)) OR (subscription_id IN (SELECT id FROM subscriptions WHERE app_id = ?))",
-			appID, appID,
+			"(license_id IN (SELECT id FROM licenses WHERE app_id = ? AND tenant_id = ?)) OR (subscription_id IN (SELECT id FROM subscriptions WHERE app_id = ? AND tenant_id = ?))",
+			appID, tenantID, appID, tenantID,
 		)
 	}
 	if status != "" {
@@ -112,16 +115,18 @@ func (h *DeviceHandler) List(c *gin.Context) {
 // Get 获取设备详情
 func (h *DeviceHandler) Get(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var device model.Device
-	if err := model.DB.Preload("License").Preload("License.Application").Preload("Customer").First(&device, "id = ?", id).Error; err != nil {
+	if err := model.DB.Preload("License").Preload("License.Application").Preload("Customer").
+		First(&device, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "设备不存在")
 		return
 	}
 
 	// 获取最近心跳记录
 	var heartbeats []model.Heartbeat
-	model.DB.Where("device_id = ?", id).Order("created_at DESC").Limit(10).Find(&heartbeats)
+	model.DB.Where("device_id = ? AND tenant_id = ?", id, tenantID).Order("created_at DESC").Limit(10).Find(&heartbeats)
 
 	response.Success(c, gin.H{
 		"id":                device.ID,
@@ -149,9 +154,10 @@ func (h *DeviceHandler) Get(c *gin.Context) {
 // Unbind 解绑设备
 func (h *DeviceHandler) Unbind(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var device model.Device
-	if err := model.DB.First(&device, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&device, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "设备不存在")
 		return
 	}
@@ -164,9 +170,10 @@ func (h *DeviceHandler) Unbind(c *gin.Context) {
 // Blacklist 加入黑名单
 func (h *DeviceHandler) Blacklist(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var device model.Device
-	if err := model.DB.Preload("License").First(&device, "id = ?", id).Error; err != nil {
+	if err := model.DB.Preload("License").First(&device, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "设备不存在")
 		return
 	}
@@ -178,6 +185,7 @@ func (h *DeviceHandler) Blacklist(c *gin.Context) {
 
 	// 添加到黑名单
 	blacklist := model.DeviceBlacklist{
+		TenantID:  tenantID,
 		MachineID: device.MachineID,
 		Reason:    req.Reason,
 	}
@@ -194,18 +202,43 @@ func (h *DeviceHandler) Blacklist(c *gin.Context) {
 	response.SuccessWithMessage(c, "已加入黑名单", nil)
 }
 
+// Unblacklist 按设备 ID 从黑名单移除
+func (h *DeviceHandler) Unblacklist(c *gin.Context) {
+	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	var device model.Device
+	if err := model.DB.First(&device, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
+		response.NotFound(c, "设备不存在")
+		return
+	}
+
+	result := model.DB.Where("machine_id = ? AND tenant_id = ?", device.MachineID, tenantID).Delete(&model.DeviceBlacklist{})
+	if result.RowsAffected == 0 {
+		response.NotFound(c, "黑名单记录不存在")
+		return
+	}
+
+	if device.Status == model.DeviceStatusBlacklisted {
+		model.DB.Model(&device).Update("status", model.DeviceStatusActive)
+	}
+
+	response.SuccessWithMessage(c, "已从黑名单移除", nil)
+}
+
 // RemoveFromBlacklist 从黑名单移除
 func (h *DeviceHandler) RemoveFromBlacklist(c *gin.Context) {
 	machineID := c.Param("machine_id")
+	tenantID := middleware.GetTenantID(c)
 
-	result := model.DB.Where("machine_id = ?", machineID).Delete(&model.DeviceBlacklist{})
+	result := model.DB.Where("machine_id = ? AND tenant_id = ?", machineID, tenantID).Delete(&model.DeviceBlacklist{})
 	if result.RowsAffected == 0 {
 		response.NotFound(c, "黑名单记录不存在")
 		return
 	}
 
 	// 更新相关设备状态
-	model.DB.Model(&model.Device{}).Where("machine_id = ? AND status = ?", machineID, model.DeviceStatusBlacklisted).
+	model.DB.Model(&model.Device{}).Where("machine_id = ? AND tenant_id = ? AND status = ?", machineID, tenantID, model.DeviceStatusBlacklisted).
 		Update("status", model.DeviceStatusActive)
 
 	response.SuccessWithMessage(c, "已从黑名单移除", nil)
@@ -213,11 +246,12 @@ func (h *DeviceHandler) RemoveFromBlacklist(c *gin.Context) {
 
 // GetBlacklist 获取黑名单列表
 func (h *DeviceHandler) GetBlacklist(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	appID := c.Query("app_id")
 
-	query := model.DB.Model(&model.DeviceBlacklist{})
+	query := model.DB.Model(&model.DeviceBlacklist{}).Where("tenant_id = ?", tenantID)
 	if appID != "" {
 		query = query.Where("app_id = ?", appID)
 	}

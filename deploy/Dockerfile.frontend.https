@@ -29,19 +29,23 @@ FROM nginx:alpine
 # 安装 openssl 用于生成自签名证书
 RUN apk add --no-cache openssl
 
+# 默认上传限制（MB）
+ENV MAX_RELEASE_UPLOAD_MB=500
+
 # 创建 SSL 证书目录
 RUN mkdir -p /etc/nginx/ssl /var/www/certbot
 
-# 复制 nginx 配置（根据 SSL_MODE 环境变量选择）
-# 默认使用 HTTPS 配置
-COPY deploy/nginx/https.conf /etc/nginx/conf.d/default.conf
+# 复制 nginx 模板（根据环境变量渲染）
+COPY deploy/nginx/https.conf.template /opt/nginx-template/default.conf.template
 
 # 从构建阶段复制静态文件
 COPY --from=builder /build/dist /usr/share/nginx/html
 
-# 复制证书生成脚本
+# 复制启动脚本
 COPY deploy/scripts/generate-self-signed-cert.sh /docker-entrypoint.d/10-generate-cert.sh
+COPY deploy/scripts/render-nginx-config.sh /docker-entrypoint.d/20-render-nginx-config.sh
 RUN chmod +x /docker-entrypoint.d/10-generate-cert.sh
+RUN chmod +x /docker-entrypoint.d/20-render-nginx-config.sh
 
 # 暴露端口
 EXPOSE 80 443

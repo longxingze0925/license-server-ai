@@ -138,7 +138,8 @@ export const exportApi = {
   getFormats: () => request.get('/admin/export/formats'),
   licenses: (params?: any) => `/api/admin/export/licenses?${new URLSearchParams(params).toString()}`,
   devices: (params?: any) => `/api/admin/export/devices?${new URLSearchParams(params).toString()}`,
-  users: (params?: any) => `/api/admin/export/users?${new URLSearchParams(params).toString()}`,
+  customers: (params?: any) => `/api/admin/export/customers?${new URLSearchParams(params).toString()}`,
+  users: (params?: any) => `/api/admin/export/customers?${new URLSearchParams(params).toString()}`,
   auditLogs: (params?: any) => `/api/admin/export/audit-logs?${new URLSearchParams(params).toString()}`,
 };
 

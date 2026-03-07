@@ -2,7 +2,8 @@ package handler
 
 import (
 	"encoding/json"
-	"io"
+	"fmt"
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/crypto"
 	"license-server/internal/pkg/response"
@@ -42,25 +43,36 @@ type CreateSecureScriptRequest struct {
 // Create 创建安全脚本 (上传脚本内容)
 func (h *SecureScriptHandler) Create(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	// 验证应用
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", appID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
 
 	// 获取上传的文件
-	file, _, err := c.Request.FormFile("file")
+	file, header, err := c.Request.FormFile("file")
 	if err != nil {
 		response.BadRequest(c, "请上传脚本文件")
 		return
 	}
 	defer file.Close()
 
-	// 读取文件内容
-	content, err := io.ReadAll(file)
+	maxSecureScriptUploadBytes := getMaxSecureScriptUploadSizeBytes()
+	if header.Size > maxSecureScriptUploadBytes {
+		response.BadRequest(c, fmt.Sprintf("脚本文件过大，最大支持 %dMB", maxSecureScriptUploadBytes>>20))
+		return
+	}
+
+	// 读取文件内容（限制大小，防止内存占用过高）
+	content, err := readUploadedContentWithLimit(file, maxSecureScriptUploadBytes)
 	if err != nil {
+		if err == errUploadFileTooLarge {
+			response.BadRequest(c, fmt.Sprintf("脚本文件过大，最大支持 %dMB", maxSecureScriptUploadBytes>>20))
+			return
+		}
 		response.ServerError(c, "读取文件失败")
 		return
 	}
@@ -145,6 +157,13 @@ func (h *SecureScriptHandler) Create(c *gin.Context) {
 // List 获取安全脚本列表
 func (h *SecureScriptHandler) List(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
+		response.NotFound(c, "应用不存在")
+		return
+	}
 
 	var scripts []model.SecureScript
 	query := model.DB.Where("app_id = ?", appID).Order("created_at DESC")
@@ -202,9 +221,12 @@ func (h *SecureScriptHandler) List(c *gin.Context) {
 // Get 获取安全脚本详情
 func (h *SecureScriptHandler) Get(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.SecureScript
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = secure_scripts.app_id").
+		Where("secure_scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -241,9 +263,12 @@ func (h *SecureScriptHandler) Get(c *gin.Context) {
 // Update 更新安全脚本配置
 func (h *SecureScriptHandler) Update(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.SecureScript
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = secure_scripts.app_id").
+		Where("secure_scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -316,31 +341,44 @@ func (h *SecureScriptHandler) Update(c *gin.Context) {
 // UpdateContent 更新脚本内容 (新版本)
 func (h *SecureScriptHandler) UpdateContent(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.SecureScript
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = secure_scripts.app_id").
+		Where("secure_scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
 
 	// 获取应用
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", script.AppID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", script.AppID, tenantID).Error; err != nil {
 		response.ServerError(c, "应用不存在")
 		return
 	}
 
 	// 获取上传的文件
-	file, _, err := c.Request.FormFile("file")
+	file, header, err := c.Request.FormFile("file")
 	if err != nil {
 		response.BadRequest(c, "请上传脚本文件")
 		return
 	}
 	defer file.Close()
 
-	// 读取文件内容
-	content, err := io.ReadAll(file)
+	maxSecureScriptUploadBytes := getMaxSecureScriptUploadSizeBytes()
+	if header.Size > maxSecureScriptUploadBytes {
+		response.BadRequest(c, fmt.Sprintf("脚本文件过大，最大支持 %dMB", maxSecureScriptUploadBytes>>20))
+		return
+	}
+
+	// 读取文件内容（限制大小，防止内存占用过高）
+	content, err := readUploadedContentWithLimit(file, maxSecureScriptUploadBytes)
 	if err != nil {
+		if err == errUploadFileTooLarge {
+			response.BadRequest(c, fmt.Sprintf("脚本文件过大，最大支持 %dMB", maxSecureScriptUploadBytes>>20))
+			return
+		}
 		response.ServerError(c, "读取文件失败")
 		return
 	}
@@ -384,9 +422,12 @@ func (h *SecureScriptHandler) UpdateContent(c *gin.Context) {
 // Publish 发布安全脚本
 func (h *SecureScriptHandler) Publish(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.SecureScript
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = secure_scripts.app_id").
+		Where("secure_scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -407,9 +448,12 @@ func (h *SecureScriptHandler) Publish(c *gin.Context) {
 // Deprecate 废弃安全脚本
 func (h *SecureScriptHandler) Deprecate(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.SecureScript
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = secure_scripts.app_id").
+		Where("secure_scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -423,9 +467,12 @@ func (h *SecureScriptHandler) Deprecate(c *gin.Context) {
 // Delete 删除安全脚本
 func (h *SecureScriptHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var script model.SecureScript
-	if err := model.DB.First(&script, "id = ?", id).Error; err != nil {
+	if err := model.DB.Joins("JOIN applications ON applications.id = secure_scripts.app_id").
+		Where("secure_scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -442,6 +489,15 @@ func (h *SecureScriptHandler) Delete(c *gin.Context) {
 // GetDeliveries 获取脚本下发记录
 func (h *SecureScriptHandler) GetDeliveries(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	var script model.SecureScript
+	if err := model.DB.Joins("JOIN applications ON applications.id = secure_scripts.app_id").
+		Where("secure_scripts.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&script).Error; err != nil {
+		response.NotFound(c, "脚本不存在")
+		return
+	}
 
 	var deliveries []model.ScriptDelivery
 	query := model.DB.Where("script_id = ?", id).Order("created_at DESC")
@@ -490,6 +546,13 @@ func (h *SecureScriptHandler) GetDeliveries(c *gin.Context) {
 // GetStats 获取脚本统计
 func (h *SecureScriptHandler) GetStats(c *gin.Context) {
 	appID := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
+
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
+		response.NotFound(c, "应用不存在")
+		return
+	}
 
 	var stats struct {
 		TotalScripts    int64   `json:"total_scripts"`
@@ -574,14 +637,29 @@ func (h *SecureScriptHandler) ClientFetchScript(c *gin.Context) {
 
 	// 验证设备授权
 	var device model.Device
-	if err := model.DB.First(&device, "machine_id = ?", req.MachineID).Error; err != nil {
+	if err := model.DB.Preload("License").Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ?", req.MachineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
 		response.Error(c, 401, "设备未授权")
 		return
 	}
+	if (device.License == nil || device.License.AppID != app.ID) &&
+		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
+		response.Error(c, 401, "设备未绑定当前应用")
+		return
+	}
 
-	// 获取授权信息
-	var license model.License
-	model.DB.First(&license, "id = ?", device.LicenseID)
+	licenseID := ""
+	var features []string
+	if device.License != nil {
+		licenseID = device.License.ID
+		if device.License.Features != "" {
+			json.Unmarshal([]byte(device.License.Features), &features)
+		}
+	} else if device.Subscription != nil && device.Subscription.Features != "" {
+		json.Unmarshal([]byte(device.Subscription.Features), &features)
+	}
 
 	// 获取脚本
 	var script model.SecureScript
@@ -592,10 +670,6 @@ func (h *SecureScriptHandler) ClientFetchScript(c *gin.Context) {
 	}
 
 	// 检查设备权限
-	var features []string
-	if license.Features != "" {
-		json.Unmarshal([]byte(license.Features), &features)
-	}
 	if err := h.service.CheckDevicePermission(&script, req.MachineID, features); err != nil {
 		response.Error(c, 403, err.Error())
 		return
@@ -623,7 +697,7 @@ func (h *SecureScriptHandler) ClientFetchScript(c *gin.Context) {
 		script.ID,
 		device.ID,
 		req.MachineID,
-		license.ID,
+		licenseID,
 		keyHint,
 		time.Unix(pkg.ExpiresAt, 0),
 		c.ClientIP(),
@@ -652,14 +726,36 @@ func (h *SecureScriptHandler) ClientReportExecution(c *gin.Context) {
 
 	// 验证应用
 	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", req.AppKey).Error; err != nil {
+	if err := model.DB.First(&app, "app_key = ? AND status = ?", req.AppKey, model.AppStatusActive).Error; err != nil {
 		response.Error(c, 400, "无效的应用")
+		return
+	}
+
+	// 验证脚本归属应用
+	var script model.SecureScript
+	if err := model.DB.First(&script, "id = ? AND app_id = ?", req.ScriptID, app.ID).Error; err != nil {
+		response.NotFound(c, "脚本不存在")
+		return
+	}
+
+	// 验证设备归属应用
+	var device model.Device
+	if err := model.DB.Preload("License").Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ?", req.MachineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
+		response.Error(c, 401, "设备未授权")
+		return
+	}
+	if (device.License == nil || device.License.AppID != app.ID) &&
+		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
+		response.Error(c, 401, "设备未绑定当前应用")
 		return
 	}
 
 	// 查找下发记录
 	var delivery model.ScriptDelivery
-	query := model.DB.Where("script_id = ? AND machine_id = ?", req.ScriptID, req.MachineID)
+	query := model.DB.Where("script_id = ? AND machine_id = ?", script.ID, req.MachineID)
 	if req.DeliveryID != "" {
 		query = query.Where("id = ?", req.DeliveryID)
 	}

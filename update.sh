@@ -37,6 +37,20 @@ else
     COMPOSE_FILE="docker-compose.yml"
 fi
 
+# 尝试从后端配置读取上传限制，确保前端 Nginx 与后端一致
+sync_upload_limit_from_config() {
+    if [ ! -f "config.docker.yaml" ]; then
+        return 0
+    fi
+
+    local limit_mb
+    limit_mb=$(awk -F: '/^[[:space:]]*max_release_upload_mb[[:space:]]*:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' config.docker.yaml)
+    if [[ "$limit_mb" =~ ^[0-9]+$ ]] && [ "$limit_mb" -gt 0 ]; then
+        export MAX_RELEASE_UPLOAD_MB="$limit_mb"
+        log_info "已同步上传限制: ${MAX_RELEASE_UPLOAD_MB}MB"
+    fi
+}
+
 compose_cmd() {
     if [ -n "$IMAGE_TAG_OVERRIDE" ]; then
         IMAGE_TAG="$IMAGE_TAG_OVERRIDE" docker compose -f "$COMPOSE_FILE" "$@"
@@ -177,6 +191,7 @@ main() {
     echo "=========================================="
     echo ""
 
+    sync_upload_limit_from_config
     show_current_version
     echo ""
 

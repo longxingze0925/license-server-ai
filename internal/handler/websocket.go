@@ -2,6 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"license-server/internal/config"
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/crypto"
 	"license-server/internal/pkg/response"
@@ -9,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,27 +23,48 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // 生产环境应该检查 Origin
+		return isWebSocketOriginAllowed(r.Header.Get("Origin"))
 	},
+}
+
+func isWebSocketOriginAllowed(origin string) bool {
+	// 非浏览器客户端通常不带 Origin，允许通过
+	if origin == "" {
+		return true
+	}
+
+	cfg := config.Get()
+	if cfg == nil {
+		return false
+	}
+
+	normalizedOrigin := strings.TrimRight(strings.ToLower(strings.TrimSpace(origin)), "/")
+	for _, allowed := range cfg.Security.AllowedOrigins {
+		normalizedAllowed := strings.TrimRight(strings.ToLower(strings.TrimSpace(allowed)), "/")
+		if normalizedAllowed == "*" || normalizedAllowed == normalizedOrigin {
+			return true
+		}
+	}
+	return false
 }
 
 // DeviceClient 设备客户端连接
 type DeviceClient struct {
-	conn      *websocket.Conn
-	send      chan []byte
-	appID     string
-	deviceID  string
-	machineID string
-	sessionID string
+	conn        *websocket.Conn
+	send        chan []byte
+	appID       string
+	deviceID    string
+	machineID   string
+	sessionID   string
 	connectedAt time.Time
 	lastPingAt  time.Time
-	mu        sync.Mutex
+	mu          sync.Mutex
 }
 
 // WebSocketHub 管理所有 WebSocket 连接
 type WebSocketHub struct {
 	// 按应用ID分组的客户端
-	clients    map[string]map[string]*DeviceClient // appID -> machineID -> client
+	clients map[string]map[string]*DeviceClient // appID -> machineID -> client
 	// 按会话ID索引
 	sessions   map[string]*DeviceClient // sessionID -> client
 	register   chan *DeviceClient
@@ -273,6 +297,11 @@ func (h *WebSocketHandler) HandleWebSocket(c *gin.Context) {
 		conn.Close()
 		return
 	}
+	if authPayload.AppKey == "" || authPayload.MachineID == "" {
+		conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"缺少认证参数"}`)})
+		conn.Close()
+		return
+	}
 
 	// 验证应用
 	var app model.Application
@@ -282,10 +311,29 @@ func (h *WebSocketHandler) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
+	// 可选 Token 验证（用于额外校验）
+	if authPayload.Token != "" {
+		claims, err := crypto.ParseToken(authPayload.Token, config.Get().JWT.Secret)
+		if err != nil || claims.TenantID != app.TenantID {
+			conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"Token 无效"}`)})
+			conn.Close()
+			return
+		}
+	}
+
 	// 验证设备
 	var device model.Device
-	if err := model.DB.First(&device, "machine_id = ?", authPayload.MachineID).Error; err != nil {
+	if err := model.DB.Preload("License").Preload("Subscription").
+		Where("machine_id = ? AND tenant_id = ?", authPayload.MachineID, app.TenantID).
+		Order("created_at DESC").
+		First(&device).Error; err != nil {
 		conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"设备未授权"}`)})
+		conn.Close()
+		return
+	}
+	if (device.License == nil || device.License.AppID != app.ID) &&
+		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
+		conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"设备未绑定当前应用"}`)})
 		conn.Close()
 		return
 	}
@@ -448,12 +496,12 @@ func (h *WebSocketHandler) handleInstructionResult(client *DeviceClient, msg *WS
 // handleScriptResult 处理脚本执行结果
 func (h *WebSocketHandler) handleScriptResult(client *DeviceClient, msg *WSMessage) {
 	var result struct {
-		ScriptID     string `json:"script_id"`
-		DeliveryID   string `json:"delivery_id"`
-		Status       string `json:"status"`
-		Result       string `json:"result"`
-		Error        string `json:"error"`
-		Duration     int    `json:"duration"`
+		ScriptID   string `json:"script_id"`
+		DeliveryID string `json:"delivery_id"`
+		Status     string `json:"status"`
+		Result     string `json:"result"`
+		Error      string `json:"error"`
+		Duration   int    `json:"duration"`
 	}
 
 	if err := json.Unmarshal(msg.Payload, &result); err != nil {
@@ -475,6 +523,8 @@ func (h *WebSocketHandler) handleStatusReport(client *DeviceClient, msg *WSMessa
 
 // SendInstruction 发送实时指令
 func (h *WebSocketHandler) SendInstruction(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
+
 	var req struct {
 		AppID     string `json:"app_id" binding:"required"`
 		MachineID string `json:"machine_id"` // 空表示广播
@@ -490,7 +540,7 @@ func (h *WebSocketHandler) SendInstruction(c *gin.Context) {
 
 	// 验证应用
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", req.AppID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", req.AppID, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
@@ -574,7 +624,14 @@ func (h *WebSocketHandler) SendInstruction(c *gin.Context) {
 
 // GetOnlineDevices 获取在线设备列表
 func (h *WebSocketHandler) GetOnlineDevices(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
 	appID := c.Param("id")
+
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
+		response.NotFound(c, "应用不存在")
+		return
+	}
 
 	devices := hub.GetOnlineDevices(appID)
 
@@ -582,9 +639,9 @@ func (h *WebSocketHandler) GetOnlineDevices(c *gin.Context) {
 	var result []gin.H
 	for _, machineID := range devices {
 		var device model.Device
-		if err := model.DB.First(&device, "machine_id = ?", machineID).Error; err == nil {
+		if err := model.DB.First(&device, "machine_id = ? AND tenant_id = ?", machineID, tenantID).Error; err == nil {
 			var conn model.DeviceConnection
-			model.DB.Where("machine_id = ? AND status = ?", machineID, "connected").
+			model.DB.Where("machine_id = ? AND app_id = ? AND status = ?", machineID, appID, "connected").
 				Order("connected_at DESC").First(&conn)
 
 			result = append(result, gin.H{
@@ -607,10 +664,14 @@ func (h *WebSocketHandler) GetOnlineDevices(c *gin.Context) {
 
 // GetInstructionStatus 获取指令状态
 func (h *WebSocketHandler) GetInstructionStatus(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var instruction model.RealtimeInstruction
-	if err := model.DB.First(&instruction, "id = ?", id).Error; err != nil {
+	if err := model.DB.Model(&model.RealtimeInstruction{}).
+		Joins("JOIN applications ON applications.id = realtime_instructions.app_id").
+		Where("realtime_instructions.id = ? AND applications.tenant_id = ?", id, tenantID).
+		First(&instruction).Error; err != nil {
 		response.NotFound(c, "指令不存在")
 		return
 	}
@@ -630,13 +691,17 @@ func (h *WebSocketHandler) GetInstructionStatus(c *gin.Context) {
 
 // ListInstructions 获取指令列表
 func (h *WebSocketHandler) ListInstructions(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
 	appID := c.Query("app_id")
 
 	var instructions []model.RealtimeInstruction
-	query := model.DB.Order("created_at DESC")
+	query := model.DB.Model(&model.RealtimeInstruction{}).
+		Joins("JOIN applications ON applications.id = realtime_instructions.app_id").
+		Where("applications.tenant_id = ?", tenantID).
+		Order("realtime_instructions.created_at DESC")
 
 	if appID != "" {
-		query = query.Where("app_id = ?", appID)
+		query = query.Where("realtime_instructions.app_id = ?", appID)
 	}
 
 	// 分页
@@ -651,7 +716,7 @@ func (h *WebSocketHandler) ListInstructions(c *gin.Context) {
 	offset := (page - 1) * pageSize
 
 	var total int64
-	query.Model(&model.RealtimeInstruction{}).Count(&total)
+	query.Count(&total)
 	query.Offset(offset).Limit(pageSize).Find(&instructions)
 
 	var result []gin.H
@@ -679,4 +744,3 @@ func (h *WebSocketHandler) ListInstructions(c *gin.Context) {
 		"page_size": pageSize,
 	})
 }
-

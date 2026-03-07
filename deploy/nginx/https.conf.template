@@ -1,10 +1,32 @@
-# License Server Nginx 配置（仅 HTTPS，无 HTTP 重定向）
-# 适用于纯 HTTPS 部署或使用自签名证书
+# License Server Nginx HTTPS 配置
+# 支持 Let's Encrypt 证书和自签名证书
 
+# HTTP 重定向到 HTTPS
+server {
+    listen 80;
+    server_name _;
+
+    # 上传文件大小限制（支持大文件上传）
+    client_max_body_size ${MAX_RELEASE_UPLOAD_MB}M;
+
+    # Let's Encrypt 验证路径
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    # 其他请求重定向到 HTTPS
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS 服务
 server {
     listen 443 ssl http2;
     server_name _;
-    client_max_body_size 500M;
+
+    # 上传文件大小限制（支持大文件上传）
+    client_max_body_size ${MAX_RELEASE_UPLOAD_MB}M;
 
     # SSL 证书配置
     ssl_certificate /etc/nginx/ssl/server.crt;
@@ -19,6 +41,10 @@ server {
     ssl_session_timeout 1d;
     ssl_session_cache shared:SSL:50m;
     ssl_session_tickets off;
+
+    # OCSP Stapling（仅对 Let's Encrypt 证书有效）
+    # ssl_stapling on;
+    # ssl_stapling_verify on;
 
     # 前端静态文件
     root /usr/share/nginx/html;
@@ -65,4 +91,5 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 }

@@ -13,6 +13,9 @@ func SetupRouter(r *gin.Engine) {
 	cfg := config.Get()
 
 	// 全局中间件
+	if cfg.Security.MaxRequestBodyMB > 0 {
+		r.Use(middleware.RequestBodyLimitMiddleware(int64(cfg.Security.MaxRequestBodyMB) << 20))
+	}
 	r.Use(middleware.CORSMiddleware())
 	r.Use(middleware.LoggerMiddleware())
 	r.Use(gin.Recovery())
@@ -68,8 +71,8 @@ func SetupRouter(r *gin.Engine) {
 	auth := api.Group("/auth")
 	auth.Use(middleware.RateLimitMiddleware(authLimiter))
 	{
-		auth.POST("/register", authHandler.Register)       // 注册新租户
-		auth.POST("/login", authHandler.Login)             // 团队成员登录
+		auth.POST("/register", authHandler.Register)                // 注册新租户
+		auth.POST("/login", authHandler.Login)                      // 团队成员登录
 		auth.POST("/accept-invite", teamMemberHandler.AcceptInvite) // 接受邀请
 	}
 
@@ -243,22 +246,22 @@ func SetupRouter(r *gin.Engine) {
 			apps.POST("/:id/regenerate-keys", middleware.PermissionMiddleware("app:update"), appHandler.RegenerateKeys)
 
 			// 应用脚本
-			apps.POST("/:id/scripts", scriptHandler.Upload)
+			apps.POST("/:id/scripts", middleware.PermissionMiddleware("app:update"), scriptHandler.Upload)
 			apps.GET("/:id/scripts", scriptHandler.List)
 
 			// 应用版本
-			apps.POST("/:id/releases", releaseHandler.Create)
-			apps.POST("/:id/releases/upload", releaseHandler.Upload)
+			apps.POST("/:id/releases", middleware.PermissionMiddleware("app:update"), releaseHandler.Create)
+			apps.POST("/:id/releases/upload", middleware.PermissionMiddleware("app:update"), releaseHandler.Upload)
 			apps.GET("/:id/releases", releaseHandler.List)
 
 			// 热更新管理
-			apps.POST("/:id/hotupdate", hotUpdateHandler.Create)
-			apps.POST("/:id/hotupdate/:hotupdate_id/upload", hotUpdateHandler.Upload)
+			apps.POST("/:id/hotupdate", middleware.PermissionMiddleware("app:update"), hotUpdateHandler.Create)
+			apps.POST("/:id/hotupdate/:hotupdate_id/upload", middleware.PermissionMiddleware("app:update"), hotUpdateHandler.Upload)
 			apps.GET("/:id/hotupdate", hotUpdateHandler.List)
 			apps.GET("/:id/hotupdate/stats", hotUpdateHandler.GetStats)
 
 			// 安全脚本管理
-			apps.POST("/:id/secure-scripts", secureScriptHandler.Create)
+			apps.POST("/:id/secure-scripts", middleware.PermissionMiddleware("app:update"), secureScriptHandler.Create)
 			apps.GET("/:id/secure-scripts", secureScriptHandler.List)
 			apps.GET("/:id/secure-scripts/stats", secureScriptHandler.GetStats)
 
@@ -270,8 +273,8 @@ func SetupRouter(r *gin.Engine) {
 		scripts := admin.Group("/scripts")
 		{
 			scripts.GET("/:id", scriptHandler.Get)
-			scripts.PUT("/:id", scriptHandler.Update)
-			scripts.DELETE("/:id", scriptHandler.Delete)
+			scripts.PUT("/:id", middleware.PermissionMiddleware("app:update"), scriptHandler.Update)
+			scripts.DELETE("/:id", middleware.PermissionMiddleware("app:delete"), scriptHandler.Delete)
 			scripts.GET("/:id/download", scriptHandler.Download)
 		}
 
@@ -279,21 +282,21 @@ func SetupRouter(r *gin.Engine) {
 		releases := admin.Group("/releases")
 		{
 			releases.GET("/:id", releaseHandler.Get)
-			releases.PUT("/:id", releaseHandler.Update)
-			releases.POST("/:id/publish", releaseHandler.Publish)
-			releases.POST("/:id/deprecate", releaseHandler.Deprecate)
-			releases.DELETE("/:id", releaseHandler.Delete)
+			releases.PUT("/:id", middleware.PermissionMiddleware("app:update"), releaseHandler.Update)
+			releases.POST("/:id/publish", middleware.PermissionMiddleware("app:update"), releaseHandler.Publish)
+			releases.POST("/:id/deprecate", middleware.PermissionMiddleware("app:update"), releaseHandler.Deprecate)
+			releases.DELETE("/:id", middleware.PermissionMiddleware("app:delete"), releaseHandler.Delete)
 		}
 
 		// 热更新管理
 		hotupdate := admin.Group("/hotupdate")
 		{
 			hotupdate.GET("/:id", hotUpdateHandler.Get)
-			hotupdate.PUT("/:id", hotUpdateHandler.Update)
-			hotupdate.POST("/:id/publish", hotUpdateHandler.Publish)
-			hotupdate.POST("/:id/deprecate", hotUpdateHandler.Deprecate)
-			hotupdate.POST("/:id/rollback", hotUpdateHandler.Rollback)
-			hotupdate.DELETE("/:id", hotUpdateHandler.Delete)
+			hotupdate.PUT("/:id", middleware.PermissionMiddleware("app:update"), hotUpdateHandler.Update)
+			hotupdate.POST("/:id/publish", middleware.PermissionMiddleware("app:update"), hotUpdateHandler.Publish)
+			hotupdate.POST("/:id/deprecate", middleware.PermissionMiddleware("app:update"), hotUpdateHandler.Deprecate)
+			hotupdate.POST("/:id/rollback", middleware.PermissionMiddleware("app:update"), hotUpdateHandler.Rollback)
+			hotupdate.DELETE("/:id", middleware.PermissionMiddleware("app:delete"), hotUpdateHandler.Delete)
 			hotupdate.GET("/:id/logs", hotUpdateHandler.GetLogs)
 		}
 
@@ -301,18 +304,18 @@ func SetupRouter(r *gin.Engine) {
 		secureScripts := admin.Group("/secure-scripts")
 		{
 			secureScripts.GET("/:id", secureScriptHandler.Get)
-			secureScripts.PUT("/:id", secureScriptHandler.Update)
-			secureScripts.POST("/:id/content", secureScriptHandler.UpdateContent)
-			secureScripts.POST("/:id/publish", secureScriptHandler.Publish)
-			secureScripts.POST("/:id/deprecate", secureScriptHandler.Deprecate)
-			secureScripts.DELETE("/:id", secureScriptHandler.Delete)
+			secureScripts.PUT("/:id", middleware.PermissionMiddleware("app:update"), secureScriptHandler.Update)
+			secureScripts.POST("/:id/content", middleware.PermissionMiddleware("app:update"), secureScriptHandler.UpdateContent)
+			secureScripts.POST("/:id/publish", middleware.PermissionMiddleware("app:update"), secureScriptHandler.Publish)
+			secureScripts.POST("/:id/deprecate", middleware.PermissionMiddleware("app:update"), secureScriptHandler.Deprecate)
+			secureScripts.DELETE("/:id", middleware.PermissionMiddleware("app:delete"), secureScriptHandler.Delete)
 			secureScripts.GET("/:id/deliveries", secureScriptHandler.GetDeliveries)
 		}
 
 		// 实时指令管理
 		instructions := admin.Group("/instructions")
 		{
-			instructions.POST("/send", wsHandler.SendInstruction)
+			instructions.POST("/send", middleware.PermissionMiddleware("app:update"), wsHandler.SendInstruction)
 			instructions.GET("", wsHandler.ListInstructions)
 			instructions.GET("/:id", wsHandler.GetInstructionStatus)
 		}
@@ -352,6 +355,7 @@ func SetupRouter(r *gin.Engine) {
 			devices.GET("/:id", deviceHandler.Get)
 			devices.DELETE("/:id", middleware.PermissionMiddleware("device:delete"), deviceHandler.Unbind)
 			devices.POST("/:id/blacklist", middleware.PermissionMiddleware("device:update"), deviceHandler.Blacklist)
+			devices.POST("/:id/unblacklist", middleware.PermissionMiddleware("device:update"), deviceHandler.Unblacklist)
 		}
 
 		// 黑名单管理
@@ -387,6 +391,7 @@ func SetupRouter(r *gin.Engine) {
 			export.GET("/licenses", exportHandler.ExportLicenses)
 			export.GET("/devices", exportHandler.ExportDevices)
 			export.GET("/customers", exportHandler.ExportCustomers)
+			export.GET("/users", exportHandler.ExportCustomers) // 兼容旧前端路径
 			export.GET("/audit-logs", exportHandler.ExportAuditLogs)
 		}
 	}

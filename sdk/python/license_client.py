@@ -816,7 +816,10 @@ class LicenseClient:
     def check_update(self) -> Optional[Dict]:
         """检查版本更新"""
         try:
-            result = self._request('GET', '/releases/latest', {"app_key": self.app_key})
+            result = self._request('GET', '/releases/latest', {
+                "app_key": self.app_key,
+                "machine_id": self.machine_id
+            })
             return result
         except LicenseError:
             return None
