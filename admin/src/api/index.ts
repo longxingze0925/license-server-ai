@@ -1,4 +1,4 @@
-import request from './request';
+import request, { buildUploadConfig } from './request';
 
 // 认证
 export const authApi = {
@@ -52,11 +52,13 @@ export const appApi = {
   regenerateKeys: (id: string) => request.post(`/admin/apps/${id}/regenerate-keys`),
   // 脚本
   getScripts: (appId: string) => request.get(`/admin/apps/${appId}/scripts`),
-  uploadScript: (appId: string, formData: FormData) => request.post(`/admin/apps/${appId}/scripts`, formData),
+  uploadScript: (appId: string, formData: FormData, onProgress?: (percent: number) => void) =>
+    request.post(`/admin/apps/${appId}/scripts`, formData, buildUploadConfig(onProgress)),
   deleteScript: (id: string) => request.delete(`/admin/scripts/${id}`),
   // 版本
   getReleases: (appId: string) => request.get(`/admin/apps/${appId}/releases`),
-  uploadRelease: (appId: string, formData: FormData) => request.post(`/admin/apps/${appId}/releases/upload`, formData),
+  uploadRelease: (appId: string, formData: FormData, onProgress?: (percent: number) => void) =>
+    request.post(`/admin/apps/${appId}/releases/upload`, formData, buildUploadConfig(onProgress)),
   publishRelease: (id: string) => request.post(`/admin/releases/${id}/publish`),
   deleteRelease: (id: string) => request.delete(`/admin/releases/${id}`),
 };
@@ -144,7 +146,8 @@ export const exportApi = {
 export const hotUpdateApi = {
   list: (appId: string, params?: any) => request.get(`/admin/apps/${appId}/hotupdate`, { params }),
   get: (id: string) => request.get(`/admin/hotupdate/${id}`),
-  create: (appId: string, formData: FormData) => request.post(`/admin/apps/${appId}/hotupdate`, formData),
+  create: (appId: string, formData: FormData, onProgress?: (percent: number) => void) =>
+    request.post(`/admin/apps/${appId}/hotupdate`, formData, buildUploadConfig(onProgress)),
   update: (id: string, data: any) => request.put(`/admin/hotupdate/${id}`, data),
   delete: (id: string) => request.delete(`/admin/hotupdate/${id}`),
   publish: (id: string) => request.post(`/admin/hotupdate/${id}/publish`),

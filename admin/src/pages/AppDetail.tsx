@@ -22,6 +22,8 @@ const AppDetail: React.FC = () => {
   const [versionModalVisible, setVersionModalVisible] = useState(false);
   const [versionForm] = Form.useForm();
   const [versionFileList, setVersionFileList] = useState<any[]>([]);
+  const [creatingVersion, setCreatingVersion] = useState(false);
+  const [versionUploadPercent, setVersionUploadPercent] = useState(0);
 
   // 安全脚本相关
   const [scripts, setScripts] = useState<any[]>([]);
@@ -99,12 +101,19 @@ const AppDetail: React.FC = () => {
   };
 
   const handleCreateVersion = async () => {
+    if (creatingVersion) {
+      return;
+    }
+
     try {
       const values = await versionForm.validateFields();
       if (versionFileList.length === 0) {
         message.error('请选择更新包文件');
         return;
       }
+      setCreatingVersion(true);
+      setVersionUploadPercent(0);
+
       const formData = new FormData();
       formData.append('file', versionFileList[0].originFileObj);
       formData.append('version', values.version);
@@ -119,7 +128,10 @@ const AppDetail: React.FC = () => {
         formData.append('min_app_version', values.min_app_version);
       }
 
-      await hotUpdateApi.create(id!, formData);
+      await hotUpdateApi.create(id!, formData, (percent) => {
+        setVersionUploadPercent(percent);
+      });
+      setVersionUploadPercent(100);
       message.success('创建成功');
       setVersionModalVisible(false);
       versionForm.resetFields();
@@ -127,6 +139,8 @@ const AppDetail: React.FC = () => {
       fetchVersions();
     } catch (error) {
       console.error(error);
+    } finally {
+      setCreatingVersion(false);
     }
   };
 
@@ -349,7 +363,7 @@ const AppDetail: React.FC = () => {
       children: (
         <Card
           title="版本列表"
-          extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => { versionForm.resetFields(); setVersionFileList([]); setVersionModalVisible(true); }}>发布新版本</Button>}
+          extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => { versionForm.resetFields(); setVersionFileList([]); setVersionUploadPercent(0); setVersionModalVisible(true); }}>发布新版本</Button>}
         >
           <Table
             loading={versionLoading}
@@ -474,6 +488,12 @@ const AppDetail: React.FC = () => {
         open={versionModalVisible}
         onOk={handleCreateVersion}
         onCancel={() => setVersionModalVisible(false)}
+        okText={creatingVersion ? '上传中...' : '确定'}
+        okButtonProps={{ loading: creatingVersion }}
+        cancelButtonProps={{ disabled: creatingVersion }}
+        maskClosable={!creatingVersion}
+        closable={!creatingVersion}
+        keyboard={!creatingVersion}
         width={600}
       >
         <Form form={versionForm} layout="vertical">
@@ -518,12 +538,18 @@ const AppDetail: React.FC = () => {
             <Upload
               fileList={versionFileList}
               beforeUpload={() => false}
+              disabled={creatingVersion}
               onChange={({ fileList }) => setVersionFileList(fileList)}
               maxCount={1}
             >
-              <Button icon={<UploadOutlined />}>选择文件</Button>
+              <Button icon={<UploadOutlined />} disabled={creatingVersion}>选择文件</Button>
             </Upload>
           </Form.Item>
+          {(creatingVersion || versionUploadPercent > 0) && (
+            <Form.Item label="上传进度">
+              <Progress percent={versionUploadPercent} status={creatingVersion ? 'active' : 'success'} />
+            </Form.Item>
+          )}
         </Form>
       </Modal>
 

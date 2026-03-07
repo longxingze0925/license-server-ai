@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { type AxiosProgressEvent } from 'axios';
 import { message } from 'antd';
 
 // 支持环境变量配置 API 地址
@@ -20,6 +20,18 @@ const getBaseURL = () => {
 const request = axios.create({
   baseURL: getBaseURL(),
   timeout: 30000,
+});
+
+export const UPLOAD_TIMEOUT = 10 * 60 * 1000;
+
+export const buildUploadConfig = (onProgress?: (percent: number) => void) => ({
+  timeout: UPLOAD_TIMEOUT,
+  onUploadProgress: (event: AxiosProgressEvent) => {
+    if (!onProgress || !event.total) {
+      return;
+    }
+    onProgress(Math.round((event.loaded / event.total) * 100));
+  },
 });
 
 // 请求拦截器

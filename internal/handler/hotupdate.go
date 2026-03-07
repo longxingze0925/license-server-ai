@@ -1,11 +1,8 @@
 package handler
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"license-server/internal/config"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
@@ -106,18 +103,6 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 	if err == nil {
 		defer file.Close()
 
-		// 读取文件内容
-		content, err := io.ReadAll(file)
-		if err != nil {
-			response.ServerError(c, "读取文件失败")
-			return
-		}
-
-		// 计算哈希
-		hash := sha256.Sum256(content)
-		fileHash := hex.EncodeToString(hash[:])
-		fileSize := int64(len(content))
-
 		// 保存文件
 		cfg := config.Get()
 		hotUpdateDir := filepath.Join(cfg.Storage.ReleasesDir, "hotupdate")
@@ -135,7 +120,8 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 			app.AppKey, version, uploadType, filepath.Ext(header.Filename))
 		filePath := filepath.Join(hotUpdateDir, filename)
 
-		if err := os.WriteFile(filePath, content, 0644); err != nil {
+		fileSize, fileHash, err := saveUploadedFile(file, filePath)
+		if err != nil {
 			response.ServerError(c, "保存文件失败: "+err.Error())
 			return
 		}
@@ -199,18 +185,6 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// 读取文件内容
-	content, err := io.ReadAll(file)
-	if err != nil {
-		response.ServerError(c, "读取文件失败")
-		return
-	}
-
-	// 计算哈希
-	hash := sha256.Sum256(content)
-	fileHash := hex.EncodeToString(hash[:])
-	fileSize := int64(len(content))
-
 	// 保存文件
 	cfg := config.Get()
 	hotUpdateDir := filepath.Join(cfg.Storage.ReleasesDir, "hotupdate")
@@ -223,7 +197,8 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 		app.AppKey, hotUpdate.FromVersion, hotUpdate.ToVersion, uploadType, filepath.Ext(header.Filename))
 	filePath := filepath.Join(hotUpdateDir, filename)
 
-	if err := os.WriteFile(filePath, content, 0644); err != nil {
+	fileSize, fileHash, err := saveUploadedFile(file, filePath)
+	if err != nil {
 		response.ServerError(c, "保存文件失败: "+err.Error())
 		return
 	}

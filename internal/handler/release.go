@@ -1,10 +1,7 @@
 package handler
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"license-server/internal/config"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
@@ -107,24 +104,13 @@ func (h *ReleaseHandler) Upload(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// 读取文件内容计算哈希
-	content, err := io.ReadAll(file)
-	if err != nil {
-		response.ServerError(c, "读取文件失败")
-		return
-	}
-
-	hash := sha256.Sum256(content)
-	fileHash := hex.EncodeToString(hash[:])
-	fileSize := int64(len(content))
-
-	// 保存文件
+	// 保存文件并计算哈希（流式处理，避免大文件占用过多内存）
 	cfg := config.Get()
 	filename := fmt.Sprintf("%s_%s%s", app.AppKey, version, filepath.Ext(header.Filename))
 	filePath := filepath.Join(cfg.Storage.ReleasesDir, filename)
-
-	if err := os.WriteFile(filePath, content, 0644); err != nil {
-		response.ServerError(c, "保存文件失败")
+	fileSize, fileHash, err := saveUploadedFile(file, filePath)
+	if err != nil {
+		response.ServerError(c, "保存文件失败: "+err.Error())
 		return
 	}
 
