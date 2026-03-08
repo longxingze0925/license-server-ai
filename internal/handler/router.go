@@ -356,6 +356,7 @@ func SetupRouter(r *gin.Engine) {
 		subscriptions := admin.Group("/subscriptions")
 		{
 			subscriptions.POST("", middleware.PermissionMiddleware("subscription:create"), subscriptionHandler.Create)
+			subscriptions.GET("/accounts", subscriptionHandler.ListAccounts)
 			subscriptions.GET("", subscriptionHandler.List)
 			subscriptions.GET("/:id", subscriptionHandler.Get)
 			subscriptions.PUT("/:id", middleware.PermissionMiddleware("subscription:update"), subscriptionHandler.Update)

@@ -80,6 +80,7 @@ export const licenseApi = {
 
 // 订阅管理（账号密码模式）
 export const subscriptionApi = {
+  listAccounts: (params?: any) => request.get('/admin/subscriptions/accounts', { params }),
   list: (params?: any) => request.get('/admin/subscriptions', { params }),
   get: (id: string) => request.get(`/admin/subscriptions/${id}`),
   create: (data: any) => request.post('/admin/subscriptions', data),

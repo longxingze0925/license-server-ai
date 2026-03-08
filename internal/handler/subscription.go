@@ -6,12 +6,28 @@ import (
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 type SubscriptionHandler struct{}
+
+type subscriptionAccountListItem struct {
+	CustomerID        string     `gorm:"column:customer_id"`
+	CustomerEmail     string     `gorm:"column:customer_email"`
+	CustomerName      string     `gorm:"column:customer_name"`
+	SubscriptionCount int64      `gorm:"column:subscription_count"`
+	AppNamesRaw       string     `gorm:"column:app_names_raw"`
+	ActiveCount       int64      `gorm:"column:active_count"`
+	ExpiredCount      int64      `gorm:"column:expired_count"`
+	CancelledCount    int64      `gorm:"column:cancelled_count"`
+	SuspendedCount    int64      `gorm:"column:suspended_count"`
+	PermanentCount    int64      `gorm:"column:permanent_count"`
+	NearestExpireAt   *time.Time `gorm:"column:nearest_expire_at"`
+	LatestCreatedAt   time.Time  `gorm:"column:latest_created_at"`
+}
 
 func NewSubscriptionHandler() *SubscriptionHandler {
 	return &SubscriptionHandler{}
@@ -190,6 +206,101 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 	response.SuccessPage(c, result, total, page, pageSize)
 }
 
+// ListAccounts 获取账号聚合订阅列表
+func (h *SubscriptionHandler) ListAccounts(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	appID := c.Query("app_id")
+	status := c.Query("status")
+	keyword := strings.TrimSpace(c.Query("keyword"))
+
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+
+	baseQuery := model.DB.Model(&model.Subscription{}).
+		Joins("LEFT JOIN customers ON customers.id = subscriptions.customer_id").
+		Joins("LEFT JOIN applications ON applications.id = subscriptions.app_id").
+		Where("subscriptions.tenant_id = ?", tenantID)
+
+	if appID != "" {
+		baseQuery = baseQuery.Where("subscriptions.app_id = ?", appID)
+	}
+	if status != "" {
+		baseQuery = baseQuery.Where("subscriptions.status = ?", status)
+	}
+	if keyword != "" {
+		likeKeyword := "%" + keyword + "%"
+		baseQuery = baseQuery.Where(
+			"customers.email LIKE ? OR customers.name LIKE ? OR customers.company LIKE ?",
+			likeKeyword,
+			likeKeyword,
+			likeKeyword,
+		)
+	}
+
+	var total int64
+	if err := baseQuery.Distinct("subscriptions.customer_id").Count(&total).Error; err != nil {
+		response.ServerError(c, "获取账号聚合列表失败")
+		return
+	}
+
+	var rows []subscriptionAccountListItem
+	if err := baseQuery.
+		Select(`
+			subscriptions.customer_id AS customer_id,
+			COALESCE(customers.email, '') AS customer_email,
+			COALESCE(customers.name, '') AS customer_name,
+			COUNT(*) AS subscription_count,
+			GROUP_CONCAT(DISTINCT applications.name ORDER BY applications.name SEPARATOR '||') AS app_names_raw,
+			SUM(CASE WHEN subscriptions.status = 'active' THEN 1 ELSE 0 END) AS active_count,
+			SUM(CASE WHEN subscriptions.status = 'expired' THEN 1 ELSE 0 END) AS expired_count,
+			SUM(CASE WHEN subscriptions.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+			SUM(CASE WHEN subscriptions.status = 'suspended' THEN 1 ELSE 0 END) AS suspended_count,
+			SUM(CASE WHEN subscriptions.status = 'active' AND subscriptions.expire_at IS NULL THEN 1 ELSE 0 END) AS permanent_count,
+			MIN(CASE WHEN subscriptions.status = 'active' AND subscriptions.expire_at IS NOT NULL THEN subscriptions.expire_at END) AS nearest_expire_at,
+			MAX(subscriptions.created_at) AS latest_created_at
+		`).
+		Group("subscriptions.customer_id, customers.email, customers.name").
+		Order("latest_created_at DESC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Scan(&rows).Error; err != nil {
+		response.ServerError(c, "获取账号聚合列表失败")
+		return
+	}
+
+	result := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		appNames := make([]string, 0)
+		if row.AppNamesRaw != "" {
+			appNames = strings.Split(row.AppNamesRaw, "||")
+		}
+
+		result = append(result, gin.H{
+			"customer_id":        row.CustomerID,
+			"customer_email":     row.CustomerEmail,
+			"customer_name":      row.CustomerName,
+			"subscription_count": row.SubscriptionCount,
+			"app_names":          appNames,
+			"active_count":       row.ActiveCount,
+			"expired_count":      row.ExpiredCount,
+			"cancelled_count":    row.CancelledCount,
+			"suspended_count":    row.SuspendedCount,
+			"permanent_count":    row.PermanentCount,
+			"nearest_expire_at":  row.NearestExpireAt,
+			"latest_created_at":  row.LatestCreatedAt,
+		})
+	}
+
+	response.SuccessPage(c, result, total, page, pageSize)
+}
+
 // Get 获取订阅详情
 func (h *SubscriptionHandler) Get(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
@@ -238,7 +349,7 @@ type UpdateSubscriptionRequest struct {
 	UnbindLimit *int     `json:"unbind_limit"`
 	Features    []string `json:"features"`
 	Status      string   `json:"status"`
-	Notes       string   `json:"notes"`
+	Notes       *string  `json:"notes"`
 }
 
 // Update 更新订阅
@@ -279,8 +390,8 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if req.Status != "" {
 		updates["status"] = req.Status
 	}
-	if req.Notes != "" {
-		updates["notes"] = req.Notes
+	if req.Notes != nil {
+		updates["notes"] = *req.Notes
 	}
 
 	if err := model.DB.Model(&subscription).Updates(updates).Error; err != nil {
