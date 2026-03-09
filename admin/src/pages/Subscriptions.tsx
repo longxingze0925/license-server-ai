@@ -44,7 +44,6 @@ const Subscriptions: React.FC = () => {
   const [renewingSubscription, setRenewingSubscription] = useState<any>(null);
   const [currentSubscription, setCurrentSubscription] = useState<any>(null);
   const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
-  const [highlightedAccountID, setHighlightedAccountID] = useState<string | null>(null);
   const [accountSubscriptions, setAccountSubscriptions] = useState<Record<string, any[]>>({});
   const [accountSubscriptionsLoading, setAccountSubscriptionsLoading] = useState<Record<string, boolean>>({});
   const [form] = Form.useForm();
@@ -54,7 +53,6 @@ const Subscriptions: React.FC = () => {
   const [selectedAppFeatures, setSelectedAppFeatures] = useState<string[]>([]);
   const customerSearchTimerRef = useRef<number | null>(null);
   const latestCustomerRequestRef = useRef(0);
-  const expandedHighlightTimerRef = useRef<number | null>(null);
   const expandedScrollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -68,9 +66,6 @@ const Subscriptions: React.FC = () => {
       if (customerSearchTimerRef.current !== null) {
         window.clearTimeout(customerSearchTimerRef.current);
       }
-      if (expandedHighlightTimerRef.current !== null) {
-        window.clearTimeout(expandedHighlightTimerRef.current);
-      }
       if (expandedScrollTimerRef.current !== null) {
         window.clearTimeout(expandedScrollTimerRef.current);
       }
@@ -79,22 +74,8 @@ const Subscriptions: React.FC = () => {
 
   const resetExpandedRows = () => {
     setExpandedRowKeys([]);
-    setHighlightedAccountID(null);
     setAccountSubscriptions({});
     setAccountSubscriptionsLoading({});
-  };
-
-  const triggerExpandedHighlight = (customerID: string) => {
-    setHighlightedAccountID(customerID);
-
-    if (expandedHighlightTimerRef.current !== null) {
-      window.clearTimeout(expandedHighlightTimerRef.current);
-    }
-
-    expandedHighlightTimerRef.current = window.setTimeout(() => {
-      setHighlightedAccountID(current => current === customerID ? null : current);
-      expandedHighlightTimerRef.current = null;
-    }, 2200);
   };
 
   const scrollToExpandedPanel = (customerID: string) => {
@@ -451,14 +432,10 @@ const Subscriptions: React.FC = () => {
     const isExpanded = expandedRowKeys.includes(customerID);
     if (isExpanded) {
       setExpandedRowKeys(prev => prev.filter(key => key !== customerID));
-      if (highlightedAccountID === customerID) {
-        setHighlightedAccountID(null);
-      }
       return;
     }
 
     setExpandedRowKeys(prev => [...prev, customerID]);
-    triggerExpandedHighlight(customerID);
     scrollToExpandedPanel(customerID);
     await fetchAccountSubscriptions(customerID);
   };
@@ -567,7 +544,7 @@ const Subscriptions: React.FC = () => {
           </Tooltip>
           <div>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              {record.customer_name || '未设置名称'}
+              {record.customer_name || '客户名称未设置'}
             </Text>
           </div>
         </div>
@@ -669,22 +646,18 @@ const Subscriptions: React.FC = () => {
   ];
 
   const renderExpandedSubscriptions = (record: AccountSummary) => {
-    const isHighlighted = highlightedAccountID === record.customer_id;
-
     return (
       <div
         id={`subscription-account-panel-${record.customer_id}`}
         style={{
           padding: 12,
           borderRadius: 10,
-          background: isHighlighted ? '#fffbe6' : '#fafafa',
-          border: `1px solid ${isHighlighted ? '#ffe58f' : '#f0f0f0'}`,
-          boxShadow: isHighlighted ? '0 0 0 3px rgba(255, 214, 102, 0.25)' : 'none',
-          transition: 'background 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease',
+          background: '#fafafa',
+          border: '1px solid #f0f0f0',
         }}
       >
-        <div style={{ marginBottom: 10, fontSize: 13, color: isHighlighted ? '#ad6800' : '#666', fontWeight: 500 }}>
-          {isHighlighted ? '已展开该账号的应用订阅明细' : '应用订阅明细'}
+        <div style={{ marginBottom: 10, fontSize: 13, color: '#666', fontWeight: 500 }}>
+          应用订阅明细
         </div>
         <Table
           columns={subscriptionColumns}
