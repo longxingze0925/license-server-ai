@@ -5,6 +5,8 @@ It does not depend on WPF or AiVideoStudio assemblies.
 
 ## What It Covers
 
+Admin JWT APIs:
+
 - `/api/auth/login`
 - `/api/auth/profile`
 - `/api/credits/me`
@@ -17,6 +19,19 @@ It does not depend on WPF or AiVideoStudio assemblies.
 - `/api/proxy/files`
 - `/api/proxy/files/{id}`
 
+Client subscription APIs:
+
+- `/api/client/auth/login`
+- `/api/client/credits/me`
+- `/api/client/credits/me/transactions`
+- `/api/client/proxy/capabilities`
+- `/api/client/proxy/{provider}/chat`
+- `/api/client/proxy/{provider}/generate`
+- `/api/client/proxy/tasks`
+- `/api/client/proxy/tasks/{id}`
+- `/api/client/proxy/files`
+- `/api/client/proxy/files/{id}`
+
 The SDK is still HTTP based. It wraps request construction, Bearer token injection,
 license-server response parsing, unauthorized-session clearing, and proxy DTOs.
 
@@ -24,7 +39,7 @@ The client-side `LicenseClient` also wraps `/api/client/*` app sessions. Use
 `VerifyAsync()` and `SendHeartbeatAsync()` for normal clients; they choose the
 license-code or subscription endpoint from the saved session mode.
 
-## Basic Usage
+## Admin Usage
 
 ```csharp
 using LicenseServer.Sdk;
@@ -44,6 +59,33 @@ var balance = await credit.GetMyCreditAsync();
 var proxy = new ProxyApi(client);
 var capabilities = await proxy.GetCapabilitiesAsync();
 ```
+
+Use this mode only for management tools. It logs in with a backend team/admin
+account and consumes the admin JWT APIs.
+
+## Client Subscription Usage
+
+```csharp
+using LicenseServer.Sdk;
+
+var sessions = new InMemoryClientSessionStore();
+using var client = new LicenseClient(
+    baseUrl: "https://your-license-server.example.com",
+    appKey: "your_app_key",
+    sessions: sessions);
+
+await client.LoginAsync("customer@example.com", "customer-password");
+
+var credit = new ClientCreditApi(client);
+var balance = await credit.GetMyCreditAsync();
+
+var proxy = new ProxyApi(client);
+var capabilities = await proxy.GetCapabilitiesAsync();
+```
+
+Use this mode in shipped desktop/software clients. It logs in with the customer
+account under an app subscription. AI Proxy usage deducts credits from that
+customer account, not from a backend admin account.
 
 ## Proxy Generate
 

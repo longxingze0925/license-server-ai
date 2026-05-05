@@ -73,6 +73,13 @@ func (s *CreditService) ensureUserInTenant(userID, tenantID string) error {
 		return err
 	}
 	if count == 0 {
+		if err := model.DB.Model(&model.Customer{}).
+			Where("id = ? AND tenant_id = ?", userID, tenantID).
+			Count(&count).Error; err != nil {
+			return err
+		}
+	}
+	if count == 0 {
 		return ErrUserNotInTenant
 	}
 	return nil
@@ -407,16 +414,19 @@ func (s *CreditService) CheckIntegrity() ([]IntegrityIssue, error) {
 // ListUsers 后台分页列出所有有额度记录的用户。
 type UserCreditWithEmail struct {
 	model.UserCredit
-	Email string `json:"email"`
-	Name  string `json:"name"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	UserType string `json:"user_type"`
 }
 
 func (s *CreditService) ListUsers(tenantID, keyword string, page, pageSize int) ([]UserCreditWithEmail, int64, error) {
 	base := model.DB.Table("user_credits AS uc").
-		Joins("JOIN team_members AS tm ON tm.id = uc.user_id AND tm.tenant_id = ?", tenantID)
+		Joins("LEFT JOIN team_members AS tm ON tm.id = uc.user_id AND tm.tenant_id = ?", tenantID).
+		Joins("LEFT JOIN customers AS c ON c.id = uc.user_id AND c.tenant_id = ?", tenantID).
+		Where("tm.id IS NOT NULL OR c.id IS NOT NULL")
 	if keyword != "" {
 		like := "%" + keyword + "%"
-		base = base.Where("tm.email LIKE ? OR tm.name LIKE ?", like, like)
+		base = base.Where("tm.email LIKE ? OR tm.name LIKE ? OR c.email LIKE ? OR c.name LIKE ?", like, like, like, like)
 	}
 
 	var total int64
@@ -432,7 +442,12 @@ func (s *CreditService) ListUsers(tenantID, keyword string, page, pageSize int) 
 	}
 	var rows []UserCreditWithEmail
 	if err := base.Session(&gorm.Session{}).
-		Select("uc.*, tm.email, tm.name").
+		Select(`
+			uc.*,
+			COALESCE(NULLIF(tm.email, ''), c.email) AS email,
+			COALESCE(NULLIF(tm.name, ''), c.name) AS name,
+			CASE WHEN c.id IS NOT NULL THEN 'customer' ELSE 'team_member' END AS user_type
+		`).
 		Order("uc.updated_at DESC").
 		Offset((page - 1) * pageSize).
 		Limit(pageSize).

@@ -17,6 +17,7 @@ const (
 	clientCtxTenantID   = "client_tenant_id"
 	clientCtxAppID      = "client_app_id"
 	clientCtxCustomerID = "client_customer_id"
+	clientCtxEmail      = "client_email"
 	clientCtxDeviceID   = "client_device_id"
 	clientCtxMachineID  = "client_machine_id"
 	clientCtxAuthMode   = "client_auth_mode"
@@ -34,6 +35,44 @@ func ClientAuthMiddleware() gin.HandlerFunc {
 		}
 
 		SetClientSessionContext(c, session)
+		c.Next()
+	}
+}
+
+// ClientUserContextMiddleware 将客户端 SDK 会话映射到通用 user/tenant 上下文。
+//
+// 客户端订阅登录后，业务用户是 customers.id；额度、AI 生成任务、文件归属都按这个 ID 记账。
+// 管理后台 JWT 仍继续使用 team_members.id，不经过这个中间件。
+func ClientUserContextMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tenantID := GetClientTenantID(c)
+		customerID := GetClientCustomerID(c)
+		if tenantID == "" || customerID == "" {
+			response.Unauthorized(c, "客户端会话无效")
+			c.Abort()
+			return
+		}
+
+		var customer model.Customer
+		if err := model.DB.First(&customer, "id = ? AND tenant_id = ?", customerID, tenantID).Error; err != nil {
+			response.Forbidden(c, "客户账号不存在")
+			c.Abort()
+			return
+		}
+		if customer.Status != model.CustomerStatusActive {
+			response.Forbidden(c, "客户账号已被禁用")
+			c.Abort()
+			return
+		}
+
+		c.Set("user_id", customer.ID)
+		c.Set("tenant_id", tenantID)
+		c.Set("email", customer.Email)
+		c.Set("role", "client")
+		c.Set("app_id", GetClientAppID(c))
+		c.Set("customer", customer)
+		c.Set(clientCtxEmail, customer.Email)
+
 		c.Next()
 	}
 }
@@ -132,6 +171,12 @@ func GetClientCustomerID(c *gin.Context) string {
 	return id
 }
 
+func GetClientEmail(c *gin.Context) string {
+	v, _ := c.Get(clientCtxEmail)
+	id, _ := v.(string)
+	return id
+}
+
 func GetClientDeviceID(c *gin.Context) string {
 	v, _ := c.Get(clientCtxDeviceID)
 	id, _ := v.(string)
@@ -157,4 +202,10 @@ func GetClientSession(c *gin.Context) *model.ClientSession {
 	}
 	session, _ := v.(*model.ClientSession)
 	return session
+}
+
+func GetAppID(c *gin.Context) string {
+	v, _ := c.Get("app_id")
+	id, _ := v.(string)
+	return id
 }

@@ -10,16 +10,25 @@ namespace LicenseServer.Sdk;
 /// </summary>
 public sealed class ProxyApi
 {
-    private readonly LicenseServerClient _client;
+    private readonly LicenseServerClient? _serverClient;
+    private readonly LicenseClient? _client;
+    private readonly string _basePath;
 
     public ProxyApi(LicenseServerClient client)
     {
+        _serverClient = client;
+        _basePath = "/api/proxy";
+    }
+
+    public ProxyApi(LicenseClient client)
+    {
         _client = client;
+        _basePath = "/proxy";
     }
 
     public async Task<CapabilityCatalog> GetCapabilitiesAsync(CancellationToken ct = default)
     {
-        var result = await SendProxyJsonAsync(HttpMethod.Get, "/api/proxy/capabilities", body: null, static () => new CapabilityCatalog(), ct).ConfigureAwait(false);
+        var result = await SendProxyJsonAsync(HttpMethod.Get, "/capabilities", body: null, static () => new CapabilityCatalog(), ct).ConfigureAwait(false);
         Normalize(result);
         return result;
     }
@@ -37,7 +46,7 @@ public sealed class ProxyApi
     {
         var query = BuildProxyQuery(mode, scope, channelId);
         var content = System.Net.Http.Json.JsonContent.Create(body, options: LicenseServerClient.JsonOptions);
-        using var resp = await _client.SendRawAsync(HttpMethod.Post, $"/api/proxy/{providerSlug}/chat{query}", content, ct).ConfigureAwait(false);
+        using var resp = await SendProxyRawAsync(HttpMethod.Post, $"/{providerSlug}/chat{query}", content, ct).ConfigureAwait(false);
         var raw = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
@@ -58,7 +67,7 @@ public sealed class ProxyApi
     public async Task<GenerateResult> GenerateAsync(string providerSlug, object body, string? mode, string? scope, string? channelId, CancellationToken ct = default)
     {
         var query = BuildProxyQuery(mode, scope, channelId);
-        var result = await SendProxyJsonAsync(HttpMethod.Post, $"/api/proxy/{providerSlug}/generate{query}", body, static () => new GenerateResult(), ct).ConfigureAwait(false);
+        var result = await SendProxyJsonAsync(HttpMethod.Post, $"/{providerSlug}/generate{query}", body, static () => new GenerateResult(), ct).ConfigureAwait(false);
         Normalize(result);
         return result;
     }
@@ -91,7 +100,7 @@ public sealed class ProxyApi
             content.Add(streamContent, "images", fileName);
         }
 
-        using var resp = await _client.SendRawAsync(HttpMethod.Post, $"/api/proxy/{providerSlug}/generate{query}", content, ct).ConfigureAwait(false);
+        using var resp = await SendProxyRawAsync(HttpMethod.Post, $"/{providerSlug}/generate{query}", content, ct).ConfigureAwait(false);
         var raw = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
@@ -112,27 +121,27 @@ public sealed class ProxyApi
 
     public async Task<TaskDetail> GetTaskAsync(string taskId, CancellationToken ct = default)
     {
-        var result = await SendProxyJsonAsync(HttpMethod.Get, $"/api/proxy/tasks/{Uri.EscapeDataString(taskId)}", body: null, static () => new TaskDetail(), ct).ConfigureAwait(false);
+        var result = await SendProxyJsonAsync(HttpMethod.Get, $"/tasks/{Uri.EscapeDataString(taskId)}", body: null, static () => new TaskDetail(), ct).ConfigureAwait(false);
         Normalize(result);
         return result;
     }
 
     public async Task<TaskListPage> ListMyTasksAsync(int page = 1, int pageSize = 50, CancellationToken ct = default)
     {
-        var result = await SendProxyJsonAsync(HttpMethod.Get, $"/api/proxy/tasks?page={page}&page_size={pageSize}", body: null, static () => new TaskListPage(), ct).ConfigureAwait(false);
+        var result = await SendProxyJsonAsync(HttpMethod.Get, $"/tasks?page={page}&page_size={pageSize}", body: null, static () => new TaskListPage(), ct).ConfigureAwait(false);
         Normalize(result);
         return result;
     }
 
     public async Task<FileListPage> ListMyFilesAsync(int page = 1, int pageSize = 50, CancellationToken ct = default)
     {
-        var result = await SendProxyJsonAsync(HttpMethod.Get, $"/api/proxy/files?page={page}&page_size={pageSize}", body: null, static () => new FileListPage(), ct).ConfigureAwait(false);
+        var result = await SendProxyJsonAsync(HttpMethod.Get, $"/files?page={page}&page_size={pageSize}", body: null, static () => new FileListPage(), ct).ConfigureAwait(false);
         Normalize(result);
         return result;
     }
 
     public Task<object> DeleteFileAsync(string fileId, CancellationToken ct = default)
-        => _client.DeleteAsync<object>($"/api/proxy/files/{Uri.EscapeDataString(fileId)}", ct);
+        => SendProxyJsonAsync(HttpMethod.Delete, $"/files/{Uri.EscapeDataString(fileId)}", body: null, static () => new object(), ct);
 
     public async Task<long> DownloadFileAsync(string fileId, string destinationPath, CancellationToken ct = default)
     {
@@ -146,7 +155,7 @@ public sealed class ProxyApi
         var tempPath = fullPath + ".part";
         try
         {
-            using var resp = await _client.SendRawAsync(HttpMethod.Get, $"/api/proxy/files/{Uri.EscapeDataString(fileId)}", content: null, ct).ConfigureAwait(false);
+            using var resp = await SendProxyRawAsync(HttpMethod.Get, $"/files/{Uri.EscapeDataString(fileId)}", content: null, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
                 var raw = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -192,7 +201,7 @@ public sealed class ProxyApi
     private async Task<T> SendProxyJsonAsync<T>(HttpMethod method, string path, object? body, Func<T> emptyFactory, CancellationToken ct)
     {
         using var content = body is null ? null : System.Net.Http.Json.JsonContent.Create(body, options: LicenseServerClient.JsonOptions);
-        using var resp = await _client.SendRawAsync(method, path, content, ct).ConfigureAwait(false);
+        using var resp = await SendProxyRawAsync(method, path, content, ct).ConfigureAwait(false);
         var raw = await LicenseServerClient.SafeReadAsync(resp, ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
@@ -207,6 +216,32 @@ public sealed class ProxyApi
         }
 
         return parsed.Data ?? emptyFactory();
+    }
+
+    private Task<HttpResponseMessage> SendProxyRawAsync(HttpMethod method, string path, HttpContent? content, CancellationToken ct)
+    {
+        var proxyPath = BuildProxyPath(path);
+        if (_serverClient is not null)
+        {
+            return _serverClient.SendRawAsync(method, proxyPath, content, ct);
+        }
+
+        if (_client is null)
+        {
+            throw new InvalidOperationException("ProxyApi has no HTTP client.");
+        }
+
+        return _client.SendRawAsync(method, proxyPath, content, ct: ct);
+    }
+
+    private string BuildProxyPath(string path)
+    {
+        if (!path.StartsWith('/'))
+        {
+            path = "/" + path;
+        }
+
+        return _basePath + path;
     }
 
     private static void Normalize(CapabilityCatalog catalog)

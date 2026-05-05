@@ -971,6 +971,11 @@ func extractCredentialID(body []byte, c *gin.Context) string {
 }
 
 func resolveProxyAppID(c *gin.Context, body []byte) (string, error) {
+	sessionAppID := middleware.GetClientAppID(c)
+	if sessionAppID != "" {
+		return sessionAppID, nil
+	}
+
 	appID := firstNonEmpty(c.Query("app_id"))
 	if appID == "" {
 		var probe map[string]any

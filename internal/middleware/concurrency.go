@@ -27,7 +27,8 @@ func ConcurrencyMiddleware() gin.HandlerFunc {
 			return
 		}
 		path := c.FullPath()
-		// FullPath() 在路由注册时是 "/api/proxy/:provider/generate"
+		// FullPath() 在路由注册时可能是 "/api/proxy/:provider/generate"
+		// 或客户端 SDK 入口 "/api/client/proxy/:provider/generate"。
 		if !endsWithGenerate(path) {
 			c.Next()
 			return

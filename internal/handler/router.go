@@ -189,6 +189,32 @@ func SetupRouter(r *gin.Engine, asyncRunner *service.AsyncRunnerService) {
 			sync.POST("/table/batch", dataSyncHandler.SaveTableDataBatch)
 			sync.DELETE("/table", dataSyncHandler.DeleteTableData)
 		}
+
+		// 客户端额度：SDK 账号订阅登录后查看/扣减客户自己的额度
+		clientCreditHandler := NewCreditHandler()
+		client.GET("/credits/me", middleware.ClientAuthMiddleware(), middleware.ClientUserContextMiddleware(), clientCreditHandler.MyBalance)
+		client.GET("/credits/me/transactions", middleware.ClientAuthMiddleware(), middleware.ClientUserContextMiddleware(), clientCreditHandler.MyTransactions)
+
+		// 客户端 AI Proxy：SDK token 鉴权，按客户账号 customers.id 记账
+		clientProxyHandler := NewProxyHandler(asyncRunner)
+		clientFileHandler := NewGenerationFileHandler()
+		clientTaskHandler := NewGenerationTaskHandler()
+		clientProxy := client.Group("/proxy")
+		clientProxy.Use(middleware.ClientAuthMiddleware())
+		clientProxy.Use(middleware.ClientUserContextMiddleware())
+		clientProxy.Use(middleware.ConcurrencyMiddleware())
+		{
+			clientProxy.GET("/capabilities", clientProxyHandler.Capabilities)
+			clientProxy.POST("/:provider/chat", clientProxyHandler.Chat)
+			clientProxy.POST("/:provider/generate", clientProxyHandler.Generate)
+
+			clientProxy.GET("/tasks", clientTaskHandler.MyList)
+			clientProxy.GET("/tasks/:id", clientTaskHandler.MyTask)
+
+			clientProxy.GET("/files", clientFileHandler.List)
+			clientProxy.GET("/files/:id", clientFileHandler.Download)
+			clientProxy.DELETE("/files/:id", clientFileHandler.Delete)
+		}
 	}
 
 	// ==================== 需要认证的接口 ====================

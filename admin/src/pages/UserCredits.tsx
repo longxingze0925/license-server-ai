@@ -24,6 +24,7 @@ import { userCreditApi } from '../api';
 
 interface UserCreditRow {
   user_id: string;
+  user_type?: 'customer' | 'team_member' | string;
   email: string;
   name: string;
   balance: number;
@@ -49,6 +50,11 @@ const TYPE_TAG: Record<string, { color: string; label: string }> = {
   adjust: { color: 'blue', label: '调整' },
   consume: { color: 'orange', label: '消费' },
   refund: { color: 'green', label: '退款' },
+};
+
+const USER_TYPE_TAG: Record<string, { color: string; label: string }> = {
+  customer: { color: 'green', label: '客户' },
+  team_member: { color: 'blue', label: '团队成员' },
 };
 
 const UserCredits: React.FC = () => {
@@ -139,6 +145,13 @@ const UserCredits: React.FC = () => {
       ),
     },
     {
+      title: '类型', dataIndex: 'user_type', key: 'user_type', width: 100,
+      render: (v: string) => {
+        const meta = USER_TYPE_TAG[v] || { color: 'default', label: v || '-' };
+        return <Tag color={meta.color}>{meta.label}</Tag>;
+      },
+    },
+    {
       title: '余额', dataIndex: 'balance', key: 'balance', width: 120,
       render: (v: number) => <span style={{ fontWeight: 600, color: v > 0 ? '#1677ff' : '#aaa' }}>{v}</span>,
     },
@@ -180,7 +193,7 @@ const UserCredits: React.FC = () => {
       </div>
 
       <Table
-        columns={columns} dataSource={data} rowKey="user_id" loading={loading}
+        columns={columns} dataSource={data} rowKey={r => `${r.user_type || 'user'}:${r.user_id}`} loading={loading}
         pagination={{
           current: page, pageSize, total, showSizeChanger: true,
           showTotal: t => `共 ${t} 个用户`,

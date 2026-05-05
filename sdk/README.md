@@ -1082,6 +1082,41 @@ await ws.ConnectAsync();
 await ws.SendStatusAsync(new { online = true });
 ```
 
+### .NET/C# AI Proxy 与额度扣减
+
+.NET SDK 有两套登录入口，别混用：
+
+- 管理后台账号：`LicenseServerClient + AuthApi + CreditApi + ProxyApi(serverClient)`，走 `/api/*`，适合后台工具。
+- 客户端客户账号：`LicenseClient + ClientCreditApi + ProxyApi(licenseClient)`，走 `/api/client/*`，适合正式软件客户端。
+
+AI 软件客户端应使用第二种。客户用邮箱密码登录后，生成图片/视频、Prompt 辅助、任务和文件接口都会带客户端订阅 token，请求归属到当前 app，额度从该客户账号扣。
+
+```csharp
+using LicenseServer.Sdk;
+
+using var client = new LicenseClient(
+    baseUrl: "https://your-license-server.example.com",
+    appKey: "your_app_key");
+
+await client.LoginAsync("customer@example.com", "customer-password");
+
+var credit = new ClientCreditApi(client);
+var balance = await credit.GetMyCreditAsync();
+
+var proxy = new ProxyApi(client);
+var result = await proxy.GenerateAsync(
+    providerSlug: "sora",
+    body: new
+    {
+        model = "sora-2",
+        prompt = "a cat dancing under stars",
+        duration_seconds = 5,
+        aspect_ratio = "16:9",
+    },
+    mode: "async",
+    scope: "video");
+```
+
 ---
 
 ## 脚本管理功能
