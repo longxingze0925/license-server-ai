@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Card, Row, Col, Select, DatePicker, Statistic, Spin } from 'antd';
 import {
+  BarChartOutlined,
   KeyOutlined,
   DesktopOutlined,
-  UserOutlined,
-  AppstoreOutlined,
+  PieChartOutlined,
 } from '@ant-design/icons';
 import {
   Area,
@@ -83,23 +83,10 @@ const Analytics: React.FC = () => {
     dayjs().subtract(30, 'day'),
     dayjs(),
   ]);
-  const [dashboardData, setDashboardData] = useState<any>(null);
   const [licenseTrend, setLicenseTrend] = useState<any[]>([]);
   const [deviceTrend, setDeviceTrend] = useState<any[]>([]);
   const [licenseTypeData, setLicenseTypeData] = useState<any[]>([]);
   const [deviceOSData, setDeviceOSData] = useState<any[]>([]);
-  const selectedAppInfo = selectedApp ? apps.find(app => app.id === selectedApp) : null;
-
-  const totals = {
-    licenses: dashboardData?.licenses?.total ?? 0,
-    activeLicenses: dashboardData?.licenses?.active ?? 0,
-    devices: dashboardData?.devices?.total ?? 0,
-    activeDevices: dashboardData?.devices?.active ?? 0,
-    customers: dashboardData?.customers?.total ?? 0,
-    todayCustomers: dashboardData?.customers?.today_new ?? 0,
-    apps: selectedApp ? 1 : (dashboardData?.applications?.total ?? apps.length),
-    activeApps: selectedApp ? (selectedAppInfo?.status === 'active' ? 1 : 0) : apps.filter(a => a.status === 'active').length,
-  };
 
   useEffect(() => {
     fetchApps();
@@ -117,20 +104,6 @@ const Analytics: React.FC = () => {
       setPageLoading(false);
     }
   };
-
-  const fetchDashboard = useCallback(async () => {
-    try {
-      const result: any = selectedApp ? await statsApi.appStats(selectedApp) : await statsApi.dashboard();
-      setDashboardData(result);
-    } catch (error) {
-      console.error(error);
-      setDashboardData(null);
-    }
-  }, [selectedApp]);
-
-  useEffect(() => {
-    fetchDashboard();
-  }, [fetchDashboard]);
 
   const fetchTrendData = useCallback(async () => {
     setLoading(true);
@@ -173,6 +146,12 @@ const Analytics: React.FC = () => {
   const deviceTrendChart = useMemo(() => normalizeValueRows(deviceTrend), [deviceTrend]);
   const licenseTypeChart = useMemo(() => normalizeValueRows(licenseTypeData), [licenseTypeData]);
   const deviceOSChart = useMemo(() => normalizeValueRows(deviceOSData), [deviceOSData]);
+  const summary = useMemo(() => ({
+    licenseEvents: licenseTrend.reduce((sum, row) => sum + toNumber(row?.count), 0),
+    deviceEvents: deviceTrend.reduce((sum, row) => sum + toNumber(row?.count), 0),
+    licenseTypes: licenseTypeChart.length,
+    osTypes: deviceOSChart.length,
+  }), [licenseTrend, deviceTrend, licenseTypeChart, deviceOSChart]);
 
   if (pageLoading) {
     return (
@@ -184,9 +163,9 @@ const Analytics: React.FC = () => {
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2 style={{ margin: 0 }}>数据分析</h2>
-        <div style={{ display: 'flex', gap: 16 }}>
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+        <h2 style={{ margin: 0 }}>报表分析</h2>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
           <Select
             style={{ width: 200 }}
             placeholder="全部应用"
@@ -208,58 +187,46 @@ const Analytics: React.FC = () => {
         </div>
       </div>
 
-      {/* 概览统计 */}
+      {/* 当前筛选范围摘要 */}
       <Row gutter={16} style={{ marginBottom: 24 }}>
-        <Col span={6}>
+        <Col xs={24} sm={12} lg={6}>
           <Card>
             <Statistic
-              title="总授权数"
-              value={totals.licenses}
+              title="授权趋势合计"
+              value={summary.licenseEvents}
               prefix={<KeyOutlined />}
               valueStyle={{ color: '#1890ff' }}
             />
-            <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
-              活跃: {totals.activeLicenses}
-            </div>
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} lg={6}>
           <Card>
             <Statistic
-              title="总设备数"
-              value={totals.devices}
+              title="设备趋势合计"
+              value={summary.deviceEvents}
               prefix={<DesktopOutlined />}
               valueStyle={{ color: '#52c41a' }}
             />
-            <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
-              活跃: {totals.activeDevices}
-            </div>
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} lg={6}>
           <Card>
             <Statistic
-              title="总用户数"
-              value={totals.customers}
-              prefix={<UserOutlined />}
+              title="授权类型数"
+              value={summary.licenseTypes}
+              prefix={<PieChartOutlined />}
               valueStyle={{ color: '#722ed1' }}
             />
-            <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
-              今日新增: {totals.todayCustomers}
-            </div>
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} lg={6}>
           <Card>
             <Statistic
-              title="应用数量"
-              value={totals.apps}
-              prefix={<AppstoreOutlined />}
+              title="操作系统数"
+              value={summary.osTypes}
+              prefix={<BarChartOutlined />}
               valueStyle={{ color: '#fa8c16' }}
             />
-            <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
-              活跃: {totals.activeApps}
-            </div>
           </Card>
         </Col>
       </Row>

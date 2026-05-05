@@ -10,17 +10,12 @@ import {
   CloseCircleOutlined,
   CrownOutlined,
 } from '@ant-design/icons';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { statsApi } from '../api';
 import { useAuthStore } from '../store';
-
-const COLORS = ['#1890ff', '#52c41a', '#faad14', '#f5222d', '#722ed1'];
 
 const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
-  const [licenseTrend, setLicenseTrend] = useState<any[]>([]);
-  const [licenseType, setLicenseType] = useState<any[]>([]);
   const { user } = useAuthStore();
 
   const isViewer = user?.role === 'viewer';
@@ -31,14 +26,8 @@ const Dashboard: React.FC = () => {
 
   const fetchData = async () => {
     try {
-      const [dashboard, trend, typeData] = await Promise.all([
-        statsApi.dashboard(),
-        statsApi.licenseTrend(),
-        statsApi.licenseType(),
-      ]);
+      const dashboard = await statsApi.dashboard();
       setData(dashboard);
-      setLicenseTrend((trend as any) || []);
-      setLicenseType((typeData as any) || []);
     } catch (error) {
       console.error(error);
     } finally {
@@ -173,45 +162,6 @@ const Dashboard: React.FC = () => {
             </Card>
           </Col>
         )}
-      </Row>
-
-      {/* 第三行：图表 */}
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={24} lg={16}>
-          <Card title="授权趋势（近30天）">
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={licenseTrend}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" />
-                <YAxis />
-                <Tooltip />
-                <Line type="monotone" dataKey="count" stroke="#1890ff" strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </Card>
-        </Col>
-        <Col xs={24} lg={8}>
-          <Card title="授权类型分布">
-            <ResponsiveContainer width="100%" height={300}>
-              <PieChart>
-                <Pie
-                  data={licenseType}
-                  dataKey="count"
-                  nameKey="type"
-                  cx="50%"
-                  cy="50%"
-                  outerRadius={80}
-                  label={({ payload }: any) => `${payload?.type}: ${payload?.count}`}
-                >
-                  {licenseType.map((_, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip />
-              </PieChart>
-            </ResponsiveContainer>
-          </Card>
-        </Col>
       </Row>
     </div>
   );

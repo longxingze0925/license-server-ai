@@ -40,7 +40,7 @@ const allMenuItems: MenuItem[] = [
     label: '工作台',
     children: [
       { key: '/', icon: <DashboardOutlined />, label: '仪表盘' },
-      { key: '/analytics', icon: <BarChartOutlined />, label: '数据分析' },
+      { key: '/analytics', icon: <BarChartOutlined />, label: '报表分析' },
     ],
   },
   {
