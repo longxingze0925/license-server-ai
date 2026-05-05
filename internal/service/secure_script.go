@@ -7,6 +7,9 @@ import (
 	"license-server/internal/model"
 	"license-server/internal/pkg/crypto"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // SecureScriptService 安全脚本服务
@@ -19,6 +22,7 @@ func NewSecureScriptService() *SecureScriptService {
 // EncryptedScriptPackage 加密脚本包 (下发给客户端)
 type EncryptedScriptPackage struct {
 	ScriptID         string `json:"script_id"`
+	DeliveryID       string `json:"delivery_id,omitempty"`
 	Version          string `json:"version"`
 	ScriptType       string `json:"script_type"`
 	EntryPoint       string `json:"entry_point"`
@@ -327,52 +331,121 @@ func (s *SecureScriptService) UpdateDeliveryStatus(
 	errorMessage string,
 	duration int,
 ) error {
-	updates := map[string]interface{}{
-		"status": status,
-	}
-
-	if result != "" {
-		updates["result"] = result
-	}
-	if errorMessage != "" {
-		updates["error_message"] = errorMessage
-	}
-	if duration > 0 {
-		updates["duration"] = duration
-	}
-
-	now := time.Now()
-	if status == model.ScriptDeliveryStatusExecuting {
-		updates["executed_at"] = &now
-	}
-	if status == model.ScriptDeliveryStatusSuccess || status == model.ScriptDeliveryStatusFailed {
-		updates["completed_at"] = &now
-	}
-
-	if err := model.DB.Model(&model.ScriptDelivery{}).Where("id = ?", deliveryID).Updates(updates).Error; err != nil {
+	var delivery model.ScriptDelivery
+	if err := model.DB.First(&delivery, "id = ?", deliveryID).Error; err != nil {
 		return err
 	}
 
-	// 更新脚本统计
+	return s.updateDeliveryStatus(&delivery, status, result, errorMessage, duration)
+}
+
+// UpdateDeliveryStatusForDevice 更新指定设备的下发状态
+func (s *SecureScriptService) UpdateDeliveryStatusForDevice(
+	deliveryID string,
+	appID string,
+	deviceID string,
+	machineID string,
+	status model.ScriptDeliveryStatus,
+	result string,
+	errorMessage string,
+	duration int,
+) error {
 	var delivery model.ScriptDelivery
-	if err := model.DB.First(&delivery, "id = ?", deliveryID).Error; err == nil {
-		switch status {
-		case model.ScriptDeliveryStatusSuccess:
-			model.DB.Model(&model.SecureScript{}).Where("id = ?", delivery.ScriptID).
-				UpdateColumns(map[string]interface{}{
-					"execute_count": model.DB.Raw("execute_count + 1"),
-					"success_count": model.DB.Raw("success_count + 1"),
-				})
-		case model.ScriptDeliveryStatusFailed:
-			model.DB.Model(&model.SecureScript{}).Where("id = ?", delivery.ScriptID).
-				UpdateColumns(map[string]interface{}{
-					"execute_count": model.DB.Raw("execute_count + 1"),
-					"fail_count":    model.DB.Raw("fail_count + 1"),
-				})
-		}
+	if err := model.DB.Model(&model.ScriptDelivery{}).
+		Joins("JOIN secure_scripts ON secure_scripts.id = script_deliveries.script_id").
+		Where(
+			"script_deliveries.id = ? AND script_deliveries.device_id = ? AND script_deliveries.machine_id = ? AND secure_scripts.app_id = ?",
+			deliveryID,
+			deviceID,
+			machineID,
+			appID,
+		).
+		First(&delivery).Error; err != nil {
+		return err
 	}
 
-	return nil
+	return s.updateDeliveryStatus(&delivery, status, result, errorMessage, duration)
+}
+
+func (s *SecureScriptService) updateDeliveryStatus(
+	delivery *model.ScriptDelivery,
+	status model.ScriptDeliveryStatus,
+	result string,
+	errorMessage string,
+	duration int,
+) error {
+	switch status {
+	case model.ScriptDeliveryStatusPending,
+		model.ScriptDeliveryStatusExecuting,
+		model.ScriptDeliveryStatusSuccess,
+		model.ScriptDeliveryStatusFailed,
+		model.ScriptDeliveryStatusExpired:
+	default:
+		return errors.New("无效的下发状态")
+	}
+
+	return model.DB.Transaction(func(tx *gorm.DB) error {
+		var current model.ScriptDelivery
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", delivery.ID).Error; err != nil {
+			return err
+		}
+		if isTerminalScriptDeliveryStatus(current.Status) {
+			return nil
+		}
+
+		now := time.Now()
+		if now.After(current.ExpiresAt) && status != model.ScriptDeliveryStatusExpired {
+			return errors.New("下发已过期")
+		}
+
+		updates := map[string]interface{}{
+			"status": status,
+		}
+
+		if result != "" {
+			updates["result"] = result
+		}
+		if errorMessage != "" {
+			updates["error_message"] = errorMessage
+		}
+		if duration > 0 {
+			updates["duration"] = duration
+		}
+
+		if status == model.ScriptDeliveryStatusExecuting {
+			updates["executed_at"] = &now
+		}
+		if status == model.ScriptDeliveryStatusSuccess || status == model.ScriptDeliveryStatusFailed {
+			updates["completed_at"] = &now
+		}
+
+		if err := tx.Model(&current).Updates(updates).Error; err != nil {
+			return err
+		}
+
+		switch status {
+		case model.ScriptDeliveryStatusSuccess:
+			return tx.Model(&model.SecureScript{}).Where("id = ?", current.ScriptID).
+				UpdateColumns(map[string]interface{}{
+					"execute_count": gorm.Expr("execute_count + 1"),
+					"success_count": gorm.Expr("success_count + 1"),
+				}).Error
+		case model.ScriptDeliveryStatusFailed:
+			return tx.Model(&model.SecureScript{}).Where("id = ?", current.ScriptID).
+				UpdateColumns(map[string]interface{}{
+					"execute_count": gorm.Expr("execute_count + 1"),
+					"fail_count":    gorm.Expr("fail_count + 1"),
+				}).Error
+		default:
+			return nil
+		}
+	})
+}
+
+func isTerminalScriptDeliveryStatus(status model.ScriptDeliveryStatus) bool {
+	return status == model.ScriptDeliveryStatusSuccess ||
+		status == model.ScriptDeliveryStatusFailed ||
+		status == model.ScriptDeliveryStatusExpired
 }
 
 // EncryptedKeyInfo 用于存储加密密钥的结构

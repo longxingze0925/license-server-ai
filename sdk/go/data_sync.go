@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,9 +28,30 @@ type SyncRecord struct {
 // SyncResult 同步结果
 type SyncResult struct {
 	RecordID      string `json:"record_id"`
+	DataKey       string `json:"data_key,omitempty"`
 	Status        string `json:"status"` // success, conflict, error
 	Version       int64  `json:"version"`
 	ServerVersion int64  `json:"server_version,omitempty"`
+	ConflictID    string `json:"conflict_id,omitempty"`
+	Error         string `json:"error,omitempty"`
+	ConflictData  any    `json:"conflict_data,omitempty"`
+}
+
+func validateDataSyncIdentifier(field, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("%s不能为空", field)
+	}
+	if len(value) > 100 {
+		return fmt.Errorf("%s长度不能超过100字符", field)
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
+			continue
+		}
+		return fmt.Errorf("%s只能包含字母、数字、下划线、点和横线", field)
+	}
+	return nil
 }
 
 // TableInfo 表信息
@@ -39,9 +63,17 @@ type TableInfo struct {
 
 // 数据类型常量
 const (
-	DataTypeScripts            = "scripts"              // 话术管理
-	DataTypeDanmakuGroups      = "danmaku_groups"       // 互动规则
-	DataTypeAIConfig           = "ai_config"            // AI配置
+	DataTypeConfig             = "config"
+	DataTypeWorkflow           = "workflow"
+	DataTypeBatchTask          = "batch_task"
+	DataTypeMaterial           = "material"
+	DataTypePost               = "post"
+	DataTypeComment            = "comment"
+	DataTypeCommentScript      = "comment_script"
+	DataTypeVoiceConfig        = "voice_config"
+	DataTypeScripts            = "scripts"               // 话术管理
+	DataTypeDanmakuGroups      = "danmaku_groups"        // 互动规则
+	DataTypeAIConfig           = "ai_config"             // AI配置
 	DataTypeRandomWordAIConfig = "random_word_ai_config" // 随机词AI配置
 )
 
@@ -77,153 +109,110 @@ func (c *Client) NewDataSyncClient() *DataSyncClient {
 
 // GetTableList 获取服务器上的所有表名
 func (d *DataSyncClient) GetTableList() ([]TableInfo, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
-
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/tables?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/tables", nil)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int         `json:"code"`
-		Message string      `json:"message"`
-		Data    []TableInfo `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	var tables []TableInfo
+	if err := json.Unmarshal(data, &tables); err != nil {
 		return nil, err
 	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
-	}
-	return result.Data, nil
+	return tables, nil
 }
 
 // PullTable 从服务器拉取指定表的数据
 // tableName: 表名
 // since: 增量同步时间戳（0表示全量）
 func (d *DataSyncClient) PullTable(tableName string, since int64) ([]SyncRecord, int64, error) {
+	tableName = strings.TrimSpace(tableName)
+	if err := validateDataSyncIdentifier("tableName", tableName); err != nil {
+		return nil, 0, err
+	}
 	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
 	params.Set("table", tableName)
 	if since > 0 {
 		params.Set("since", strconv.FormatInt(since, 10))
 	}
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/table?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/table", params)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Table      string       `json:"table"`
-			Records    []SyncRecord `json:"records"`
-			Count      int          `json:"count"`
-			ServerTime int64        `json:"server_time"`
-		} `json:"data"`
+		Table      string       `json:"table"`
+		Records    []SyncRecord `json:"records"`
+		Count      int          `json:"count"`
+		ServerTime int64        `json:"server_time"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, 0, err
-	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
 	}
 
 	// 更新最后同步时间
-	d.lastSyncTime[tableName] = result.Data.ServerTime
+	d.lastSyncTime[tableName] = result.ServerTime
 
-	return result.Data.Records, result.Data.ServerTime, nil
+	return result.Records, result.ServerTime, nil
 }
 
 // PullAllTables 从服务器拉取所有表的数据
 // since: 增量同步时间戳（0表示全量）
 func (d *DataSyncClient) PullAllTables(since int64) (map[string][]SyncRecord, int64, error) {
 	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
 	if since > 0 {
 		params.Set("since", strconv.FormatInt(since, 10))
 	}
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/tables/all?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/tables/all", params)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Tables     map[string][]SyncRecord `json:"tables"`
-			ServerTime int64                   `json:"server_time"`
-		} `json:"data"`
+		Tables     map[string][]SyncRecord `json:"tables"`
+		ServerTime int64                   `json:"server_time"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, 0, err
 	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
-	}
 
-	return result.Data.Tables, result.Data.ServerTime, nil
+	return result.Tables, result.ServerTime, nil
 }
 
 // PushRecord 推送单条记录到服务器
 func (d *DataSyncClient) PushRecord(tableName, recordID string, data map[string]interface{}, version int64) (*SyncResult, error) {
+	tableName = strings.TrimSpace(tableName)
+	recordID = strings.TrimSpace(recordID)
+	if err := validateDataSyncIdentifier("tableName", tableName); err != nil {
+		return nil, err
+	}
+	if err := validateDataSyncIdentifier("recordID", recordID); err != nil {
+		return nil, err
+	}
 	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"table":      tableName,
-		"record_id":  recordID,
-		"data":       data,
-		"version":    version,
+		"table":     tableName,
+		"record_id": recordID,
+		"data":      data,
+		"version":   version,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/table",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
+	resultData, err := d.postSyncAPIData("/api/client/sync/table", reqBody)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Status        string `json:"status"`
-			Version       int64  `json:"version"`
-			ServerVersion int64  `json:"server_version,omitempty"`
-			ServerData    string `json:"server_data,omitempty"`
-		} `json:"data"`
+		Status        string `json:"status"`
+		Version       int64  `json:"version"`
+		ServerVersion int64  `json:"server_version,omitempty"`
+		ServerData    string `json:"server_data,omitempty"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(resultData, &result); err != nil {
 		return nil, err
-	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
 	}
 
 	return &SyncResult{
 		RecordID:      recordID,
-		Status:        result.Data.Status,
-		Version:       result.Data.Version,
-		ServerVersion: result.Data.ServerVersion,
+		Status:        result.Status,
+		Version:       result.Version,
+		ServerVersion: result.ServerVersion,
 	}, nil
 }
 
@@ -236,86 +225,75 @@ type PushRecordItem struct {
 }
 
 func (d *DataSyncClient) PushRecordBatch(tableName string, records []PushRecordItem) ([]SyncResult, error) {
+	tableName = strings.TrimSpace(tableName)
+	if err := validateDataSyncIdentifier("tableName", tableName); err != nil {
+		return nil, err
+	}
+	for i := range records {
+		records[i].RecordID = strings.TrimSpace(records[i].RecordID)
+		if err := validateDataSyncIdentifier("recordID", records[i].RecordID); err != nil {
+			return nil, err
+		}
+	}
 	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"table":      tableName,
-		"records":    records,
+		"table":   tableName,
+		"records": records,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/table/batch",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
+	resultData, err := d.postSyncAPIData("/api/client/sync/table/batch", reqBody)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Table      string       `json:"table"`
-			Results    []SyncResult `json:"results"`
-			Count      int          `json:"count"`
-			ServerTime int64        `json:"server_time"`
-		} `json:"data"`
+		Table      string       `json:"table"`
+		Results    []SyncResult `json:"results"`
+		Count      int          `json:"count"`
+		ServerTime int64        `json:"server_time"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(resultData, &result); err != nil {
 		return nil, err
 	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
-	}
 
-	return result.Data.Results, nil
+	return result.Results, nil
 }
 
 // DeleteRecord 删除服务器上的记录
 func (d *DataSyncClient) DeleteRecord(tableName, recordID string) error {
+	tableName = strings.TrimSpace(tableName)
+	recordID = strings.TrimSpace(recordID)
+	if err := validateDataSyncIdentifier("tableName", tableName); err != nil {
+		return err
+	}
+	if err := validateDataSyncIdentifier("recordID", recordID); err != nil {
+		return err
+	}
 	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"table":      tableName,
-		"record_id":  recordID,
+		"table":     tableName,
+		"record_id": recordID,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("DELETE", d.client.serverURL+"/api/client/sync/table", bytes.NewReader(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := d.client.httpClient.Do(req)
+	_, err := d.requestSyncAPIData(http.MethodDelete, "/api/client/sync/table", nil, reqBody)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return err
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
 	return nil
 }
 
 // GetLastSyncTime 获取指定表的最后同步时间
 func (d *DataSyncClient) GetLastSyncTime(tableName string) int64 {
+	tableName = strings.TrimSpace(tableName)
+	if err := validateDataSyncIdentifier("tableName", tableName); err != nil {
+		return 0
+	}
 	return d.lastSyncTime[tableName]
 }
 
 // SetLastSyncTime 设置指定表的最后同步时间
 func (d *DataSyncClient) SetLastSyncTime(tableName string, t int64) {
+	tableName = strings.TrimSpace(tableName)
+	if err := validateDataSyncIdentifier("tableName", tableName); err != nil {
+		return
+	}
 	d.lastSyncTime[tableName] = t
 }
 
@@ -411,6 +389,8 @@ type AutoSyncManager struct {
 	tables       []string
 	interval     time.Duration
 	stopChan     chan struct{}
+	mu           sync.Mutex
+	running      bool
 	onPull       func(tableName string, records []SyncRecord, deletes []string) error
 	onConflict   func(tableName string, result SyncResult) error
 	lastSyncTime map[string]int64
@@ -439,7 +419,25 @@ func (m *AutoSyncManager) OnConflict(fn func(tableName string, result SyncResult
 
 // Start 启动自动同步
 func (m *AutoSyncManager) Start() {
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	m.stopChan = stopCh
+	m.running = true
+	m.mu.Unlock()
+
 	go func() {
+		defer func() {
+			m.mu.Lock()
+			if m.stopChan == stopCh {
+				m.running = false
+			}
+			m.mu.Unlock()
+		}()
+
 		ticker := time.NewTicker(m.interval)
 		defer ticker.Stop()
 
@@ -450,7 +448,7 @@ func (m *AutoSyncManager) Start() {
 			select {
 			case <-ticker.C:
 				m.syncAll()
-			case <-m.stopChan:
+			case <-stopCh:
 				return
 			}
 		}
@@ -459,7 +457,13 @@ func (m *AutoSyncManager) Start() {
 
 // Stop 停止自动同步
 func (m *AutoSyncManager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.running {
+		return
+	}
 	close(m.stopChan)
+	m.running = false
 }
 
 // syncAll 同步所有表
@@ -490,13 +494,18 @@ func (m *AutoSyncManager) SyncNow() {
 
 // SyncChange 同步变更记录
 type SyncChange struct {
-	ID         string                 `json:"id"`
-	Table      string                 `json:"table"`
-	RecordID   string                 `json:"record_id"`
-	Operation  string                 `json:"operation"` // insert, update, delete
-	Data       map[string]interface{} `json:"data"`
-	Version    int64                  `json:"version"`
-	ChangeTime int64                  `json:"change_time"`
+	ID           string                 `json:"id"`
+	DataType     string                 `json:"data_type,omitempty"`
+	DataKey      string                 `json:"data_key,omitempty"`
+	Action       string                 `json:"action,omitempty"` // create, update, delete
+	Table        string                 `json:"table,omitempty"`  // 兼容旧字段，等同于 data_type
+	RecordID     string                 `json:"record_id,omitempty"`
+	Operation    string                 `json:"operation,omitempty"` // 兼容旧字段: insert, update, delete
+	Data         map[string]interface{} `json:"data"`
+	Version      int64                  `json:"version"`
+	LocalVersion int64                  `json:"local_version,omitempty"`
+	UpdatedAt    int64                  `json:"updated_at,omitempty"`
+	ChangeTime   int64                  `json:"change_time"`
 }
 
 // SyncStatus 同步状态
@@ -530,159 +539,276 @@ const (
 	Merge ConflictResolution = "merge"
 )
 
+type pushChangeItem struct {
+	DataType     string                 `json:"data_type"`
+	DataKey      string                 `json:"data_key"`
+	Action       string                 `json:"action"`
+	Data         map[string]interface{} `json:"data"`
+	LocalVersion int64                  `json:"local_version"`
+}
+
+func (c SyncChange) toPushItem() pushChangeItem {
+	dataType := c.DataType
+	if dataType == "" {
+		dataType = c.Table
+	}
+
+	dataKey := c.DataKey
+	if dataKey == "" {
+		dataKey = c.RecordID
+	}
+	if dataKey == "" {
+		dataKey = c.ID
+	}
+
+	action := c.Action
+	if action == "" {
+		switch c.Operation {
+		case "insert", "create":
+			action = "create"
+		case "delete":
+			action = "delete"
+		default:
+			action = "update"
+		}
+	}
+
+	localVersion := c.LocalVersion
+	if localVersion == 0 {
+		localVersion = c.Version
+	}
+
+	return pushChangeItem{
+		DataType:     dataType,
+		DataKey:      dataKey,
+		Action:       action,
+		Data:         c.Data,
+		LocalVersion: localVersion,
+	}
+}
+
+func normalizeSyncResults(results []SyncResult) []SyncResult {
+	for i := range results {
+		if results[i].RecordID == "" {
+			results[i].RecordID = results[i].DataKey
+		}
+		if results[i].DataKey == "" {
+			results[i].DataKey = results[i].RecordID
+		}
+		if results[i].Version == 0 {
+			results[i].Version = results[i].ServerVersion
+		}
+	}
+	return results
+}
+
 // PushChanges 推送客户端变更到服务端（Push）
 // changes: 变更列表
 func (d *DataSyncClient) PushChanges(changes []SyncChange) ([]SyncResult, error) {
-	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"changes":    changes,
+	items := make([]pushChangeItem, 0, len(changes))
+	for _, change := range changes {
+		items = append(items, change.toPushItem())
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/push",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
+	reqBody := map[string]interface{}{
+		"items": items,
+	}
+
+	data, err := d.postSyncAPIData("/api/client/sync/push", reqBody)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Results    []SyncResult `json:"results"`
-			ServerTime int64        `json:"server_time"`
-		} `json:"data"`
+		Results    []SyncResult `json:"results"`
+		ServerTime int64        `json:"server_time"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, err
 	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
-	}
 
-	return result.Data.Results, nil
+	return normalizeSyncResults(result.Results), nil
 }
 
 // GetChanges 获取服务端变更（Pull）
 // since: 从指定时间戳开始获取变更
-// tables: 指定要获取的表（为空则获取所有表）
-func (d *DataSyncClient) GetChanges(since int64, tables []string) ([]SyncChange, int64, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
-	if since > 0 {
-		params.Set("since", strconv.FormatInt(since, 10))
-	}
-	for _, table := range tables {
-		params.Add("tables", table)
+// dataTypes: 指定要获取的数据类型（为空则获取所有支持的数据类型）
+func (d *DataSyncClient) GetChanges(since int64, dataTypes []string) ([]SyncChange, int64, error) {
+	if len(dataTypes) > 1 {
+		allChanges := make([]SyncChange, 0)
+		var latestServerTime int64
+		for _, dataType := range dataTypes {
+			page, err := d.getChangesByType(since, dataType, 0, 0)
+			if err != nil {
+				return nil, 0, err
+			}
+			allChanges = append(allChanges, page.Changes...)
+			if page.ServerTime > latestServerTime {
+				latestServerTime = page.ServerTime
+			}
+		}
+		return allChanges, latestServerTime, nil
 	}
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/changes?" + params.Encode())
+	dataType := ""
+	if len(dataTypes) == 1 {
+		dataType = dataTypes[0]
+	}
+	page, err := d.getChangesByType(since, dataType, 0, 0)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	return page.Changes, page.ServerTime, nil
+}
 
-	body, _ := io.ReadAll(resp.Body)
+type SyncChangesPage struct {
+	Changes    []SyncChange `json:"changes"`
+	ServerTime int64        `json:"server_time"`
+	HasMore    bool         `json:"has_more"`
+	NextOffset int          `json:"next_offset"`
+	Limit      int          `json:"limit"`
+	Offset     int          `json:"offset"`
+}
+
+func (d *DataSyncClient) GetChangesPage(since int64, dataType string, limit, offset int) (*SyncChangesPage, error) {
+	return d.getChangesPageByType(since, dataType, limit, offset)
+}
+
+func (d *DataSyncClient) getChangesByType(since int64, dataType string, limit, offset int) (*SyncChangesPage, error) {
+	allChanges := make([]SyncChange, 0)
+	var serverTime int64
+	currentOffset := offset
+	for {
+		page, err := d.getChangesPageByType(since, dataType, limit, currentOffset)
+		if err != nil {
+			return nil, err
+		}
+		allChanges = append(allChanges, page.Changes...)
+		if page.ServerTime > serverTime {
+			serverTime = page.ServerTime
+		}
+		if limit > 0 || !page.HasMore {
+			page.Changes = allChanges
+			page.ServerTime = serverTime
+			return page, nil
+		}
+		if page.NextOffset <= currentOffset {
+			return nil, fmt.Errorf("服务端返回了无效的 next_offset: %d", page.NextOffset)
+		}
+		currentOffset = page.NextOffset
+	}
+}
+
+func (d *DataSyncClient) getChangesPageByType(since int64, dataType string, limit, offset int) (*SyncChangesPage, error) {
+	params := url.Values{}
+	if since > 0 {
+		params.Set("since", strconv.FormatInt(since, 10))
+	}
+	if dataType != "" {
+		params.Set("data_type", dataType)
+	}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		params.Set("offset", strconv.Itoa(offset))
+	}
+
+	data, err := d.getSyncAPIData("/api/client/sync/changes", params)
+	if err != nil {
+		return nil, err
+	}
 	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Changes    []SyncChange `json:"changes"`
-			ServerTime int64        `json:"server_time"`
-			HasMore    bool         `json:"has_more"`
-		} `json:"data"`
+		Changes []struct {
+			DataType  string          `json:"data_type"`
+			DataKey   string          `json:"data_key"`
+			Action    string          `json:"action"`
+			Data      json.RawMessage `json:"data"`
+			Version   int64           `json:"version"`
+			UpdatedAt int64           `json:"updated_at"`
+		} `json:"changes"`
+		ServerTime int64 `json:"server_time"`
+		HasMore    bool  `json:"has_more"`
+		NextOffset int   `json:"next_offset"`
+		Limit      int   `json:"limit"`
+		Offset     int   `json:"offset"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, 0, err
-	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
 	}
 
-	return result.Data.Changes, result.Data.ServerTime, nil
+	changes := make([]SyncChange, 0, len(result.Changes))
+	for _, item := range result.Changes {
+		data := make(map[string]interface{})
+		if len(item.Data) > 0 {
+			if err := json.Unmarshal(item.Data, &data); err != nil {
+				var value interface{}
+				if err := json.Unmarshal(item.Data, &value); err == nil {
+					data["value"] = value
+				} else {
+					data["value"] = string(item.Data)
+				}
+			}
+		}
+		changes = append(changes, SyncChange{
+			ID:         item.DataKey,
+			DataType:   item.DataType,
+			DataKey:    item.DataKey,
+			Action:     item.Action,
+			Table:      item.DataType,
+			RecordID:   item.DataKey,
+			Operation:  item.Action,
+			Data:       data,
+			Version:    item.Version,
+			UpdatedAt:  item.UpdatedAt,
+			ChangeTime: item.UpdatedAt,
+		})
+	}
+
+	return &SyncChangesPage{
+		Changes:    changes,
+		ServerTime: result.ServerTime,
+		HasMore:    result.HasMore,
+		NextOffset: result.NextOffset,
+		Limit:      result.Limit,
+		Offset:     result.Offset,
+	}, nil
 }
 
 // GetSyncStatus 获取同步状态
 func (d *DataSyncClient) GetSyncStatus() (*SyncStatus, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
-
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/status?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/status", nil)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int        `json:"code"`
-		Message string     `json:"message"`
-		Data    SyncStatus `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	var result SyncStatus
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, err
 	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
-	}
 
-	return &result.Data, nil
+	return &result, nil
 }
 
 // ResolveConflict 解决数据冲突
+// conflictID: PushChanges 返回的 conflict_id
 // resolution: 解决策略 (use_local, use_server, merge)
 // mergedData: 当策略为 merge 时，提供合并后的数据
-func (d *DataSyncClient) ResolveConflict(tableName, recordID string, resolution ConflictResolution, mergedData map[string]interface{}) (*SyncResult, error) {
+func (d *DataSyncClient) ResolveConflict(conflictID string, resolution ConflictResolution, mergedData map[string]interface{}) (*SyncResult, error) {
 	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"table":      tableName,
-		"record_id":  recordID,
-		"resolution": string(resolution),
+		"conflict_id": conflictID,
+		"resolution":  string(resolution),
 	}
 	if mergedData != nil {
 		reqBody["merged_data"] = mergedData
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/conflict/resolve",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
+	_, err := d.postSyncAPIData("/api/client/sync/conflict/resolve", reqBody)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Status  string `json:"status"`
-			Version int64  `json:"version"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
-	}
 
 	return &SyncResult{
-		RecordID: recordID,
-		Status:   result.Data.Status,
-		Version:  result.Data.Version,
+		ConflictID: conflictID,
+		Status:     "resolved",
 	}, nil
 }
 
@@ -692,6 +818,7 @@ func (d *DataSyncClient) ResolveConflict(tableName, recordID string, resolution 
 type ConfigData struct {
 	Key       string      `json:"key"`
 	Value     interface{} `json:"value"`
+	Version   int64       `json:"version,omitempty"`
 	UpdatedAt int64       `json:"updated_at"`
 }
 
@@ -701,16 +828,19 @@ type WorkflowData struct {
 	Name      string                 `json:"name"`
 	Config    map[string]interface{} `json:"config"`
 	Enabled   bool                   `json:"enabled"`
+	Version   int64                  `json:"version,omitempty"`
 	UpdatedAt int64                  `json:"updated_at"`
 }
 
 // MaterialData 素材数据
 type MaterialData struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Content   string `json:"content"`
-	Tags      string `json:"tags"`
-	UpdatedAt int64  `json:"updated_at"`
+	ID         string `json:"id"`
+	MaterialID int64  `json:"material_id,omitempty"`
+	Type       string `json:"type"`
+	Content    string `json:"content"`
+	Tags       string `json:"tags"`
+	Version    int64  `json:"version,omitempty"`
+	UpdatedAt  int64  `json:"updated_at"`
 }
 
 // PostData 帖子数据
@@ -719,6 +849,10 @@ type PostData struct {
 	Content   string `json:"content"`
 	Status    string `json:"status"`
 	GroupID   string `json:"group_id"`
+	GroupName string `json:"group_name,omitempty"`
+	PostType  string `json:"post_type,omitempty"`
+	PostLink  string `json:"post_link,omitempty"`
+	Version   int64  `json:"version,omitempty"`
 	UpdatedAt int64  `json:"updated_at"`
 }
 
@@ -727,6 +861,7 @@ type CommentScriptData struct {
 	ID        string `json:"id"`
 	Content   string `json:"content"`
 	Category  string `json:"category"`
+	Version   int64  `json:"version,omitempty"`
 	UpdatedAt int64  `json:"updated_at"`
 }
 
@@ -743,347 +878,647 @@ type VoiceConfigData struct {
 	SpeedFactor  float64 `json:"speed_factor"`   // 语速因子
 	TTSVersion   int     `json:"tts_version"`    // TTS版本: 1=v1, 2=v2, 3=v3, 4=v4, 5=v2Pro, 6=v2ProPlus
 	Enabled      bool    `json:"enabled"`        // 是否启用
+	Version      int64   `json:"version,omitempty"`
 	UpdatedAt    int64   `json:"updated_at"`
 }
 
 // GetConfigs 获取配置数据
 func (d *DataSyncClient) GetConfigs(since int64) ([]ConfigData, int64, error) {
 	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
 	if since > 0 {
 		params.Set("since", strconv.FormatInt(since, 10))
 	}
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/configs?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/configs", params)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Configs    []ConfigData `json:"configs"`
-			ServerTime int64        `json:"server_time"`
-		} `json:"data"`
+	var listResponse struct {
+		Configs    []ConfigData `json:"configs"`
+		ServerTime int64        `json:"server_time"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(data, &listResponse); err == nil && listResponse.Configs != nil {
+		return listResponse.Configs, listResponse.ServerTime, nil
+	}
+
+	var configMap map[string]struct {
+		Value     interface{} `json:"value"`
+		Version   int64       `json:"version"`
+		UpdatedAt int64       `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &configMap); err != nil {
 		return nil, 0, err
 	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
+
+	configs := make([]ConfigData, 0, len(configMap))
+	var serverTime int64
+	for key, cfg := range configMap {
+		configs = append(configs, ConfigData{
+			Key:       key,
+			Value:     cfg.Value,
+			Version:   cfg.Version,
+			UpdatedAt: cfg.UpdatedAt,
+		})
+		if cfg.UpdatedAt > serverTime {
+			serverTime = cfg.UpdatedAt
+		}
 	}
 
-	return result.Data.Configs, result.Data.ServerTime, nil
+	return configs, serverTime, nil
 }
 
 // SaveConfigs 保存配置数据
 func (d *DataSyncClient) SaveConfigs(configs []ConfigData) error {
-	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"configs":    configs,
-	}
+	for _, cfg := range configs {
+		reqBody := map[string]interface{}{
+			"config_key": cfg.Key,
+			"value":      cfg.Value,
+			"version":    cfg.Version,
+		}
 
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/configs",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+		data, err := d.postSyncAPIData("/api/client/sync/configs", reqBody)
+		if err != nil {
+			return err
+		}
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return err
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
+		var result struct {
+			Status     string `json:"status"`
+			ConflictID string `json:"conflict_id,omitempty"`
+			Error      string `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return err
+		}
+		if result.Status != "" && result.Status != "success" {
+			if result.Error != "" {
+				return fmt.Errorf("保存配置 %s 失败: %s", cfg.Key, result.Error)
+			}
+			if result.ConflictID != "" {
+				return fmt.Errorf("保存配置 %s 冲突: %s", cfg.Key, result.ConflictID)
+			}
+			return fmt.Errorf("保存配置 %s 失败: %s", cfg.Key, result.Status)
+		}
 	}
 
 	return nil
 }
 
+type workflowServerData struct {
+	ID           string    `json:"id"`
+	WorkflowID   string    `json:"WorkflowID"`
+	WorkflowName string    `json:"WorkflowName"`
+	Steps        string    `json:"Steps"`
+	Status       string    `json:"Status"`
+	Version      int64     `json:"Version"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type materialServerData struct {
+	ID         string    `json:"id"`
+	MaterialID int64     `json:"MaterialID"`
+	FileName   string    `json:"FileName"`
+	FileType   string    `json:"FileType"`
+	Caption    string    `json:"Caption"`
+	GroupName  string    `json:"GroupName"`
+	Status     string    `json:"Status"`
+	Version    int64     `json:"Version"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type postServerData struct {
+	ID        string    `json:"id"`
+	PostType  string    `json:"PostType"`
+	GroupName string    `json:"GroupName"`
+	PostLink  string    `json:"PostLink"`
+	Caption   string    `json:"Caption"`
+	Status    string    `json:"Status"`
+	Version   int64     `json:"Version"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type commentScriptServerData struct {
+	ID        string    `json:"id"`
+	GroupName string    `json:"GroupName"`
+	Content   string    `json:"Content"`
+	Status    string    `json:"Status"`
+	Version   int64     `json:"Version"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func decodeAPIData(body []byte) (json.RawMessage, error) {
+	var result struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	if result.Code != 0 {
+		return nil, fmt.Errorf("API error: %s", result.Message)
+	}
+	return result.Data, nil
+}
+
+func (d *DataSyncClient) requestSyncAPIData(method, path string, params url.Values, reqBody interface{}) (json.RawMessage, error) {
+	doRequest := func() (json.RawMessage, error) {
+		accessToken, _, _, _ := d.client.getSessionSnapshot()
+		if accessToken == "" {
+			return nil, fmt.Errorf("请先激活或登录")
+		}
+
+		fullURL := d.client.serverURL + path
+		if params != nil && len(params) > 0 {
+			fullURL += "?" + params.Encode()
+		}
+
+		var body io.Reader
+		if reqBody != nil {
+			jsonBody, err := json.Marshal(reqBody)
+			if err != nil {
+				return nil, err
+			}
+			body = bytes.NewReader(jsonBody)
+		}
+
+		req, err := http.NewRequest(method, fullURL, body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		if reqBody != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := d.client.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("API error: 认证失败")
+		}
+		data, err := decodeAPIData(respBody)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return nil, fmt.Errorf("API error: HTTP %d", resp.StatusCode)
+		}
+		return data, nil
+	}
+
+	data, err := doRequest()
+	if err != nil && shouldRetryWithRefresh(err) && d.client.refreshClientSession() {
+		return doRequest()
+	}
+	return data, err
+}
+
+func (d *DataSyncClient) syncParams() url.Values {
+	return url.Values{}
+}
+
+func (d *DataSyncClient) getSyncAPIData(path string, params url.Values) (json.RawMessage, error) {
+	if params == nil {
+		params = d.syncParams()
+	}
+	return d.requestSyncAPIData(http.MethodGet, path, params, nil)
+}
+
+func (d *DataSyncClient) postSyncAPIData(path string, reqBody map[string]interface{}) (json.RawMessage, error) {
+	return d.requestSyncAPIData(http.MethodPost, path, nil, reqBody)
+}
+
+func (d *DataSyncClient) putSyncAPIData(path string, reqBody map[string]interface{}) (json.RawMessage, error) {
+	return d.requestSyncAPIData(http.MethodPut, path, nil, reqBody)
+}
+
+func (d *DataSyncClient) deleteSyncAPIData(path string, params url.Values) (json.RawMessage, error) {
+	if params == nil {
+		params = d.syncParams()
+	}
+	return d.requestSyncAPIData(http.MethodDelete, path, params, nil)
+}
+
+func decodeSyncResults(data json.RawMessage) ([]SyncResult, error) {
+	var one SyncResult
+	if err := json.Unmarshal(data, &one); err == nil && (one.Status != "" || one.DataKey != "" || one.RecordID != "") {
+		return normalizeSyncResults([]SyncResult{one}), nil
+	}
+
+	var batch struct {
+		Results []SyncResult `json:"results"`
+	}
+	if err := json.Unmarshal(data, &batch); err != nil {
+		return nil, err
+	}
+	return normalizeSyncResults(batch.Results), nil
+}
+
+func checkSyncResults(action string, results []SyncResult) error {
+	if len(results) == 0 {
+		return fmt.Errorf("%s失败: 服务端没有返回同步结果", action)
+	}
+	for _, result := range results {
+		if result.Status == "" || result.Status == "success" {
+			continue
+		}
+		if result.Status == "conflict" {
+			if result.ConflictID != "" {
+				return fmt.Errorf("%s冲突: %s", action, result.ConflictID)
+			}
+			return fmt.Errorf("%s冲突", action)
+		}
+		if result.Error != "" {
+			return fmt.Errorf("%s失败: %s", action, result.Error)
+		}
+		return fmt.Errorf("%s失败: %s", action, result.Status)
+	}
+	return nil
+}
+
+func syncRFC3339(ts int64) string {
+	if ts > 0 {
+		return time.Unix(ts, 0).UTC().Format(time.RFC3339Nano)
+	}
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+func unixTime(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+func maxInt64(current, value int64) int64 {
+	if value > current {
+		return value
+	}
+	return current
+}
+
+func parseWorkflowConfig(steps string) map[string]interface{} {
+	if steps == "" {
+		return map[string]interface{}{}
+	}
+	var config map[string]interface{}
+	if err := json.Unmarshal([]byte(steps), &config); err == nil && config != nil {
+		return config
+	}
+	var value interface{}
+	if err := json.Unmarshal([]byte(steps), &value); err == nil {
+		return map[string]interface{}{"steps": value}
+	}
+	return map[string]interface{}{"steps": steps}
+}
+
+func workflowToServerData(workflow WorkflowData) map[string]interface{} {
+	status := "active"
+	if !workflow.Enabled {
+		status = "disabled"
+	}
+	steps, _ := json.Marshal(workflow.Config)
+	if len(steps) == 0 || string(steps) == "null" {
+		steps = []byte("{}")
+	}
+	return map[string]interface{}{
+		"WorkflowID":   workflow.ID,
+		"WorkflowName": workflow.Name,
+		"Steps":        string(steps),
+		"Status":       status,
+		"Version":      workflow.Version,
+		"create_time":  syncRFC3339(workflow.UpdatedAt),
+	}
+}
+
+func workflowFromServerData(workflow workflowServerData) WorkflowData {
+	return WorkflowData{
+		ID:        workflow.WorkflowID,
+		Name:      workflow.WorkflowName,
+		Config:    parseWorkflowConfig(workflow.Steps),
+		Enabled:   workflow.Status != "disabled",
+		Version:   workflow.Version,
+		UpdatedAt: unixTime(workflow.UpdatedAt),
+	}
+}
+
+func stableInt64ID(value string) int64 {
+	if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
+		return parsed
+	}
+	if value == "" {
+		value = strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(value))
+	return int64(h.Sum64() & 0x7fffffffffffffff)
+}
+
+func materialToServerData(material MaterialData) map[string]interface{} {
+	materialID := material.MaterialID
+	if materialID == 0 {
+		materialID = stableInt64ID(material.ID)
+	}
+	status := "未使用"
+	return map[string]interface{}{
+		"MaterialID": materialID,
+		"FileName":   material.Content,
+		"FileType":   material.Type,
+		"Caption":    material.Content,
+		"GroupName":  material.Tags,
+		"Status":     status,
+		"Version":    material.Version,
+	}
+}
+
+func materialFromServerData(material materialServerData) MaterialData {
+	content := material.Caption
+	if content == "" {
+		content = material.FileName
+	}
+	id := strconv.FormatInt(material.MaterialID, 10)
+	if material.MaterialID == 0 {
+		id = material.ID
+	}
+	return MaterialData{
+		ID:         id,
+		MaterialID: material.MaterialID,
+		Type:       material.FileType,
+		Content:    content,
+		Tags:       material.GroupName,
+		Version:    material.Version,
+		UpdatedAt:  unixTime(material.UpdatedAt),
+	}
+}
+
+func postToServerData(post PostData) map[string]interface{} {
+	groupName := post.GroupName
+	if groupName == "" {
+		groupName = post.GroupID
+	}
+	if groupName == "" {
+		groupName = "default"
+	}
+	postType := post.PostType
+	if postType == "" {
+		postType = "user_posts"
+	}
+	postLink := post.PostLink
+	if postLink == "" {
+		postLink = post.ID
+	}
+	if postLink == "" {
+		postLink = "local://" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	status := post.Status
+	if status == "" {
+		status = "unused"
+	}
+	return map[string]interface{}{
+		"id":           post.ID,
+		"PostType":     postType,
+		"GroupName":    groupName,
+		"PostLink":     postLink,
+		"Caption":      post.Content,
+		"Status":       status,
+		"Version":      post.Version,
+		"collected_at": syncRFC3339(post.UpdatedAt),
+	}
+}
+
+func postFromServerData(post postServerData) PostData {
+	return PostData{
+		ID:        post.ID,
+		Content:   post.Caption,
+		Status:    post.Status,
+		GroupID:   post.GroupName,
+		GroupName: post.GroupName,
+		PostType:  post.PostType,
+		PostLink:  post.PostLink,
+		Version:   post.Version,
+		UpdatedAt: unixTime(post.UpdatedAt),
+	}
+}
+
+func commentScriptToServerData(script CommentScriptData) map[string]interface{} {
+	status := "active"
+	return map[string]interface{}{
+		"id":        script.ID,
+		"GroupName": script.Category,
+		"Content":   script.Content,
+		"Status":    status,
+		"Version":   script.Version,
+	}
+}
+
+func commentScriptFromServerData(script commentScriptServerData) CommentScriptData {
+	return CommentScriptData{
+		ID:        script.ID,
+		Content:   script.Content,
+		Category:  script.GroupName,
+		Version:   script.Version,
+		UpdatedAt: unixTime(script.UpdatedAt),
+	}
+}
+
 // GetWorkflows 获取工作流数据
 func (d *DataSyncClient) GetWorkflows(since int64) ([]WorkflowData, int64, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
+	params := d.syncParams()
 	if since > 0 {
 		params.Set("since", strconv.FormatInt(since, 10))
 	}
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/workflows?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/workflows", params)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Workflows  []WorkflowData `json:"workflows"`
-			ServerTime int64          `json:"server_time"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, 0, err
-	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
+	var serverItems []workflowServerData
+	var serverTime int64
+	if err := json.Unmarshal(data, &serverItems); err != nil {
+		var wrapped struct {
+			Workflows  []workflowServerData `json:"workflows"`
+			ServerTime int64                `json:"server_time"`
+		}
+		if wrapErr := json.Unmarshal(data, &wrapped); wrapErr != nil {
+			return nil, 0, err
+		}
+		serverItems = wrapped.Workflows
+		serverTime = wrapped.ServerTime
 	}
 
-	return result.Data.Workflows, result.Data.ServerTime, nil
+	workflows := make([]WorkflowData, 0, len(serverItems))
+	for _, item := range serverItems {
+		workflows = append(workflows, workflowFromServerData(item))
+		serverTime = maxInt64(serverTime, unixTime(item.UpdatedAt))
+	}
+	return workflows, serverTime, nil
 }
 
 // SaveWorkflows 保存工作流数据
 func (d *DataSyncClient) SaveWorkflows(workflows []WorkflowData) error {
-	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"workflows":  workflows,
+	for _, workflow := range workflows {
+		data, err := d.postSyncAPIData("/api/client/sync/workflows", map[string]interface{}{
+			"workflow": workflowToServerData(workflow),
+			"version":  workflow.Version,
+		})
+		if err != nil {
+			return err
+		}
+		results, err := decodeSyncResults(data)
+		if err != nil {
+			return err
+		}
+		if err := checkSyncResults("保存工作流 "+workflow.ID, results); err != nil {
+			return err
+		}
 	}
-
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/workflows",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return err
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
 	return nil
 }
 
 // DeleteWorkflow 删除工作流
 func (d *DataSyncClient) DeleteWorkflow(workflowID string) error {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
-
-	req, _ := http.NewRequest("DELETE",
-		d.client.serverURL+"/api/client/sync/workflows/"+workflowID+"?"+params.Encode(), nil)
-
-	resp, err := d.client.httpClient.Do(req)
+	data, err := d.deleteSyncAPIData("/api/client/sync/workflows/"+workflowID, nil)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	results, err := decodeSyncResults(data)
+	if err != nil {
 		return err
 	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	return checkSyncResults("删除工作流 "+workflowID, results)
 }
 
 // GetMaterials 获取素材数据
 func (d *DataSyncClient) GetMaterials(since int64) ([]MaterialData, int64, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
+	params := d.syncParams()
 	if since > 0 {
 		params.Set("since", strconv.FormatInt(since, 10))
 	}
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/materials?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/materials", params)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Materials  []MaterialData `json:"materials"`
-			ServerTime int64          `json:"server_time"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, 0, err
-	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
+	var serverItems []materialServerData
+	var serverTime int64
+	if err := json.Unmarshal(data, &serverItems); err != nil {
+		var wrapped struct {
+			Materials  []materialServerData `json:"materials"`
+			ServerTime int64                `json:"server_time"`
+		}
+		if wrapErr := json.Unmarshal(data, &wrapped); wrapErr != nil {
+			return nil, 0, err
+		}
+		serverItems = wrapped.Materials
+		serverTime = wrapped.ServerTime
 	}
 
-	return result.Data.Materials, result.Data.ServerTime, nil
+	materials := make([]MaterialData, 0, len(serverItems))
+	for _, item := range serverItems {
+		materials = append(materials, materialFromServerData(item))
+		serverTime = maxInt64(serverTime, unixTime(item.UpdatedAt))
+	}
+	return materials, serverTime, nil
 }
 
 // SaveMaterials 保存素材数据
 func (d *DataSyncClient) SaveMaterials(materials []MaterialData) error {
-	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"materials":  materials,
+	if len(materials) == 0 {
+		return nil
 	}
-
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/materials/batch",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
+	serverItems := make([]map[string]interface{}, 0, len(materials))
+	for _, material := range materials {
+		serverItems = append(serverItems, materialToServerData(material))
+	}
+	data, err := d.postSyncAPIData("/api/client/sync/materials/batch", map[string]interface{}{
+		"materials": serverItems,
+	})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	results, err := decodeSyncResults(data)
+	if err != nil {
 		return err
 	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	return checkSyncResults("保存素材", results)
 }
 
 // GetPosts 获取帖子数据
 func (d *DataSyncClient) GetPosts(since int64, groupID string) ([]PostData, int64, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
+	params := d.syncParams()
 	if since > 0 {
 		params.Set("since", strconv.FormatInt(since, 10))
 	}
 	if groupID != "" {
-		params.Set("group_id", groupID)
+		params.Set("group", groupID)
 	}
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/posts?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/posts", params)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Posts      []PostData `json:"posts"`
-			ServerTime int64      `json:"server_time"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, 0, err
-	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
+	var serverItems []postServerData
+	var serverTime int64
+	if err := json.Unmarshal(data, &serverItems); err != nil {
+		var wrapped struct {
+			List       []postServerData `json:"list"`
+			Posts      []postServerData `json:"posts"`
+			ServerTime int64            `json:"server_time"`
+		}
+		if wrapErr := json.Unmarshal(data, &wrapped); wrapErr != nil {
+			return nil, 0, err
+		}
+		serverItems = wrapped.List
+		if serverItems == nil {
+			serverItems = wrapped.Posts
+		}
+		serverTime = wrapped.ServerTime
 	}
 
-	return result.Data.Posts, result.Data.ServerTime, nil
+	posts := make([]PostData, 0, len(serverItems))
+	for _, item := range serverItems {
+		posts = append(posts, postFromServerData(item))
+		serverTime = maxInt64(serverTime, unixTime(item.UpdatedAt))
+	}
+	return posts, serverTime, nil
 }
 
 // SavePosts 批量保存帖子数据
 func (d *DataSyncClient) SavePosts(posts []PostData) error {
-	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"posts":      posts,
+	if len(posts) == 0 {
+		return nil
 	}
-
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/posts/batch",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
+	serverItems := make([]map[string]interface{}, 0, len(posts))
+	for _, post := range posts {
+		serverItems = append(serverItems, postToServerData(post))
+	}
+	data, err := d.postSyncAPIData("/api/client/sync/posts/batch", map[string]interface{}{
+		"posts": serverItems,
+	})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	results, err := decodeSyncResults(data)
+	if err != nil {
 		return err
 	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	return checkSyncResults("保存帖子", results)
 }
 
 // UpdatePostStatus 更新帖子状态
 func (d *DataSyncClient) UpdatePostStatus(postID, status string) error {
-	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"status":     status,
-	}
-
-	jsonBody, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("PUT",
-		d.client.serverURL+"/api/client/sync/posts/"+postID+"/status",
-		bytes.NewReader(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := d.client.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return err
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	_, err := d.putSyncAPIData("/api/client/sync/posts/"+postID+"/status", map[string]interface{}{
+		"status": status,
+	})
+	return err
 }
 
 // PostGroup 帖子分组
@@ -1095,237 +1530,253 @@ type PostGroup struct {
 
 // GetPostGroups 获取帖子分组
 func (d *DataSyncClient) GetPostGroups() ([]PostGroup, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
-
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/posts/groups?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/posts/groups", d.syncParams())
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
+	var serverGroups []struct {
+		GroupName  string `json:"group_name"`
+		PostType   string `json:"post_type"`
+		TotalCount int    `json:"total_count"`
+	}
+	if err := json.Unmarshal(data, &serverGroups); err != nil {
+		var wrapped struct {
 			Groups []PostGroup `json:"groups"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
+		}
+		if wrapErr := json.Unmarshal(data, &wrapped); wrapErr != nil {
+			return nil, err
+		}
+		return wrapped.Groups, nil
 	}
 
-	return result.Data.Groups, nil
+	groups := make([]PostGroup, 0, len(serverGroups))
+	for _, group := range serverGroups {
+		groups = append(groups, PostGroup{
+			ID:    group.GroupName,
+			Name:  group.GroupName,
+			Count: group.TotalCount,
+		})
+	}
+	return groups, nil
 }
 
 // GetCommentScripts 获取评论话术
 func (d *DataSyncClient) GetCommentScripts(since int64, category string) ([]CommentScriptData, int64, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
+	params := d.syncParams()
 	if since > 0 {
 		params.Set("since", strconv.FormatInt(since, 10))
 	}
 	if category != "" {
-		params.Set("category", category)
+		params.Set("group", category)
 	}
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/comment-scripts?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/sync/comment-scripts", params)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Scripts    []CommentScriptData `json:"scripts"`
-			ServerTime int64               `json:"server_time"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, 0, err
-	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
+	var serverItems []commentScriptServerData
+	var serverTime int64
+	if err := json.Unmarshal(data, &serverItems); err != nil {
+		var wrapped struct {
+			Scripts    []commentScriptServerData `json:"scripts"`
+			ServerTime int64                     `json:"server_time"`
+		}
+		if wrapErr := json.Unmarshal(data, &wrapped); wrapErr != nil {
+			return nil, 0, err
+		}
+		serverItems = wrapped.Scripts
+		serverTime = wrapped.ServerTime
 	}
 
-	return result.Data.Scripts, result.Data.ServerTime, nil
+	scripts := make([]CommentScriptData, 0, len(serverItems))
+	for _, item := range serverItems {
+		scripts = append(scripts, commentScriptFromServerData(item))
+		serverTime = maxInt64(serverTime, unixTime(item.UpdatedAt))
+	}
+	return scripts, serverTime, nil
 }
 
 // SaveCommentScripts 批量保存评论话术
 func (d *DataSyncClient) SaveCommentScripts(scripts []CommentScriptData) error {
-	reqBody := map[string]interface{}{
-		"app_key":    d.client.appKey,
-		"machine_id": d.client.machineID,
-		"scripts":    scripts,
+	if len(scripts) == 0 {
+		return nil
 	}
-
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/comment-scripts/batch",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
+	serverItems := make([]map[string]interface{}, 0, len(scripts))
+	for _, script := range scripts {
+		serverItems = append(serverItems, commentScriptToServerData(script))
+	}
+	data, err := d.postSyncAPIData("/api/client/sync/comment-scripts/batch", map[string]interface{}{
+		"scripts": serverItems,
+	})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	results, err := decodeSyncResults(data)
+	if err != nil {
 		return err
 	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	return checkSyncResults("保存评论话术", results)
 }
 
 // ==================== TTS声音配置同步 ====================
 
+func voiceConfigToServerData(config VoiceConfigData) map[string]interface{} {
+	return map[string]interface{}{
+		"VoiceID":      config.ID,
+		"Role":         config.Role,
+		"Name":         config.Name,
+		"GPTPath":      config.GPTPath,
+		"SoVITSPath":   config.SoVITSPath,
+		"RefAudioPath": config.RefAudioPath,
+		"RefText":      config.RefText,
+		"Language":     config.Language,
+		"SpeedFactor":  config.SpeedFactor,
+		"TTSVersion":   config.TTSVersion,
+		"Enabled":      config.Enabled,
+		"Version":      config.Version,
+	}
+}
+
+func stringFromMap(data map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := data[key]; ok {
+			if text, ok := value.(string); ok {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func int64FromMap(data map[string]interface{}, keys ...string) int64 {
+	for _, key := range keys {
+		if value, ok := data[key]; ok {
+			switch typed := value.(type) {
+			case float64:
+				return int64(typed)
+			case int64:
+				return typed
+			case int:
+				return int64(typed)
+			case string:
+				parsed, _ := strconv.ParseInt(typed, 10, 64)
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func float64FromMap(data map[string]interface{}, keys ...string) float64 {
+	for _, key := range keys {
+		if value, ok := data[key]; ok {
+			switch typed := value.(type) {
+			case float64:
+				return typed
+			case int:
+				return float64(typed)
+			case int64:
+				return float64(typed)
+			case string:
+				parsed, _ := strconv.ParseFloat(typed, 64)
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func boolFromMap(data map[string]interface{}, keys ...string) bool {
+	for _, key := range keys {
+		if value, ok := data[key]; ok {
+			if typed, ok := value.(bool); ok {
+				return typed
+			}
+		}
+	}
+	return false
+}
+
+func voiceConfigFromSyncData(data map[string]interface{}, updatedAt int64) VoiceConfigData {
+	return VoiceConfigData{
+		ID:           int64FromMap(data, "VoiceID", "voice_id", "id"),
+		Role:         stringFromMap(data, "Role", "role"),
+		Name:         stringFromMap(data, "Name", "name"),
+		GPTPath:      stringFromMap(data, "GPTPath", "gpt_path"),
+		SoVITSPath:   stringFromMap(data, "SoVITSPath", "sovits_path"),
+		RefAudioPath: stringFromMap(data, "RefAudioPath", "ref_audio_path"),
+		RefText:      stringFromMap(data, "RefText", "ref_text"),
+		Language:     stringFromMap(data, "Language", "language"),
+		SpeedFactor:  float64FromMap(data, "SpeedFactor", "speed_factor"),
+		TTSVersion:   int(int64FromMap(data, "TTSVersion", "tts_version")),
+		Enabled:      boolFromMap(data, "Enabled", "enabled"),
+		Version:      int64FromMap(data, "Version", "version"),
+		UpdatedAt:    updatedAt,
+	}
+}
+
 // GetVoiceConfigs 获取TTS声音配置
 func (d *DataSyncClient) GetVoiceConfigs(since int64) ([]VoiceConfigData, int64, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
-	if since > 0 {
-		params.Set("since", strconv.FormatInt(since, 10))
-	}
-
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/sync/voice-configs?" + params.Encode())
+	changes, serverTime, err := d.GetChanges(since, []string{DataTypeVoiceConfig})
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			VoiceConfigs []VoiceConfigData `json:"voice_configs"`
-			ServerTime   int64             `json:"server_time"`
-		} `json:"data"`
+	configs := make([]VoiceConfigData, 0, len(changes))
+	for _, change := range changes {
+		if change.Action == "delete" {
+			continue
+		}
+		configs = append(configs, voiceConfigFromSyncData(change.Data, change.UpdatedAt))
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, 0, err
-	}
-	if result.Code != 0 {
-		return nil, 0, fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return result.Data.VoiceConfigs, result.Data.ServerTime, nil
+	return configs, serverTime, nil
 }
 
 // SaveVoiceConfigs 批量保存TTS声音配置
 func (d *DataSyncClient) SaveVoiceConfigs(configs []VoiceConfigData) error {
-	reqBody := map[string]interface{}{
-		"app_key":       d.client.appKey,
-		"machine_id":    d.client.machineID,
-		"voice_configs": configs,
+	if len(configs) == 0 {
+		return nil
 	}
-
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/voice-configs/batch",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
+	changes := make([]SyncChange, 0, len(configs))
+	for _, config := range configs {
+		if config.ID == 0 {
+			return fmt.Errorf("声音配置ID不能为空")
+		}
+		changes = append(changes, SyncChange{
+			DataType:     DataTypeVoiceConfig,
+			DataKey:      strconv.FormatInt(config.ID, 10),
+			Action:       "update",
+			Data:         voiceConfigToServerData(config),
+			LocalVersion: config.Version,
+		})
+	}
+	results, err := d.PushChanges(changes)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return err
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	return checkSyncResults("保存声音配置", results)
 }
 
 // SaveVoiceConfig 保存单个TTS声音配置
 func (d *DataSyncClient) SaveVoiceConfig(config VoiceConfigData) error {
-	reqBody := map[string]interface{}{
-		"app_key":      d.client.appKey,
-		"machine_id":   d.client.machineID,
-		"voice_config": config,
-	}
-
-	jsonBody, _ := json.Marshal(reqBody)
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/sync/voice-configs",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return err
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	return d.SaveVoiceConfigs([]VoiceConfigData{config})
 }
 
 // DeleteVoiceConfig 删除TTS声音配置
 func (d *DataSyncClient) DeleteVoiceConfig(voiceConfigID int64) error {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
-
-	req, _ := http.NewRequest("DELETE",
-		d.client.serverURL+"/api/client/sync/voice-configs/"+strconv.FormatInt(voiceConfigID, 10)+"?"+params.Encode(), nil)
-
-	resp, err := d.client.httpClient.Do(req)
+	results, err := d.PushChanges([]SyncChange{
+		{
+			DataType: DataTypeVoiceConfig,
+			DataKey:  strconv.FormatInt(voiceConfigID, 10),
+			Action:   "delete",
+			Data:     nil,
+		},
+	})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return err
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	return checkSyncResults("删除声音配置", results)
 }
 
 // ==================== 数据备份和同步功能 ====================
@@ -1337,42 +1788,14 @@ func (d *DataSyncClient) DeleteVoiceConfig(voiceConfigID int64) error {
 // itemCount: 条目数量（可选）
 func (d *DataSyncClient) PushBackup(dataType, dataJSON, deviceName string, itemCount int) error {
 	reqBody := map[string]interface{}{
-		"app_key":     d.client.appKey,
-		"machine_id":  d.client.machineID,
 		"data_type":   dataType,
 		"data_json":   dataJSON,
 		"device_name": deviceName,
 		"item_count":  itemCount,
 	}
 
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("序列化请求失败: %w", err)
-	}
-
-	resp, err := d.client.httpClient.Post(
-		d.client.serverURL+"/api/client/backup/push",
-		"application/json",
-		bytes.NewReader(jsonBody),
-	)
-	if err != nil {
-		return fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("解析响应失败: %w", err)
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return nil
+	_, err := d.postSyncAPIData("/api/client/backup/push", reqBody)
+	return err
 }
 
 // PullBackup 从服务器拉取指定类型的备份数据
@@ -1380,63 +1803,54 @@ func (d *DataSyncClient) PushBackup(dataType, dataJSON, deviceName string, itemC
 // 返回备份数据列表（按版本降序排列，第一个为当前版本）
 func (d *DataSyncClient) PullBackup(dataType string) ([]BackupData, error) {
 	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
 	params.Set("data_type", dataType)
 
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/backup/pull?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/backup/pull", params)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int          `json:"code"`
-		Message string       `json:"message"`
-		Data    []BackupData `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
-	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
-	}
-
-	return result.Data, nil
+	return parseBackupData(data)
 }
 
 // PullAllBackups 从服务器拉取所有类型的备份数据
 // 返回按数据类型分组的备份数据映射
 func (d *DataSyncClient) PullAllBackups() (map[string][]BackupData, error) {
-	params := url.Values{}
-	params.Set("app_key", d.client.appKey)
-	params.Set("machine_id", d.client.machineID)
-
-	resp, err := d.client.httpClient.Get(d.client.serverURL + "/api/client/backup/pull?" + params.Encode())
+	data, err := d.getSyncAPIData("/api/client/backup/pull", nil)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code    int          `json:"code"`
-		Message string       `json:"message"`
-		Data    []BackupData `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
-	}
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
+	backups, err := parseBackupData(data)
+	if err != nil {
+		return nil, err
 	}
 
 	// 按数据类型分组
 	backupMap := make(map[string][]BackupData)
-	for _, backup := range result.Data {
+	for _, backup := range backups {
 		backupMap[backup.DataType] = append(backupMap[backup.DataType], backup)
 	}
 
 	return backupMap, nil
+}
+
+func parseBackupData(raw json.RawMessage) ([]BackupData, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var direct []BackupData
+	if err := json.Unmarshal(raw, &direct); err == nil {
+		return direct, nil
+	}
+
+	var wrapped struct {
+		Data []BackupData `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
+		return nil, fmt.Errorf("解析备份数据失败: %w", err)
+	}
+
+	return wrapped.Data, nil
 }

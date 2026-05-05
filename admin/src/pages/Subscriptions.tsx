@@ -59,6 +59,8 @@ const Subscriptions: React.FC = () => {
     fetchData();
     fetchApps();
     fetchCustomers('', 1);
+    // 首次进入页面时拉取账号、应用和客户候选；后续搜索/翻页由各自事件触发。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -89,6 +91,26 @@ const Subscriptions: React.FC = () => {
       expandedScrollTimerRef.current = null;
     }, 120);
   };
+
+  const getAppOptionLabel = (app?: { name?: string; app_key?: string }) => {
+    if (!app) {
+      return '-';
+    }
+
+    const appKey = app.app_key ? `${app.app_key.slice(0, 8)}...` : 'no-key';
+    return `${app.name || '未命名应用'} (${appKey})`;
+  };
+
+  const renderAppCell = (record: { app_name?: string; app_key?: string }) => (
+    <div style={{ lineHeight: 1.5 }}>
+      <div>{record.app_name || '-'}</div>
+      {record.app_key && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {record.app_key}
+        </Text>
+      )}
+    </div>
+  );
 
   const fetchData = async (page = 1, pageSize = 10, filterParams = filters): Promise<AccountSummary[]> => {
     setLoading(true);
@@ -588,7 +610,7 @@ const Subscriptions: React.FC = () => {
     {
       title: '应用',
       key: 'app_name',
-      render: (_: any, record: any) => record.app_name || '-',
+      render: (_: any, record: any) => renderAppCell(record),
     },
     {
       title: '状态',
@@ -685,7 +707,7 @@ const Subscriptions: React.FC = () => {
         </Form.Item>
         <Form.Item name="app_id">
           <Select placeholder="选择应用" allowClear style={{ width: 160 }}>
-            {apps.map(app => <Option key={app.id} value={app.id}>{app.name}</Option>)}
+            {apps.map(app => <Option key={app.id} value={app.id}>{getAppOptionLabel(app)}</Option>)}
           </Select>
         </Form.Item>
         <Form.Item name="status">
@@ -726,7 +748,7 @@ const Subscriptions: React.FC = () => {
         <Form form={form} layout="vertical">
           <Form.Item name="app_id" label="应用" rules={[{ required: true, message: '请选择应用' }]}>
             <Select placeholder="选择应用" disabled={!!currentSubscription} onChange={handleAppChange}>
-              {apps.map(app => <Option key={app.id} value={app.id}>{app.name}</Option>)}
+              {apps.map(app => <Option key={app.id} value={app.id}>{getAppOptionLabel(app)}</Option>)}
             </Select>
           </Form.Item>
           <Form.Item name="customer_id" label="客户" rules={[{ required: true, message: '请选择客户' }]}>
@@ -758,7 +780,7 @@ const Subscriptions: React.FC = () => {
             label="终身解绑总次数"
             initialValue={5}
             rules={[{ required: true, message: '请输入终身解绑总次数' }]}
-            extra="客户端累计解绑总上限，超限后只能管理员后台解绑"
+            extra="客户端累计解绑总上限；填 0 表示禁止客户端自助解绑，超限后只能管理员后台解绑"
           >
             <InputNumber min={0} max={1000} style={{ width: '100%' }} />
           </Form.Item>
@@ -810,6 +832,7 @@ const Subscriptions: React.FC = () => {
         {currentSubscription && (
           <Descriptions column={2} bordered size="small">
             <Descriptions.Item label="应用">{currentSubscription.application?.name || '-'}</Descriptions.Item>
+            <Descriptions.Item label="App Key">{currentSubscription.application?.app_key || '-'}</Descriptions.Item>
             <Descriptions.Item label="客户">
               {getCustomerLabel(currentSubscription.customer) !== '-'
                 ? getCustomerLabel(currentSubscription.customer)

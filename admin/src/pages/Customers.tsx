@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Table, Button, Space, Tag, Modal, Form, Input, Select, message, Card,
   Popconfirm, Tooltip, Drawer, Descriptions, Tabs, List
@@ -86,18 +86,20 @@ const Customers: React.FC = () => {
   const [passwordForm] = Form.useForm();
 
   const isAdmin = user?.role === 'owner' || user?.role === 'admin';
+  const canUpdateCustomer = user?.role === 'owner' || user?.role === 'admin' || user?.role === 'developer';
+  const canDeleteCustomer = user?.role === 'owner' || user?.role === 'admin';
 
   // 获取团队成员列表（用于选择所属成员）
-  const fetchTeamMembers = async () => {
+  const fetchTeamMembers = useCallback(async () => {
     try {
       const res: any = await teamApi.list({ page: 1, page_size: 100 });
       setTeamMembers(res.list || []);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
-  };
+  }, []);
 
-  const fetchCustomers = async (page = 1, pageSize = 20) => {
+  const fetchCustomers = useCallback(async (page = 1, pageSize = 20) => {
     setLoading(true);
     try {
       const params: any = { page, page_size: pageSize };
@@ -107,20 +109,20 @@ const Customers: React.FC = () => {
       const res: any = await customerApi.list(params);
       setCustomers(res.list || []);
       setPagination({ current: page, pageSize, total: res.total || 0 });
-    } catch (error) {
+    } catch {
       // handled by interceptor
     } finally {
       setLoading(false);
     }
-  };
+  }, [ownerFilter, searchKeyword, statusFilter]);
 
   useEffect(() => {
     fetchTeamMembers();
-  }, []);
+  }, [fetchTeamMembers]);
 
   useEffect(() => {
     fetchCustomers();
-  }, [searchKeyword, statusFilter, ownerFilter]);
+  }, [fetchCustomers]);
 
   const fetchCustomerDetails = async (id: string) => {
     try {
@@ -134,24 +136,28 @@ const Customers: React.FC = () => {
       setCustomerLicenses(licenses || []);
       setCustomerSubscriptions(subscriptions || []);
       setCustomerDevices(devices || []);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
 
   const handleCreate = async (values: any) => {
+    if (!canUpdateCustomer) return;
+
     try {
       await customerApi.create(values);
       message.success('客户创建成功');
       setModalVisible(false);
       form.resetFields();
       fetchCustomers(pagination.current, pagination.pageSize);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
 
   const handleUpdate = async (values: any) => {
+    if (!canUpdateCustomer) return;
+
     if (!editingCustomer) return;
     try {
       await customerApi.update(editingCustomer.id, values);
@@ -160,22 +166,26 @@ const Customers: React.FC = () => {
       setEditingCustomer(null);
       form.resetFields();
       fetchCustomers(pagination.current, pagination.pageSize);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
 
   const handleDelete = async (id: string) => {
+    if (!canDeleteCustomer) return;
+
     try {
       await customerApi.delete(id);
       message.success('客户已删除');
       fetchCustomers(pagination.current, pagination.pageSize);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
 
   const handleToggleStatus = async (customer: Customer) => {
+    if (!canUpdateCustomer) return;
+
     try {
       if (customer.status === 'active') {
         await customerApi.disable(customer.id);
@@ -185,19 +195,21 @@ const Customers: React.FC = () => {
         message.success('客户已启用');
       }
       fetchCustomers(pagination.current, pagination.pageSize);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
 
   const handleResetPassword = async (values: { password: string }) => {
+    if (!canUpdateCustomer) return;
+
     if (!selectedCustomer) return;
     try {
       await customerApi.resetPassword(selectedCustomer.id, values);
       message.success('密码已重置');
       setResetPasswordModalVisible(false);
       passwordForm.resetFields();
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
@@ -258,32 +270,38 @@ const Customers: React.FC = () => {
               }}
             />
           </Tooltip>
-          <Tooltip title="编辑">
-            <Button
-              type="link"
-              size="small"
-              icon={<EditOutlined />}
-              onClick={() => {
-                setEditingCustomer(record);
-                form.setFieldsValue(record);
-                setModalVisible(true);
-              }}
-            />
-          </Tooltip>
-          <Tooltip title={record.status === 'active' ? '禁用' : '启用'}>
-            <Button
-              type="link"
-              size="small"
-              icon={record.status === 'active' ? <StopOutlined /> : <CheckOutlined />}
-              onClick={() => handleToggleStatus(record)}
-            />
-          </Tooltip>
-          <Popconfirm
-            title="确定要删除该客户吗？相关数据也会被删除。"
-            onConfirm={() => handleDelete(record.id)}
-          >
-            <Button type="link" size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
+          {canUpdateCustomer && (
+            <Tooltip title="编辑">
+              <Button
+                type="link"
+                size="small"
+                icon={<EditOutlined />}
+                onClick={() => {
+                  setEditingCustomer(record);
+                  form.setFieldsValue(record);
+                  setModalVisible(true);
+                }}
+              />
+            </Tooltip>
+          )}
+          {canUpdateCustomer && (
+            <Tooltip title={record.status === 'active' ? '禁用' : '启用'}>
+              <Button
+                type="link"
+                size="small"
+                icon={record.status === 'active' ? <StopOutlined /> : <CheckOutlined />}
+                onClick={() => handleToggleStatus(record)}
+              />
+            </Tooltip>
+          )}
+          {canDeleteCustomer && (
+            <Popconfirm
+              title="确定要删除该客户吗？相关数据也会被删除。"
+              onConfirm={() => handleDelete(record.id)}
+            >
+              <Button type="link" size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -407,9 +425,11 @@ const Customers: React.FC = () => {
               ))}
             </Select>
           )}
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalVisible(true)}>
-            添加客户
-          </Button>
+          {canUpdateCustomer && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalVisible(true)}>
+              添加客户
+            </Button>
+          )}
         </Space>
       }
     >
@@ -457,6 +477,11 @@ const Customers: React.FC = () => {
               name="password"
               label="密码"
               extra="可选，用于订阅模式登录"
+              rules={[
+                { min: 8, message: '密码至少8位' },
+                { pattern: /\d/, message: '密码必须包含数字' },
+                { pattern: /[^A-Za-z0-9]/, message: '密码必须包含特殊字符' },
+              ]}
             >
               <Input.Password placeholder="请输入密码（可选）" />
             </Form.Item>
@@ -506,7 +531,7 @@ const Customers: React.FC = () => {
         }}
         width={600}
         extra={
-          selectedCustomer && (
+          selectedCustomer && canUpdateCustomer && (
             <Button
               icon={<KeyOutlined />}
               onClick={() => setResetPasswordModalVisible(true)}
@@ -534,7 +559,9 @@ const Customers: React.FC = () => {
             label="新密码"
             rules={[
               { required: true, message: '请输入新密码' },
-              { min: 6, message: '密码至少6位' },
+              { min: 8, message: '密码至少8位' },
+              { pattern: /\d/, message: '密码必须包含数字' },
+              { pattern: /[^A-Za-z0-9]/, message: '密码必须包含特殊字符' },
             ]}
           >
             <Input.Password placeholder="请输入新密码" />

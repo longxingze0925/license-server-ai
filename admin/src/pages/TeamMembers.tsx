@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Table, Button, Space, Tag, Modal, Form, Input, Select, message, Card, Popconfirm, Tooltip } from 'antd';
 import { PlusOutlined, DeleteOutlined, EditOutlined, KeyOutlined } from '@ant-design/icons';
 import { teamApi } from '../api';
@@ -40,22 +40,22 @@ const TeamMembers: React.FC = () => {
   const isOwner = user?.role === 'owner';
   const isAdmin = user?.role === 'admin' || isOwner;
 
-  const fetchMembers = async (page = 1, pageSize = 20) => {
+  const fetchMembers = useCallback(async (page = 1, pageSize = 20) => {
     setLoading(true);
     try {
       const res: any = await teamApi.list({ page, page_size: pageSize });
       setMembers(res.list || []);
       setPagination({ current: page, pageSize, total: res.total || 0 });
-    } catch (error) {
+    } catch {
       // handled by interceptor
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchMembers();
-  }, []);
+  }, [fetchMembers]);
 
   const handleCreate = async (values: { email: string; password: string; name: string; role: string; phone?: string }) => {
     try {
@@ -64,7 +64,7 @@ const TeamMembers: React.FC = () => {
       setCreateModalVisible(false);
       createForm.resetFields();
       fetchMembers(pagination.current, pagination.pageSize);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
@@ -78,7 +78,7 @@ const TeamMembers: React.FC = () => {
       editForm.resetFields();
       setSelectedMember(null);
       fetchMembers(pagination.current, pagination.pageSize);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
@@ -91,7 +91,7 @@ const TeamMembers: React.FC = () => {
       setPasswordModalVisible(false);
       passwordForm.resetFields();
       setSelectedMember(null);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
@@ -105,7 +105,7 @@ const TeamMembers: React.FC = () => {
       roleForm.resetFields();
       setSelectedMember(null);
       fetchMembers(pagination.current, pagination.pageSize);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
@@ -115,7 +115,7 @@ const TeamMembers: React.FC = () => {
       await teamApi.remove(id);
       message.success('成员已移除');
       fetchMembers(pagination.current, pagination.pageSize);
-    } catch (error) {
+    } catch {
       // handled by interceptor
     }
   };
@@ -290,7 +290,9 @@ const TeamMembers: React.FC = () => {
             label="密码"
             rules={[
               { required: true, message: '请输入密码' },
-              { min: 6, message: '密码至少6位' },
+              { min: 8, message: '密码至少8位' },
+              { pattern: /\d/, message: '密码必须包含数字' },
+              { pattern: /[^A-Za-z0-9]/, message: '密码必须包含特殊字符' },
             ]}
           >
             <Input.Password placeholder="请输入密码" />
@@ -374,7 +376,9 @@ const TeamMembers: React.FC = () => {
             label="新密码"
             rules={[
               { required: true, message: '请输入新密码' },
-              { min: 6, message: '密码至少6位' },
+              { min: 8, message: '密码至少8位' },
+              { pattern: /\d/, message: '密码必须包含数字' },
+              { pattern: /[^A-Za-z0-9]/, message: '密码必须包含特殊字符' },
             ]}
           >
             <Input.Password placeholder="请输入新密码" />

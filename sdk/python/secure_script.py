@@ -59,6 +59,7 @@ except ImportError:
 class CachedScript:
     """缓存的脚本"""
     script_id: str
+    delivery_id: str
     version: str
     content: bytes
     content_hash: str
@@ -70,6 +71,7 @@ class CachedScript:
 class EncryptedScriptPackage:
     """加密脚本包"""
     script_id: str
+    delivery_id: str
     version: str
     script_type: str
     entry_point: str
@@ -129,17 +131,13 @@ class SecureScriptManager:
         Returns:
             脚本版本信息列表
         """
-        url = f"{self.client.server_url}/api/client/secure-scripts/versions"
-        params = {"app_key": self.client.app_key}
-
-        resp = requests.get(url, params=params, timeout=30)
-        result = resp.json()
-
-        if result.get('code') != 0:
-            raise SecureScriptError(result.get('message', '获取版本失败'))
-
         versions = []
-        for item in result.get('data', []):
+        try:
+            data = self.client._request_with_client_auth('GET', '/secure-scripts/versions') or []
+        except Exception as e:
+            raise SecureScriptError(f"获取版本失败: {e}")
+
+        for item in data:
             versions.append(ScriptVersionInfo(
                 script_id=item['script_id'],
                 name=item['name'],
@@ -170,22 +168,17 @@ class SecureScriptManager:
                         return cached
 
         # 请求服务器
-        url = f"{self.client.server_url}/api/client/secure-scripts/fetch"
         data = {
-            "app_key": self.client.app_key,
-            "machine_id": self.client.machine_id,
             "script_id": script_id
         }
 
-        resp = requests.post(url, json=data, timeout=30)
-        result = resp.json()
-
-        if result.get('code') != 0:
-            raise SecureScriptError(result.get('message', '获取脚本失败'))
-
-        pkg_data = result.get('data', {})
+        try:
+            pkg_data = self.client._request_with_client_auth('POST', '/secure-scripts/fetch', data) or {}
+        except Exception as e:
+            raise SecureScriptError(f"获取脚本失败: {e}")
         pkg = EncryptedScriptPackage(
             script_id=pkg_data['script_id'],
+            delivery_id=pkg_data.get('delivery_id', ''),
             version=pkg_data['version'],
             script_type=pkg_data['script_type'],
             entry_point=pkg_data['entry_point'],
@@ -223,6 +216,7 @@ class SecureScriptManager:
         # 缓存
         cached = CachedScript(
             script_id=pkg.script_id,
+            delivery_id=pkg.delivery_id,
             version=pkg.version,
             content=content,
             content_hash=pkg.content_hash,
@@ -270,7 +264,7 @@ class SecureScriptManager:
             raise
 
         # 上报开始执行
-        self._report_execution(script_id, "", "executing", "", "", 0)
+        self._report_execution(script_id, script.delivery_id, "executing", "", "", 0)
         if self.on_execute:
             self.on_execute(script_id, "executing", None)
 
@@ -281,7 +275,7 @@ class SecureScriptManager:
             duration = int((time.time() - start_time) * 1000)
 
             # 上报成功
-            self._report_execution(script_id, "", "success", result, "", duration)
+            self._report_execution(script_id, script.delivery_id, "success", result, "", duration)
             if self.on_execute:
                 self.on_execute(script_id, "success", None)
 
@@ -295,7 +289,7 @@ class SecureScriptManager:
             duration = int((time.time() - start_time) * 1000)
 
             # 上报失败
-            self._report_execution(script_id, "", "failed", "", str(e), duration)
+            self._report_execution(script_id, script.delivery_id, "failed", "", str(e), duration)
             if self.on_execute:
                 self.on_execute(script_id, "failed", e)
 
@@ -350,12 +344,13 @@ class SecureScriptManager:
 
     def _verify_signature(self, data: bytes, signature_base64: str) -> bool:
         """验证签名"""
-        if not hasattr(self.client, 'public_key') or self.client.public_key is None:
+        public_key = getattr(self.client, '_public_key', None) or getattr(self.client, 'public_key', None)
+        if public_key is None:
             return True  # 如果没有公钥，跳过验证
 
         try:
             signature = base64.b64decode(signature_base64)
-            self.client.public_key.verify(
+            public_key.verify(
                 signature,
                 data,
                 padding.PKCS1v15(),
@@ -376,10 +371,7 @@ class SecureScriptManager:
     ):
         """上报执行状态"""
         try:
-            url = f"{self.client.server_url}/api/client/secure-scripts/report"
             data = {
-                "app_key": self.client.app_key,
-                "machine_id": self.client.machine_id,
                 "script_id": script_id,
                 "status": status
             }
@@ -394,7 +386,7 @@ class SecureScriptManager:
 
             # 异步上报
             threading.Thread(
-                target=lambda: requests.post(url, json=data, timeout=10),
+                target=lambda: self.client._request_with_client_auth('POST', '/secure-scripts/report', data),
                 daemon=True
             ).start()
         except Exception:

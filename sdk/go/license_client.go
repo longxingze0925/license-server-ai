@@ -91,6 +91,8 @@ var ErrCacheIntegrity = errors.New("缓存完整性校验失败，数据可能�
 // ErrCacheExpired 缓存已过期
 var ErrCacheExpired = errors.New("缓存已过期，需要重新验证")
 
+const clientTokenRefreshSkew = time.Minute
+
 // LicenseInfo 授权信息
 type LicenseInfo struct {
 	Valid            bool     `json:"valid"`
@@ -1010,14 +1012,11 @@ func (c *Client) Login(email, password string) (*LicenseInfo, error) {
 
 // Register 注册新用户
 func (c *Client) Register(email, password, name string) (map[string]interface{}, error) {
-	// 客户端预哈希密码
-	hashedPassword := c.hashPassword(password, email)
-
 	data := map[string]interface{}{
 		"app_key":         c.appKey,
 		"email":           email,
-		"password":        hashedPassword,
-		"password_hashed": true, // 标记密码已预哈希
+		"password":        password,
+		"password_hashed": false,
 		"name":            name,
 	}
 	return c.request("POST", "/auth/register", data)
@@ -1039,13 +1038,11 @@ func (c *Client) ChangePassword(oldPassword, newPassword, email string) (map[str
 	}
 
 	data := map[string]interface{}{
-		"app_key":         c.appKey,
-		"old_password":    c.hashPassword(oldPassword, userEmail),
-		"new_password":    c.hashPassword(newPassword, userEmail),
-		"password_hashed": true,
-		"machine_id":      c.machineID,
+		"old_password":    oldPassword,
+		"new_password":    newPassword,
+		"password_hashed": false,
 	}
-	return c.request("POST", "/auth/change-password", data)
+	return c.requestWithClientSession("PUT", "/auth/password", data)
 }
 
 // Verify 验证授权状态
@@ -1127,6 +1124,11 @@ func (c *Client) SubscriptionHeartbeat() bool {
 		return false
 	}
 
+	signature, _ := result["signature"].(string)
+	if err := c.verifyResponseSignature(result, signature); err != nil {
+		return false
+	}
+
 	c.mu.Lock()
 	if c.licenseInfo != nil {
 		c.licenseInfo.LastVerifiedAt = time.Now().Unix()
@@ -1181,6 +1183,29 @@ func (c *Client) getSessionSnapshot() (accessToken, refreshToken, authMode, emai
 		return "", "", "", ""
 	}
 	return c.licenseInfo.AccessToken, c.licenseInfo.RefreshToken, c.licenseInfo.AuthMode, c.licenseInfo.Email
+}
+
+func (c *Client) isAccessTokenExpiredSoon(skew time.Duration) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.licenseInfo == nil || c.licenseInfo.AccessToken == "" {
+		return true
+	}
+	return c.licenseInfo.AccessExpiresAt > 0 && time.Now().Add(skew).Unix() >= c.licenseInfo.AccessExpiresAt
+}
+
+func (c *Client) getValidAccessToken() (string, error) {
+	accessToken, _, _, _ := c.getSessionSnapshot()
+	if accessToken == "" || c.isAccessTokenExpiredSoon(clientTokenRefreshSkew) {
+		if !c.refreshClientSession() {
+			return "", fmt.Errorf("刷新客户端会话失败")
+		}
+		accessToken, _, _, _ = c.getSessionSnapshot()
+	}
+	if accessToken == "" {
+		return "", fmt.Errorf("缺少客户端访问令牌，请先激活或登录")
+	}
+	return accessToken, nil
 }
 
 func (c *Client) refreshClientSession() bool {
@@ -1245,6 +1270,65 @@ func shouldRetryWithRefresh(err error) bool {
 	return strings.Contains(msg, "客户端令牌") ||
 		strings.Contains(msg, "会话") ||
 		strings.Contains(msg, "认证")
+}
+
+func (c *Client) requestWithClientSession(method, endpoint string, data interface{}) (map[string]interface{}, error) {
+	doRequest := func() (map[string]interface{}, error) {
+		accessToken, _, _, _ := c.getSessionSnapshot()
+		if accessToken == "" {
+			return nil, fmt.Errorf("请先激活或登录")
+		}
+		return c.requestWithHeaders(method, endpoint, data, map[string]string{
+			"Authorization": "Bearer " + accessToken,
+		})
+	}
+
+	result, err := doRequest()
+	if err != nil && shouldRetryWithRefresh(err) && c.refreshClientSession() {
+		return doRequest()
+	}
+	return result, err
+}
+
+func (c *Client) requestRawWithClientSession(method, rawURL string, data interface{}) (*http.Response, error) {
+	doRequest := func() (*http.Response, error) {
+		accessToken, err := c.getValidAccessToken()
+		if err != nil {
+			return nil, err
+		}
+
+		var body io.Reader
+		if data != nil {
+			jsonData, err := json.Marshal(data)
+			if err != nil {
+				return nil, err
+			}
+			body = bytes.NewBuffer(jsonData)
+		}
+
+		req, err := http.NewRequest(method, rawURL, body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		if data != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		return c.httpClient.Do(req)
+	}
+
+	resp, err := doRequest()
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		_ = resp.Body.Close()
+		if c.refreshClientSession() {
+			return doRequest()
+		}
+		return nil, fmt.Errorf("API error: 认证失败")
+	}
+	return resp, nil
 }
 
 // Deactivate 解绑设备。
@@ -1463,32 +1547,21 @@ func (c *Client) GetLicenseInfo() *LicenseInfo {
 
 // CheckUpdate 检查版本更新
 func (c *Client) CheckUpdate() (*UpdateInfo, error) {
-	url := c.serverURL + "/api/client/releases/latest?app_key=" + c.appKey + "&machine_id=" + c.machineID
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	result, err := c.requestWithClientSession(http.MethodGet, "/releases/latest", nil)
 	if err != nil {
 		return nil, err
 	}
 
-	var result struct {
-		Code    int        `json:"code"`
-		Message string     `json:"message"`
-		Data    UpdateInfo `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
+	data, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("序列化响应失败: %w", err)
 	}
 
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", result.Message)
+	var update UpdateInfo
+	if err := json.Unmarshal(data, &update); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
-
-	return &result.Data, nil
+	return &update, nil
 }
 
 // startHeartbeat 启动心跳
@@ -1500,7 +1573,12 @@ func (c *Client) startHeartbeat() {
 			for {
 				select {
 				case <-ticker.C:
-					c.Heartbeat()
+					_, _, authMode, _ := c.getSessionSnapshot()
+					if strings.ToLower(strings.TrimSpace(authMode)) == "subscription" {
+						c.SubscriptionHeartbeat()
+					} else {
+						c.Heartbeat()
+					}
 				case <-c.stopHeartbeat:
 					return
 				}

@@ -29,7 +29,43 @@ import os
 import hashlib
 from typing import Optional, Dict, List, Callable, Tuple
 from dataclasses import dataclass
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, urljoin
+
+
+def _get_with_client_auth(client, url: str, stream: bool = False):
+    def do_request():
+        access_token = (getattr(client, '_license_info', {}) or {}).get('access_token', '')
+        if not access_token:
+            raise Exception("缺少客户端会话令牌")
+        return client._session.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            stream=stream,
+            timeout=client.timeout,
+        )
+
+    resp = do_request()
+    if resp.status_code == 401 and getattr(client, '_refresh_client_session', lambda: False)():
+        resp.close()
+        resp = do_request()
+    return resp
+
+
+def _ensure_parent_dir(file_path: str) -> None:
+    dir_path = os.path.dirname(file_path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
+
+
+def _remove_if_exists(file_path: str) -> None:
+    try:
+        os.remove(file_path)
+    except FileNotFoundError:
+        pass
+
+
+def _atomic_replace(temp_path: str, final_path: str) -> None:
+    os.replace(temp_path, final_path)
 
 
 @dataclass
@@ -84,16 +120,7 @@ class ScriptManager:
         Returns:
             脚本版本响应，包含所有可用脚本的版本信息
         """
-        url = f"{self.client.server_url}/api/client/scripts/version"
-        params = {"app_key": self.client.app_key}
-
-        resp = self.client._session.get(url, params=params, timeout=self.client.timeout)
-        result = resp.json()
-
-        if result.get('code') != 0:
-            raise Exception(result.get('message', '获取脚本版本失败'))
-
-        data = result.get('data', {})
+        data = self.client._request_with_client_auth('GET', '/scripts/version') or {}
         scripts = [ScriptInfo(
             filename=s.get('filename', ''),
             version=s.get('version', ''),
@@ -121,31 +148,31 @@ class ScriptManager:
             脚本内容
         """
         url = f"{self.client.server_url}/api/client/scripts/{quote(filename)}"
-        params = {
-            "app_key": self.client.app_key,
-            "machine_id": self.client.machine_id
-        }
+        resp = _get_with_client_auth(self.client, url)
+        try:
+            if resp.status_code != 200:
+                try:
+                    result = resp.json()
+                    raise Exception(result.get('message', f'下载失败: HTTP {resp.status_code}'))
+                except Exception:
+                    raise Exception(f'下载失败: HTTP {resp.status_code}')
 
-        resp = self.client._session.get(url, params=params, timeout=self.client.timeout)
-
-        if resp.status_code != 200:
-            try:
-                result = resp.json()
-                raise Exception(result.get('message', f'下载失败: HTTP {resp.status_code}'))
-            except:
-                raise Exception(f'下载失败: HTTP {resp.status_code}')
-
-        content = resp.content
+            content = resp.content
+        finally:
+            resp.close()
 
         # 如果指定了保存路径，保存到文件
         if save_path:
-            # 确保目录存在
-            dir_path = os.path.dirname(save_path)
-            if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
-
-            with open(save_path, 'wb') as f:
-                f.write(content)
+            _ensure_parent_dir(save_path)
+            temp_path = f"{save_path}.part"
+            _remove_if_exists(temp_path)
+            try:
+                with open(temp_path, 'wb') as f:
+                    f.write(content)
+                _atomic_replace(temp_path, save_path)
+            except Exception:
+                _remove_if_exists(temp_path)
+                raise
 
         return content
 
@@ -198,37 +225,18 @@ class ReleaseManager:
             progress_callback: 下载进度回调 (已下载字节数, 总字节数)
         """
         url = f"{self.client.server_url}/api/client/releases/download/{quote(filename)}"
-        params = {
-            "app_key": self.client.app_key,
-            "machine_id": self.client.machine_id
-        }
+        resp = _get_with_client_auth(self.client, url, stream=True)
+        try:
+            if resp.status_code != 200:
+                try:
+                    result = resp.json()
+                    raise Exception(result.get('message', f'下载失败: HTTP {resp.status_code}'))
+                except Exception:
+                    raise Exception(f'下载失败: HTTP {resp.status_code}')
 
-        resp = self.client._session.get(url, params=params, stream=True, timeout=self.client.timeout)
-
-        if resp.status_code != 200:
-            try:
-                result = resp.json()
-                raise Exception(result.get('message', f'下载失败: HTTP {resp.status_code}'))
-            except:
-                raise Exception(f'下载失败: HTTP {resp.status_code}')
-
-        # 确保目录存在
-        dir_path = os.path.dirname(save_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-
-        # 获取文件大小
-        total_size = int(resp.headers.get('content-length', 0))
-
-        # 下载文件
-        with open(save_path, 'wb') as f:
-            downloaded = 0
-            for chunk in resp.iter_content(chunk_size=32 * 1024):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback and total_size > 0:
-                        progress_callback(downloaded, total_size)
+            _write_response_to_file(resp, save_path, progress_callback)
+        finally:
+            resp.close()
 
     def get_latest_release_and_download(
         self,
@@ -255,18 +263,25 @@ class ReleaseManager:
         if not download_url:
             raise Exception("无效的下载URL")
 
-        filename = os.path.basename(urlparse(download_url).path)
-        if not filename or filename == '.':
-            raise Exception("无效的下载URL")
-
-        # 下载文件
-        self.download_release(filename, save_path, progress_callback)
+        absolute_url = download_url if download_url.startswith(('http://', 'https://')) else urljoin(self.client.server_url, download_url)
+        try:
+            self._download_url(absolute_url, save_path, progress_callback)
+        except Exception as e:
+            if not _is_download_auth_error(e):
+                raise
+            refreshed = self.client.check_update()
+            refreshed_url = (refreshed or {}).get('download_url', '')
+            if not refreshed_url:
+                raise Exception("下载链接已过期，未找到可用的新链接")
+            update_info = refreshed
+            absolute_url = refreshed_url if refreshed_url.startswith(('http://', 'https://')) else urljoin(self.client.server_url, refreshed_url)
+            self._download_url(absolute_url, save_path, progress_callback)
         self._verify_downloaded_release(save_path, update_info)
 
         return UpdateInfo(
             version=update_info.get('version', ''),
             version_code=update_info.get('version_code', 0),
-            download_url=download_url,
+            download_url=update_info.get('download_url', download_url),
             changelog=update_info.get('changelog', ''),
             file_size=update_info.get('file_size', 0),
             file_hash=update_info.get('file_hash', ''),
@@ -312,3 +327,53 @@ class ReleaseManager:
 
         payload = f"{file_hash.lower()}:{file_size}".encode()
         self.client._verify_signature(payload, file_signature)
+
+    def _download_url(
+        self,
+        url: str,
+        save_path: str,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> None:
+        resp = self.client._session.get(url, stream=True, timeout=self.client.timeout)
+        try:
+            if resp.status_code != 200:
+                try:
+                    result = resp.json()
+                    message = result.get('message', f'下载失败: HTTP {resp.status_code}')
+                except Exception:
+                    message = f'下载失败: HTTP {resp.status_code}'
+                raise Exception(message)
+
+            _write_response_to_file(resp, save_path, progress_callback)
+        finally:
+            resp.close()
+
+
+def _write_response_to_file(
+    resp,
+    save_path: str,
+    progress_callback: Optional[Callable[[int, int], None]] = None
+) -> None:
+    _ensure_parent_dir(save_path)
+    temp_path = f"{save_path}.part"
+    _remove_if_exists(temp_path)
+
+    try:
+        total_size = int(resp.headers.get('content-length', 0))
+        with open(temp_path, 'wb') as f:
+            downloaded = 0
+            for chunk in resp.iter_content(chunk_size=32 * 1024):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and total_size > 0:
+                        progress_callback(downloaded, total_size)
+        _atomic_replace(temp_path, save_path)
+    except Exception:
+        _remove_if_exists(temp_path)
+        raise
+
+
+def _is_download_auth_error(error: Exception) -> bool:
+    message = str(error)
+    return 'HTTP 401' in message or 'HTTP 403' in message or '下载令牌' in message

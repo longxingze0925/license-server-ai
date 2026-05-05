@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -25,71 +26,86 @@ const (
 // ClientAuthMiddleware 客户端访问令牌认证中间件
 func ClientAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
-		if authHeader == "" {
-			response.Unauthorized(c, "缺少认证信息")
-			c.Abort()
-			return
-		}
-
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			response.Unauthorized(c, "认证格式错误")
-			c.Abort()
-			return
-		}
-
-		claims, err := clientauth.ParseAccessToken(parts[1])
+		session, err := AuthenticateClientRequest(c)
 		if err != nil {
-			response.Unauthorized(c, "无效的客户端令牌")
+			response.Unauthorized(c, err.Error())
 			c.Abort()
 			return
 		}
 
-		var session model.ClientSession
-		if err := model.DB.First(&session, "id = ?", claims.SessionID).Error; err != nil {
-			response.Unauthorized(c, "会话不存在或已失效")
-			c.Abort()
-			return
-		}
-
-		now := time.Now()
-		if session.IsRevoked() || session.IsExpired(now) {
-			response.Unauthorized(c, "会话已过期，请重新登录")
-			c.Abort()
-			return
-		}
-
-		if session.TenantID != claims.TenantID ||
-			session.AppID != claims.AppID ||
-			session.DeviceID != claims.DeviceID ||
-			session.MachineID != claims.MachineID {
-			response.Unauthorized(c, "会话与设备不匹配")
-			c.Abort()
-			return
-		}
-		if claims.CustomerID != "" && session.CustomerID != claims.CustomerID {
-			response.Unauthorized(c, "会话与用户不匹配")
-			c.Abort()
-			return
-		}
-		if claims.AuthMode != "" && session.AuthMode != claims.AuthMode {
-			response.Unauthorized(c, "会话模式无效")
-			c.Abort()
-			return
-		}
-
-		c.Set(clientCtxSessionID, session.ID)
-		c.Set(clientCtxTenantID, session.TenantID)
-		c.Set(clientCtxAppID, session.AppID)
-		c.Set(clientCtxCustomerID, session.CustomerID)
-		c.Set(clientCtxDeviceID, session.DeviceID)
-		c.Set(clientCtxMachineID, session.MachineID)
-		c.Set(clientCtxAuthMode, session.AuthMode)
-		c.Set(clientCtxSession, &session)
-
+		SetClientSessionContext(c, session)
 		c.Next()
 	}
+}
+
+func AuthenticateClientRequest(c *gin.Context) (*model.ClientSession, error) {
+	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+	if authHeader == "" {
+		return nil, errors.New("缺少认证信息")
+	}
+
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || parts[0] != "Bearer" {
+		return nil, errors.New("认证格式错误")
+	}
+
+	claims, err := clientauth.ParseAccessToken(parts[1])
+	if err != nil {
+		return nil, errors.New("无效的客户端令牌")
+	}
+
+	var session model.ClientSession
+	if err := model.DB.First(&session, "id = ?", claims.SessionID).Error; err != nil {
+		return nil, errors.New("会话不存在或已失效")
+	}
+
+	now := time.Now()
+	if session.IsRevoked() || session.IsExpired(now) {
+		return nil, errors.New("会话已过期，请重新登录")
+	}
+
+	if session.TenantID != claims.TenantID ||
+		session.AppID != claims.AppID ||
+		session.DeviceID != claims.DeviceID ||
+		session.MachineID != claims.MachineID {
+		return nil, errors.New("会话与设备不匹配")
+	}
+	if claims.CustomerID != "" && session.CustomerID != claims.CustomerID {
+		return nil, errors.New("会话与用户不匹配")
+	}
+	if claims.AuthMode != "" && session.AuthMode != claims.AuthMode {
+		return nil, errors.New("会话模式无效")
+	}
+
+	var device model.Device
+	if err := model.DB.First(&device, "id = ? AND tenant_id = ?", session.DeviceID, session.TenantID).Error; err != nil {
+		return nil, errors.New("设备已解绑，请重新登录")
+	}
+	if device.Status == model.DeviceStatusBlacklisted {
+		return nil, errors.New("设备已被禁止使用")
+	}
+	var blacklist model.DeviceBlacklist
+	if err := model.DB.Where(
+		"tenant_id = ? AND machine_id = ? AND (app_id = ? OR app_id IS NULL OR app_id = '')",
+		session.TenantID,
+		session.MachineID,
+		session.AppID,
+	).First(&blacklist).Error; err == nil {
+		return nil, errors.New("设备已被禁止使用")
+	}
+
+	return &session, nil
+}
+
+func SetClientSessionContext(c *gin.Context, session *model.ClientSession) {
+	c.Set(clientCtxSessionID, session.ID)
+	c.Set(clientCtxTenantID, session.TenantID)
+	c.Set(clientCtxAppID, session.AppID)
+	c.Set(clientCtxCustomerID, session.CustomerID)
+	c.Set(clientCtxDeviceID, session.DeviceID)
+	c.Set(clientCtxMachineID, session.MachineID)
+	c.Set(clientCtxAuthMode, session.AuthMode)
+	c.Set(clientCtxSession, session)
 }
 
 func GetClientSessionID(c *gin.Context) string {

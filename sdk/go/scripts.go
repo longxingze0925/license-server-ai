@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -53,48 +54,31 @@ func (c *Client) NewScriptManager() *ScriptManager {
 // GetScriptVersions 获取脚本版本信息
 // 返回所有可用脚本的版本信息列表
 func (m *ScriptManager) GetScriptVersions() (*ScriptVersionResponse, error) {
-	params := url.Values{}
-	params.Set("app_key", m.client.appKey)
-
-	resp, err := m.client.httpClient.Get(m.client.serverURL + "/api/client/scripts/version?" + params.Encode())
+	data, err := m.client.requestWithClientSession("GET", "/scripts/version", nil)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	dataBytes, err := json.Marshal(data)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+		return nil, fmt.Errorf("序列化响应失败: %w", err)
 	}
 
-	var result struct {
-		Code    int                   `json:"code"`
-		Message string                `json:"message"`
-		Data    ScriptVersionResponse `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	var versions ScriptVersionResponse
+	if err := json.Unmarshal(dataBytes, &versions); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
 
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API错误: %s", result.Message)
-	}
-
-	return &result.Data, nil
+	return &versions, nil
 }
 
 // DownloadScript 下载指定脚本文件
 // filename: 脚本文件名
 // savePath: 保存路径（如果为空，返回内容而不保存）
 func (m *ScriptManager) DownloadScript(filename string, savePath string) ([]byte, error) {
-	params := url.Values{}
-	params.Set("app_key", m.client.appKey)
-	params.Set("machine_id", m.client.machineID)
+	downloadURL := fmt.Sprintf("%s/api/client/scripts/%s", m.client.serverURL, url.PathEscape(filename))
 
-	downloadURL := fmt.Sprintf("%s/api/client/scripts/%s?%s",
-		m.client.serverURL, url.PathEscape(filename), params.Encode())
-
-	resp, err := m.client.httpClient.Get(downloadURL)
+	resp, err := m.client.requestRawWithClientSession(http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("下载失败: %w", err)
 	}
@@ -172,17 +156,16 @@ func (c *Client) NewReleaseManager() *ReleaseManager {
 // savePath: 保存路径
 // progressCallback: 下载进度回调 (已下载字节数, 总字节数)
 func (m *ReleaseManager) DownloadRelease(filename string, savePath string, progressCallback func(downloaded, total int64)) error {
-	params := url.Values{}
-	params.Set("app_key", m.client.appKey)
-	params.Set("machine_id", m.client.machineID)
+	downloadURL := fmt.Sprintf("%s/api/client/releases/download/%s", m.client.serverURL, url.PathEscape(filename))
 
-	downloadURL := fmt.Sprintf("%s/api/client/releases/download/%s?%s",
-		m.client.serverURL, url.PathEscape(filename), params.Encode())
-
-	resp, err := m.client.httpClient.Get(downloadURL)
+	resp, err := m.client.requestRawWithClientSession(http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return fmt.Errorf("下载失败: %w", err)
 	}
+	return downloadResponseToFile(resp, savePath, progressCallback)
+}
+
+func downloadResponseToFile(resp *http.Response, savePath string, progressCallback func(downloaded, total int64)) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
@@ -197,31 +180,34 @@ func (m *ReleaseManager) DownloadRelease(filename string, savePath string, progr
 		return fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
 	}
 
-	// 确保目录存在
 	dir := filepath.Dir(savePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
 
-	// 创建文件
-	file, err := os.Create(savePath)
+	tmpPath := savePath + ".part"
+	_ = os.Remove(tmpPath)
+	file, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("创建文件失败: %w", err)
 	}
-	defer file.Close()
 
-	// 获取文件大小
+	cleanup := true
+	defer func() {
+		_ = file.Close()
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
 	totalSize := resp.ContentLength
-
-	// 如果有进度回调，使用带进度的复制
 	if progressCallback != nil && totalSize > 0 {
 		var downloaded int64
-		buf := make([]byte, 32*1024) // 32KB buffer
+		buf := make([]byte, 32*1024)
 		for {
 			n, err := resp.Body.Read(buf)
 			if n > 0 {
-				_, writeErr := file.Write(buf[:n])
-				if writeErr != nil {
+				if _, writeErr := file.Write(buf[:n]); writeErr != nil {
 					return fmt.Errorf("写入文件失败: %w", writeErr)
 				}
 				downloaded += int64(n)
@@ -234,14 +220,50 @@ func (m *ReleaseManager) DownloadRelease(filename string, savePath string, progr
 				return fmt.Errorf("读取数据失败: %w", err)
 			}
 		}
-	} else {
-		// 直接复制
-		if _, err := io.Copy(file, resp.Body); err != nil {
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("关闭文件失败: %w", err)
+		}
+		if err := replaceFile(tmpPath, savePath); err != nil {
 			return fmt.Errorf("保存文件失败: %w", err)
 		}
+		cleanup = false
+		return nil
 	}
 
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		return fmt.Errorf("保存文件失败: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭文件失败: %w", err)
+	}
+	if err := replaceFile(tmpPath, savePath); err != nil {
+		return fmt.Errorf("保存文件失败: %w", err)
+	}
+	cleanup = false
 	return nil
+}
+
+func replaceFile(tmpPath, finalPath string) error {
+	if err := os.Remove(finalPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(tmpPath, finalPath)
+}
+
+func downloadURLToFile(httpClient *http.Client, downloadURL string, savePath string, progressCallback func(downloaded, total int64)) error {
+	resp, err := httpClient.Get(downloadURL)
+	if err != nil {
+		return fmt.Errorf("下载失败: %w", err)
+	}
+	return downloadResponseToFile(resp, savePath, progressCallback)
+}
+
+func isDownloadAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "下载令牌")
 }
 
 // GetLatestReleaseAndDownload 获取最新版本并下载
@@ -268,9 +290,29 @@ func (m *ReleaseManager) GetLatestReleaseAndDownload(savePath string, progressCa
 		return nil, fmt.Errorf("无效的下载URL")
 	}
 
-	// 下载文件
-	if err := m.DownloadRelease(filename, savePath, progressCallback); err != nil {
-		return nil, err
+	downloadURL := updateInfo.DownloadURL
+	if !strings.HasPrefix(downloadURL, "http://") && !strings.HasPrefix(downloadURL, "https://") {
+		downloadURL = m.client.serverURL + updateInfo.DownloadURL
+	}
+	if err := downloadURLToFile(m.client.GetHTTPClient(), downloadURL, savePath, progressCallback); err != nil {
+		if !isDownloadAuthError(err) {
+			return nil, err
+		}
+		refreshed, refreshErr := m.client.CheckUpdate()
+		if refreshErr != nil {
+			return nil, fmt.Errorf("下载链接已过期，重新获取版本信息失败: %w", refreshErr)
+		}
+		if refreshed == nil || refreshed.DownloadURL == "" {
+			return nil, fmt.Errorf("下载链接已过期，未找到可用的新链接")
+		}
+		updateInfo = refreshed
+		downloadURL = updateInfo.DownloadURL
+		if !strings.HasPrefix(downloadURL, "http://") && !strings.HasPrefix(downloadURL, "https://") {
+			downloadURL = m.client.serverURL + updateInfo.DownloadURL
+		}
+		if err := downloadURLToFile(m.client.GetHTTPClient(), downloadURL, savePath, progressCallback); err != nil {
+			return nil, err
+		}
 	}
 
 	actualHash, actualSize, err := hashFileSHA256(savePath)

@@ -1,25 +1,198 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"license-server/internal/config"
 	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type HotUpdateHandler struct{}
 
 func NewHotUpdateHandler() *HotUpdateHandler {
 	return &HotUpdateHandler{}
+}
+
+func normalizeHotUpdateLogStatus(status string) (model.HotUpdateLogStatus, bool) {
+	switch model.HotUpdateLogStatus(strings.ToLower(strings.TrimSpace(status))) {
+	case model.HotUpdateLogStatusPending:
+		return model.HotUpdateLogStatusPending, true
+	case model.HotUpdateLogStatusDownloading:
+		return model.HotUpdateLogStatusDownloading, true
+	case model.HotUpdateLogStatusInstalling:
+		return model.HotUpdateLogStatusInstalling, true
+	case model.HotUpdateLogStatusSuccess:
+		return model.HotUpdateLogStatusSuccess, true
+	case model.HotUpdateLogStatusFailed:
+		return model.HotUpdateLogStatusFailed, true
+	case model.HotUpdateLogStatusRollback:
+		return model.HotUpdateLogStatusRollback, true
+	default:
+		return "", false
+	}
+}
+
+func isTerminalHotUpdateLogStatus(status model.HotUpdateLogStatus) bool {
+	return status == model.HotUpdateLogStatusSuccess ||
+		status == model.HotUpdateLogStatusFailed ||
+		status == model.HotUpdateLogStatusRollback
+}
+
+func shouldApplyHotUpdateLogStatusTransition(previousStatus, nextStatus model.HotUpdateLogStatus) bool {
+	if previousStatus == "" {
+		return true
+	}
+	if previousStatus == nextStatus {
+		return true
+	}
+	if previousStatus == model.HotUpdateLogStatusFailed {
+		return true
+	}
+	return !isTerminalHotUpdateLogStatus(previousStatus)
+}
+
+func hotUpdateStatusCounterDelta(previousStatus, nextStatus model.HotUpdateLogStatus) (int, int) {
+	if previousStatus == nextStatus {
+		return 0, 0
+	}
+
+	successDelta := 0
+	failDelta := 0
+	switch previousStatus {
+	case model.HotUpdateLogStatusSuccess:
+		successDelta--
+	case model.HotUpdateLogStatusFailed:
+		failDelta--
+	}
+	switch nextStatus {
+	case model.HotUpdateLogStatusSuccess:
+		successDelta++
+	case model.HotUpdateLogStatusFailed:
+		failDelta++
+	}
+	return successDelta, failDelta
+}
+
+func nonNegativeCounterExpr(column string, delta int) interface{} {
+	if delta >= 0 {
+		return gorm.Expr(column+" + ?", delta)
+	}
+	step := -delta
+	return gorm.Expr("CASE WHEN "+column+" >= ? THEN "+column+" - ? ELSE 0 END", step, step)
+}
+
+func removeFileIfSaved(filePath string) {
+	if filePath != "" {
+		_ = os.Remove(filePath)
+	}
+}
+
+func normalizeHotUpdateUploadType(value string) (string, bool) {
+	uploadType := strings.ToLower(strings.TrimSpace(value))
+	if uploadType == "" {
+		return "full", true
+	}
+	if uploadType == "full" || uploadType == "patch" {
+		return uploadType, true
+	}
+	return "", false
+}
+
+func removeReplacedHotUpdateFile(root, oldURL, newURL string) {
+	oldName := filepath.Base(oldURL)
+	if oldName == "" || oldName == "." || oldName == filepath.Base(newURL) {
+		return
+	}
+	_ = os.Remove(filepath.Join(root, oldName))
+}
+
+func applyHotUpdateStatusCounterDelta(tx *gorm.DB, hotUpdateID string, previousStatus, nextStatus model.HotUpdateLogStatus) error {
+	successDelta, failDelta := hotUpdateStatusCounterDelta(previousStatus, nextStatus)
+	if successDelta == 0 && failDelta == 0 {
+		return nil
+	}
+
+	updates := map[string]interface{}{}
+	if successDelta != 0 {
+		updates["success_count"] = nonNegativeCounterExpr("success_count", successDelta)
+	}
+	if failDelta != 0 {
+		updates["fail_count"] = nonNegativeCounterExpr("fail_count", failDelta)
+	}
+	return tx.Model(&model.HotUpdate{}).Where("id = ?", hotUpdateID).Updates(updates).Error
+}
+
+func hotUpdateSupportsCurrentVersion(hotUpdate model.HotUpdate, currentVersion string) bool {
+	minVersion := strings.TrimSpace(hotUpdate.MinAppVersion)
+	return minVersion == "" || compareVersionStrings(currentVersion, minVersion) >= 0
+}
+
+func compareVersionStrings(left, right string) int {
+	leftParts := splitVersionParts(left)
+	rightParts := splitVersionParts(right)
+	maxLen := len(leftParts)
+	if len(rightParts) > maxLen {
+		maxLen = len(rightParts)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		lv := "0"
+		if i < len(leftParts) {
+			lv = leftParts[i]
+		}
+		rv := "0"
+		if i < len(rightParts) {
+			rv = rightParts[i]
+		}
+
+		li, lErr := strconv.Atoi(lv)
+		ri, rErr := strconv.Atoi(rv)
+		if lErr == nil && rErr == nil {
+			if li < ri {
+				return -1
+			}
+			if li > ri {
+				return 1
+			}
+			continue
+		}
+
+		cmp := strings.Compare(strings.ToLower(lv), strings.ToLower(rv))
+		if cmp < 0 {
+			return -1
+		}
+		if cmp > 0 {
+			return 1
+		}
+	}
+	return 0
+}
+
+func splitVersionParts(version string) []string {
+	fields := strings.FieldsFunc(strings.TrimSpace(version), func(r rune) bool {
+		return r == '.' || r == '-' || r == '_' || r == '+' || r == ' '
+	})
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			parts = append(parts, field)
+		}
+	}
+	return parts
 }
 
 // ==================== 管理端接口 ====================
@@ -59,18 +232,50 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 	forceUpdate := c.PostForm("force_update") == "true"
 	restartRequired := c.PostForm("restart_required") == "true"
 	minAppVersion := c.PostForm("min_app_version")
+	savedFilePath := ""
 
 	// 验证必填字段
 	if version == "" {
 		response.BadRequest(c, "版本号不能为空")
 		return
 	}
-
-	versionCode, _ := strconv.Atoi(versionCodeStr)
-	rolloutPercentage, _ := strconv.Atoi(rolloutStr)
-	if rolloutPercentage <= 0 {
-		rolloutPercentage = 100
+	normalizedVersion, err := normalizePackageVersion(version)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
 	}
+	version = normalizedVersion
+
+	versionCode := scriptVersionCode(version)
+	if strings.TrimSpace(versionCodeStr) != "" {
+		parsedVersionCode, err := strconv.Atoi(versionCodeStr)
+		if err != nil || parsedVersionCode < 0 {
+			response.BadRequest(c, "版本代码必须是非负整数")
+			return
+		}
+		versionCode = parsedVersionCode
+	}
+	if versionCode <= 0 {
+		response.BadRequest(c, "版本代码必须大于 0，或使用可解析的版本号")
+		return
+	}
+
+	rolloutPercentage := 100
+	if strings.TrimSpace(rolloutStr) != "" {
+		parsedRollout, err := strconv.Atoi(rolloutStr)
+		if err != nil || parsedRollout < 0 || parsedRollout > 100 {
+			response.BadRequest(c, "灰度比例必须在 0 到 100 之间")
+			return
+		}
+		rolloutPercentage = parsedRollout
+	}
+
+	uploadType, ok := normalizeHotUpdateUploadType(updateType)
+	if !ok {
+		response.BadRequest(c, "更新类型只能是 full 或 patch")
+		return
+	}
+	updateType = uploadType
 
 	// 确定更新类型
 	patchType := model.HotUpdateTypeFull
@@ -122,29 +327,30 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 			return
 		}
 
-		uploadType := "full"
-		if updateType == "patch" {
-			uploadType = "patch"
-		}
-
-		filename := fmt.Sprintf("%s_any_to_%s_%s%s",
-			app.AppKey, version, uploadType, filepath.Ext(header.Filename))
+		filename := fmt.Sprintf("%s_any_to_%s_%s_%d%s",
+			app.AppKey, version, uploadType, time.Now().UnixNano(), filepath.Ext(header.Filename))
 		filePath := filepath.Join(hotUpdateDir, filename)
 
-		fileSize, fileHash, err := saveUploadedFile(&io.LimitedReader{R: file, N: maxUploadBytes + 1}, filePath)
+		stagedFile, err := stageUploadedFile(&io.LimitedReader{R: file, N: maxUploadBytes + 1}, filePath)
 		if err != nil {
 			response.ServerError(c, "保存文件失败: "+err.Error())
 			return
 		}
+		defer stagedFile.Cleanup()
+		fileSize := stagedFile.Size
+		fileHash := stagedFile.Hash
 		if fileSize > maxUploadBytes {
-			os.Remove(filePath)
 			response.BadRequest(c, fmt.Sprintf("更新包过大，最大支持 %dMB", maxUploadBytes>>20))
 			return
 		}
+		savedFilePath = filePath
 		fileSignature, err := signFileSignature(app.PrivateKey, fileHash, fileSize)
 		if err != nil {
-			_ = os.Remove(filePath)
 			response.ServerError(c, err.Error())
+			return
+		}
+		if err := stagedFile.Commit(); err != nil {
+			response.ServerError(c, "保存文件失败: "+err.Error())
 			return
 		}
 
@@ -164,7 +370,24 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 		}
 	}
 
-	if err := model.DB.Create(&hotUpdate).Error; err != nil {
+	tx := model.DB.Begin()
+	if err := tx.Create(&hotUpdate).Error; err != nil {
+		tx.Rollback()
+		removeFileIfSaved(savedFilePath)
+		response.ServerError(c, "创建热更新失败: "+err.Error())
+		return
+	}
+	if rolloutPercentage == 0 {
+		if err := tx.Model(&hotUpdate).UpdateColumn("rollout_percent", 0).Error; err != nil {
+			tx.Rollback()
+			removeFileIfSaved(savedFilePath)
+			response.ServerError(c, "创建热更新失败: "+err.Error())
+			return
+		}
+		hotUpdate.RolloutPercent = 0
+	}
+	if err := tx.Commit().Error; err != nil {
+		removeFileIfSaved(savedFilePath)
 		response.ServerError(c, "创建热更新失败: "+err.Error())
 		return
 	}
@@ -173,6 +396,7 @@ func (h *HotUpdateHandler) Create(c *gin.Context) {
 		"id":           hotUpdate.ID,
 		"from_version": hotUpdate.FromVersion,
 		"to_version":   hotUpdate.ToVersion,
+		"version_code": hotUpdate.VersionCode,
 		"status":       hotUpdate.Status,
 		"created_at":   hotUpdate.CreatedAt,
 	})
@@ -197,9 +421,10 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 	}
 
 	// 获取上传类型 (patch 或 full)
-	uploadType := c.PostForm("type")
-	if uploadType == "" {
-		uploadType = "full"
+	uploadType, ok := normalizeHotUpdateUploadType(c.PostForm("type"))
+	if !ok {
+		response.BadRequest(c, "上传类型只能是 full 或 patch")
+		return
 	}
 
 	// 获取上传的文件
@@ -226,23 +451,29 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 		return
 	}
 
-	filename := fmt.Sprintf("%s_%s_to_%s_%s%s",
-		app.AppKey, hotUpdate.FromVersion, hotUpdate.ToVersion, uploadType, filepath.Ext(header.Filename))
+	filename := fmt.Sprintf("%s_%s_to_%s_%s_%d%s",
+		app.AppKey,
+		packageVersionFilenamePart(hotUpdate.FromVersion),
+		packageVersionFilenamePart(hotUpdate.ToVersion),
+		uploadType,
+		time.Now().UnixNano(),
+		filepath.Ext(header.Filename))
 	filePath := filepath.Join(hotUpdateDir, filename)
 
-	fileSize, fileHash, err := saveUploadedFile(&io.LimitedReader{R: file, N: maxUploadBytes + 1}, filePath)
+	stagedFile, err := stageUploadedFile(&io.LimitedReader{R: file, N: maxUploadBytes + 1}, filePath)
 	if err != nil {
 		response.ServerError(c, "保存文件失败: "+err.Error())
 		return
 	}
+	defer stagedFile.Cleanup()
+	fileSize := stagedFile.Size
+	fileHash := stagedFile.Hash
 	if fileSize > maxUploadBytes {
-		os.Remove(filePath)
 		response.BadRequest(c, fmt.Sprintf("更新包过大，最大支持 %dMB", maxUploadBytes>>20))
 		return
 	}
 	fileSignature, err := signFileSignature(app.PrivateKey, fileHash, fileSize)
 	if err != nil {
-		_ = os.Remove(filePath)
 		response.ServerError(c, err.Error())
 		return
 	}
@@ -250,7 +481,9 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 	downloadURL := fmt.Sprintf("/api/client/hotupdate/download/%s", filename)
 
 	// 更新热更新记录
+	oldURL := hotUpdate.FullURL
 	if uploadType == "patch" {
+		oldURL = hotUpdate.PatchURL
 		hotUpdate.PatchURL = downloadURL
 		hotUpdate.PatchSize = fileSize
 		hotUpdate.PatchHash = fileHash
@@ -262,7 +495,16 @@ func (h *HotUpdateHandler) Upload(c *gin.Context) {
 		hotUpdate.FullSignature = fileSignature
 	}
 
-	model.DB.Save(&hotUpdate)
+	if err := stagedFile.Commit(); err != nil {
+		response.ServerError(c, "保存文件失败: "+err.Error())
+		return
+	}
+	if err := model.DB.Save(&hotUpdate).Error; err != nil {
+		_ = os.Remove(filePath)
+		response.ServerError(c, "保存热更新文件信息失败: "+err.Error())
+		return
+	}
+	removeReplacedHotUpdateFile(hotUpdateDir, oldURL, downloadURL)
 
 	response.Success(c, gin.H{
 		"id":             hotUpdate.ID,
@@ -294,8 +536,7 @@ func (h *HotUpdateHandler) List(c *gin.Context) {
 	}
 
 	// 分页
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	page, pageSize := parsePageParams(c, 20, 100)
 	offset := (page - 1) * pageSize
 
 	var total int64
@@ -308,6 +549,7 @@ func (h *HotUpdateHandler) List(c *gin.Context) {
 			"id":                 hu.ID,
 			"from_version":       hu.FromVersion,
 			"to_version":         hu.ToVersion,
+			"version_code":       hu.VersionCode,
 			"patch_type":         hu.PatchType,
 			"patch_url":          hu.PatchURL,
 			"patch_size":         hu.PatchSize,
@@ -355,6 +597,7 @@ func (h *HotUpdateHandler) Get(c *gin.Context) {
 		"app_id":             hotUpdate.AppID,
 		"from_version":       hotUpdate.FromVersion,
 		"to_version":         hotUpdate.ToVersion,
+		"version_code":       hotUpdate.VersionCode,
 		"patch_type":         hotUpdate.PatchType,
 		"patch_url":          hotUpdate.PatchURL,
 		"patch_size":         hotUpdate.PatchSize,
@@ -392,9 +635,9 @@ func (h *HotUpdateHandler) Update(c *gin.Context) {
 
 	var req struct {
 		Changelog         *string `json:"changelog"`
-		ForceUpdate       *bool  `json:"force_update"`
+		ForceUpdate       *bool   `json:"force_update"`
 		MinAppVersion     *string `json:"min_app_version"`
-		RolloutPercentage int    `json:"rollout_percentage"`
+		RolloutPercentage *int    `json:"rollout_percentage"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误")
@@ -411,11 +654,18 @@ func (h *HotUpdateHandler) Update(c *gin.Context) {
 	if req.MinAppVersion != nil {
 		updates["min_app_version"] = *req.MinAppVersion
 	}
-	if req.RolloutPercentage > 0 && req.RolloutPercentage <= 100 {
-		updates["rollout_percentage"] = req.RolloutPercentage
+	if req.RolloutPercentage != nil {
+		if *req.RolloutPercentage < 0 || *req.RolloutPercentage > 100 {
+			response.BadRequest(c, "灰度比例必须在 0 到 100 之间")
+			return
+		}
+		updates["rollout_percent"] = *req.RolloutPercentage
 	}
 
-	model.DB.Model(&hotUpdate).Updates(updates)
+	if err := model.DB.Model(&hotUpdate).Updates(updates).Error; err != nil {
+		response.ServerError(c, "更新热更新配置失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "更新成功", nil)
 }
@@ -442,7 +692,10 @@ func (h *HotUpdateHandler) Publish(c *gin.Context) {
 	now := time.Now()
 	hotUpdate.Status = model.HotUpdateStatusPublished
 	hotUpdate.PublishedAt = &now
-	model.DB.Save(&hotUpdate)
+	if err := model.DB.Save(&hotUpdate).Error; err != nil {
+		response.ServerError(c, "发布热更新失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "发布成功", nil)
 }
@@ -461,7 +714,10 @@ func (h *HotUpdateHandler) Deprecate(c *gin.Context) {
 	}
 
 	hotUpdate.Status = model.HotUpdateStatusDeprecated
-	model.DB.Save(&hotUpdate)
+	if err := model.DB.Save(&hotUpdate).Error; err != nil {
+		response.ServerError(c, "废弃热更新失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "已废弃", nil)
 }
@@ -480,7 +736,10 @@ func (h *HotUpdateHandler) Rollback(c *gin.Context) {
 	}
 
 	hotUpdate.Status = model.HotUpdateStatusRollback
-	model.DB.Save(&hotUpdate)
+	if err := model.DB.Save(&hotUpdate).Error; err != nil {
+		response.ServerError(c, "回滚热更新失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "已回滚", nil)
 }
@@ -512,10 +771,16 @@ func (h *HotUpdateHandler) Delete(c *gin.Context) {
 	}
 
 	// 删除日志
-	model.DB.Where("hot_update_id = ?", id).Delete(&model.HotUpdateLog{})
+	if err := model.DB.Where("hot_update_id = ?", id).Delete(&model.HotUpdateLog{}).Error; err != nil {
+		response.ServerError(c, "删除热更新日志失败: "+err.Error())
+		return
+	}
 
 	// 删除记录
-	model.DB.Delete(&hotUpdate)
+	if err := model.DB.Delete(&hotUpdate).Error; err != nil {
+		response.ServerError(c, "删除热更新失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "删除成功", nil)
 }
@@ -544,8 +809,7 @@ func (h *HotUpdateHandler) GetLogs(c *gin.Context) {
 		query = query.Where("error_message <> ''")
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	page, pageSize := parsePageParams(c, 20, 100)
 	offset := (page - 1) * pageSize
 
 	var total int64
@@ -624,24 +888,22 @@ func (h *HotUpdateHandler) GetStats(c *gin.Context) {
 
 // CheckUpdate 客户端检查热更新
 func (h *HotUpdateHandler) CheckUpdate(c *gin.Context) {
-	appKey := c.Query("app_key")
 	currentVersion := c.Query("version")
-	machineID := c.Query("machine_id")
 
-	if appKey == "" || currentVersion == "" || machineID == "" {
+	if currentVersion == "" {
 		response.BadRequest(c, "缺少参数")
 		return
 	}
 
-	// 验证应用
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
 		return
 	}
-	if !validateClientDeviceForApp(c, &app, machineID) {
+	device, ok := loadClientDeviceFromSession(c, app)
+	if !ok {
 		return
 	}
+	machineID := device.MachineID
 
 	// 查找可用的热更新
 	var hotUpdate model.HotUpdate
@@ -651,39 +913,37 @@ func (h *HotUpdateHandler) CheckUpdate(c *gin.Context) {
 
 	if err != nil {
 		// 没有针对当前版本的热更新，检查是否有全量更新到最新版本
-		var latestUpdate model.HotUpdate
-		err = model.DB.Where("app_id = ? AND status = ? AND (min_app_version = '' OR min_app_version <= ?)",
-			app.ID, model.HotUpdateStatusPublished, currentVersion).
-			Order("created_at DESC").First(&latestUpdate).Error
+		var latestUpdates []model.HotUpdate
+		if err := model.DB.Where("app_id = ? AND status = ?", app.ID, model.HotUpdateStatusPublished).
+			Order("version_code DESC, created_at DESC").
+			Find(&latestUpdates).Error; err != nil {
+			response.ServerError(c, "查询更新失败")
+			return
+		}
 
-		if err != nil {
+		found := false
+		for _, latestUpdate := range latestUpdates {
+			if latestUpdate.ToVersion == currentVersion || !hotUpdateSupportsCurrentVersion(latestUpdate, currentVersion) {
+				continue
+			}
+			hotUpdate = latestUpdate
+			found = true
+			break
+		}
+		if !found {
 			response.Success(c, gin.H{
 				"has_update": false,
 			})
 			return
 		}
-
-		// 检查是否已经是最新版本
-		if latestUpdate.ToVersion == currentVersion {
-			response.Success(c, gin.H{
-				"has_update": false,
-			})
-			return
-		}
-
-		hotUpdate = latestUpdate
 	}
 
 	// 灰度检查
-	if hotUpdate.RolloutPercent < 100 && machineID != "" {
-		// 使用机器码的哈希值来决定是否在灰度范围内
-		hash := crc32.ChecksumIEEE([]byte(machineID))
-		if int(hash%100) >= hotUpdate.RolloutPercent {
-			response.Success(c, gin.H{
-				"has_update": false,
-			})
-			return
-		}
+	if !isMachineInRollout(machineID, hotUpdate.RolloutPercent) {
+		response.Success(c, gin.H{
+			"has_update": false,
+		})
+		return
 	}
 
 	// 返回更新信息
@@ -702,7 +962,7 @@ func (h *HotUpdateHandler) CheckUpdate(c *gin.Context) {
 	// 当 from_version 是 "*" 时，表示匹配任意版本
 	fromVersionMatch := hotUpdate.FromVersion == currentVersion || hotUpdate.FromVersion == "*"
 	if hotUpdate.PatchURL != "" && fromVersionMatch {
-		downloadURL, err := buildClientDownloadURLWithToken(hotUpdate.PatchURL, app.ID, machineID, downloadTokenKindHotUpdate)
+		downloadURL, err := buildClientDownloadURLWithToken(hotUpdate.PatchURL, app.TenantID, app.ID, machineID, downloadTokenKindHotUpdate)
 		if err != nil {
 			response.ServerError(c, "生成下载链接失败")
 			return
@@ -714,7 +974,7 @@ func (h *HotUpdateHandler) CheckUpdate(c *gin.Context) {
 		result["signature_alg"] = fileSignatureAlgorithm
 		result["update_type"] = "patch"
 	} else if hotUpdate.FullURL != "" {
-		downloadURL, err := buildClientDownloadURLWithToken(hotUpdate.FullURL, app.ID, machineID, downloadTokenKindHotUpdate)
+		downloadURL, err := buildClientDownloadURLWithToken(hotUpdate.FullURL, app.TenantID, app.ID, machineID, downloadTokenKindHotUpdate)
 		if err != nil {
 			response.ServerError(c, "生成下载链接失败")
 			return
@@ -737,7 +997,7 @@ func (h *HotUpdateHandler) DownloadUpdate(c *gin.Context) {
 		return
 	}
 
-	app, _, ok := validateClientDownloadContext(c, filename, downloadTokenKindHotUpdate)
+	app, machineID, ok := validateClientDownloadContext(c, filename, downloadTokenKindHotUpdate)
 	if !ok {
 		return
 	}
@@ -747,6 +1007,10 @@ func (h *HotUpdateHandler) DownloadUpdate(c *gin.Context) {
 		"app_id = ? AND status = ? AND (patch_url LIKE ? OR full_url LIKE ?)",
 		app.ID, model.HotUpdateStatusPublished, "%/"+filename, "%/"+filename,
 	).Order("created_at DESC").First(&hotUpdate).Error; err != nil {
+		response.NotFound(c, "文件不存在")
+		return
+	}
+	if !isMachineInRollout(machineID, hotUpdate.RolloutPercent) {
 		response.NotFound(c, "文件不存在")
 		return
 	}
@@ -772,9 +1036,11 @@ func (h *HotUpdateHandler) DownloadUpdate(c *gin.Context) {
 	// 从文件名解析热更新ID（简化处理，实际可通过查询参数传递）
 	go func() {
 		// 异步更新下载计数
-		model.DB.Model(&model.HotUpdate{}).
+		if err := model.DB.Model(&model.HotUpdate{}).
 			Where("id = ? AND app_id = ?", hotUpdate.ID, app.ID).
-			UpdateColumn("download_count", model.DB.Raw("download_count + 1"))
+			UpdateColumn("download_count", model.DB.Raw("download_count + 1")).Error; err != nil {
+			log.Printf("[warn] 更新热更新下载计数失败: hot_update_id=%s app_id=%s err=%v", hotUpdate.ID, app.ID, err)
+		}
 	}()
 
 	c.File(filePath)
@@ -783,9 +1049,7 @@ func (h *HotUpdateHandler) DownloadUpdate(c *gin.Context) {
 // ReportUpdateStatus 客户端上报更新状态
 func (h *HotUpdateHandler) ReportUpdateStatus(c *gin.Context) {
 	var req struct {
-		AppKey       string `json:"app_key" binding:"required"`
 		HotUpdateID  string `json:"hot_update_id" binding:"required"`
-		MachineID    string `json:"machine_id" binding:"required"`
 		FromVersion  string `json:"from_version"`
 		ToVersion    string `json:"to_version"`
 		Status       string `json:"status" binding:"required"` // downloading, installing, success, failed, rollback
@@ -796,13 +1060,21 @@ func (h *HotUpdateHandler) ReportUpdateStatus(c *gin.Context) {
 		response.BadRequest(c, "参数错误: "+err.Error())
 		return
 	}
-
-	// 验证应用
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", req.AppKey, model.AppStatusActive).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	status, ok := normalizeHotUpdateLogStatus(req.Status)
+	if !ok {
+		response.BadRequest(c, "无效的更新状态")
 		return
 	}
+
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
+		return
+	}
+	device, ok := loadClientDeviceFromSession(c, app)
+	if !ok {
+		return
+	}
+	machineID := device.MachineID
 
 	// 验证热更新
 	var hotUpdate model.HotUpdate
@@ -811,61 +1083,71 @@ func (h *HotUpdateHandler) ReportUpdateStatus(c *gin.Context) {
 		return
 	}
 
-	// 查找设备
-	var device model.Device
-	if err := model.DB.Preload("License").Preload("Subscription").
-		Where("machine_id = ? AND tenant_id = ?", req.MachineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
-		return
-	}
-	if (device.License == nil || device.License.AppID != app.ID) &&
-		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
-		response.Error(c, 401, "设备未绑定当前应用")
-		return
-	}
-
 	now := time.Now()
 
-	// 查找或创建日志
-	var log model.HotUpdateLog
-	err := model.DB.Where("hot_update_id = ? AND machine_id = ?", req.HotUpdateID, req.MachineID).First(&log).Error
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		var log model.HotUpdateLog
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("hot_update_id = ? AND machine_id = ?", req.HotUpdateID, machineID).
+			First(&log).Error
 
-	status := model.HotUpdateLogStatus(req.Status)
+		previousStatus := model.HotUpdateLogStatus("")
+		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			log = model.HotUpdateLog{
+				HotUpdateID:  req.HotUpdateID,
+				DeviceID:     device.ID,
+				MachineID:    machineID,
+				FromVersion:  req.FromVersion,
+				ToVersion:    req.ToVersion,
+				Status:       status,
+				ErrorMessage: req.ErrorMessage,
+				IPAddress:    c.ClientIP(),
+				StartedAt:    &now,
+			}
+			if isTerminalHotUpdateLogStatus(status) {
+				log.CompletedAt = &now
+			}
+			if err := tx.Create(&log).Error; err != nil {
+				return err
+			}
+		} else {
+			previousStatus = log.Status
+			if !shouldApplyHotUpdateLogStatusTransition(previousStatus, status) {
+				return nil
+			}
+			updates := map[string]interface{}{
+				"status":     status,
+				"device_id":  device.ID,
+				"ip_address": c.ClientIP(),
+			}
+			if req.FromVersion != "" {
+				updates["from_version"] = req.FromVersion
+			}
+			if req.ToVersion != "" {
+				updates["to_version"] = req.ToVersion
+			}
+			if req.ErrorMessage != "" {
+				updates["error_message"] = req.ErrorMessage
+			} else if status == model.HotUpdateLogStatusSuccess {
+				updates["error_message"] = ""
+			}
+			if isTerminalHotUpdateLogStatus(status) {
+				updates["completed_at"] = &now
+			} else {
+				updates["completed_at"] = nil
+			}
+			if err := tx.Model(&log).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
 
-	if err != nil {
-		// 创建新日志
-		log = model.HotUpdateLog{
-			HotUpdateID:  req.HotUpdateID,
-			DeviceID:     device.ID,
-			MachineID:    req.MachineID,
-			FromVersion:  req.FromVersion,
-			ToVersion:    req.ToVersion,
-			Status:       status,
-			ErrorMessage: req.ErrorMessage,
-			IPAddress:    c.ClientIP(),
-			StartedAt:    &now,
-		}
-		model.DB.Create(&log)
-	} else {
-		// 更新日志
-		log.Status = status
-		if req.ErrorMessage != "" {
-			log.ErrorMessage = req.ErrorMessage
-		}
-		if status == model.HotUpdateLogStatusSuccess || status == model.HotUpdateLogStatusFailed || status == model.HotUpdateLogStatusRollback {
-			log.CompletedAt = &now
-		}
-		model.DB.Save(&log)
-	}
-
-	// 更新热更新统计
-	switch status {
-	case model.HotUpdateLogStatusSuccess:
-		model.DB.Model(&hotUpdate).UpdateColumn("success_count", model.DB.Raw("success_count + 1"))
-	case model.HotUpdateLogStatusFailed:
-		model.DB.Model(&hotUpdate).UpdateColumn("fail_count", model.DB.Raw("fail_count + 1"))
+		return applyHotUpdateStatusCounterDelta(tx, hotUpdate.ID, previousStatus, status)
+	}); err != nil {
+		response.ServerError(c, "上报更新状态失败")
+		return
 	}
 
 	response.SuccessWithMessage(c, "上报成功", nil)
@@ -873,34 +1155,15 @@ func (h *HotUpdateHandler) ReportUpdateStatus(c *gin.Context) {
 
 // GetUpdateHistory 获取设备更新历史
 func (h *HotUpdateHandler) GetUpdateHistory(c *gin.Context) {
-	appKey := c.Query("app_key")
-	machineID := c.Query("machine_id")
-
-	if appKey == "" || machineID == "" {
-		response.BadRequest(c, "缺少参数")
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
 		return
 	}
-
-	// 验证应用
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	device, ok := loadClientDeviceFromSession(c, app)
+	if !ok {
 		return
 	}
-
-	var device model.Device
-	if err := model.DB.Preload("License").Preload("Subscription").
-		Where("machine_id = ? AND tenant_id = ?", machineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
-		return
-	}
-	if (device.License == nil || device.License.AppID != app.ID) &&
-		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
-		response.Error(c, 401, "设备未绑定当前应用")
-		return
-	}
+	machineID := device.MachineID
 
 	var logs []model.HotUpdateLog
 	model.DB.Preload("HotUpdate").

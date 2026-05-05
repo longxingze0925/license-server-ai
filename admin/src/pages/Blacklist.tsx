@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Table, Button, Space, message, Tag, Input, Card, Statistic, Row, Col, Spin, App } from 'antd';
 import { DeleteOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
 import { blacklistApi } from '../api';
+import { useAuthStore } from '../store';
 
 const Blacklist: React.FC = () => {
   const { modal } = App.useApp();
+  const { user } = useAuthStore();
   const [loading, setLoading] = useState(false);
   const [pageLoading, setPageLoading] = useState(true);
   const [data, setData] = useState<any[]>([]);
@@ -12,12 +14,9 @@ const Blacklist: React.FC = () => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [searchText, setSearchText] = useState('');
+  const canUpdateDevice = ['owner', 'admin', 'developer'].includes(user?.role || '');
 
-  useEffect(() => {
-    fetchData();
-  }, [page, pageSize]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const result: any = await blacklistApi.list({ page, page_size: pageSize });
@@ -31,15 +30,23 @@ const Blacklist: React.FC = () => {
       setLoading(false);
       setPageLoading(false);
     }
-  };
+  }, [page, pageSize]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   const handleRemove = (record: any) => {
+    if (!canUpdateDevice) {
+      return;
+    }
+
     modal.confirm({
       title: '确认移除',
       content: `确定要将机器码 "${record.machine_id}" 从黑名单中移除吗？移除后该设备将可以正常使用。`,
       onOk: async () => {
         try {
-          await blacklistApi.remove(record.machine_id);
+          await blacklistApi.remove(record.machine_id, record.app_id ? { app_id: record.app_id } : { scope: 'global' });
           message.success('已从黑名单移除');
           fetchData();
         } catch (error) {
@@ -74,7 +81,7 @@ const Blacklist: React.FC = () => {
     },
     { title: '拉黑时间', dataIndex: 'created_at', key: 'created_at', render: (v: string) => v?.slice(0, 19).replace('T', ' ') },
     { title: '操作人', dataIndex: 'created_by', key: 'created_by', render: (v: string) => v || '系统' },
-    {
+    ...(canUpdateDevice ? [{
       title: '操作', key: 'action',
       render: (_: any, record: any) => (
         <Space>
@@ -83,7 +90,7 @@ const Blacklist: React.FC = () => {
           </Button>
         </Space>
       ),
-    },
+    }] : []),
   ];
 
   // 统计数据
@@ -110,7 +117,7 @@ const Blacklist: React.FC = () => {
           <Card>
             <Statistic
               title="黑名单总数"
-              value={data.length}
+              value={total}
               prefix={<StopOutlined />}
               valueStyle={{ color: '#ff4d4f' }}
             />
@@ -119,7 +126,7 @@ const Blacklist: React.FC = () => {
         <Col span={6}>
           <Card>
             <Statistic
-              title="手动拉黑"
+              title="当前页手动拉黑"
               value={manualCount}
               valueStyle={{ color: '#fa8c16' }}
             />
@@ -128,7 +135,7 @@ const Blacklist: React.FC = () => {
         <Col span={6}>
           <Card>
             <Statistic
-              title="自动拉黑"
+              title="当前页自动拉黑"
               value={autoCount}
               valueStyle={{ color: '#f5222d' }}
             />
@@ -137,7 +144,7 @@ const Blacklist: React.FC = () => {
         <Col span={6}>
           <Card>
             <Statistic
-              title="安全拉黑"
+              title="当前页安全拉黑"
               value={securityCount}
               valueStyle={{ color: '#cf1322' }}
             />
@@ -159,7 +166,7 @@ const Blacklist: React.FC = () => {
         <Table
           columns={columns}
           dataSource={filteredData}
-          rowKey="machine_id"
+          rowKey="id"
           loading={loading}
           pagination={{
             current: page,

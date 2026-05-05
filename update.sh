@@ -59,6 +59,17 @@ compose_cmd() {
     fi
 }
 
+ensure_license_master_key() {
+    local key="${LICENSE_MASTER_KEY:-}"
+    if [ -z "$key" ] && [ -f ".env" ]; then
+        key=$(grep -E '^LICENSE_MASTER_KEY=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d '\r')
+    fi
+    if [ -z "$key" ]; then
+        log_error "缺少 LICENSE_MASTER_KEY。请先运行 ./deploy.sh 完成首次部署，或在 .env 中恢复首次部署生成的值"
+        exit 1
+    fi
+}
+
 # 解析参数
 IMAGE_TAG_OVERRIDE=""
 for arg in "$@"; do
@@ -113,13 +124,17 @@ pull_images() {
 
 # 平滑重启服务
 restart_services() {
-    log_info "重启服务（零停机）..."
+	log_info "重启服务（零停机）..."
 
-    # 使用 rolling update 策略
-    # 先启动新容器，等待健康检查通过后再停止旧容器
+	# 使用 rolling update 策略
+	# 先启动新容器，等待健康检查通过后再停止旧容器
 
-    # 重启后端
-    compose_cmd up -d --no-deps backend
+	# 显式执行数据库迁移，避免后端启动时隐式改库
+	log_info "执行数据库迁移..."
+	compose_cmd run --rm migrate
+
+	# 重启后端
+	compose_cmd up -d --no-deps backend
 
     # 等待后端健康
     log_info "等待后端服务就绪..."
@@ -192,6 +207,7 @@ main() {
     echo ""
 
     sync_upload_limit_from_config
+    ensure_license_master_key
     show_current_version
     echo ""
 

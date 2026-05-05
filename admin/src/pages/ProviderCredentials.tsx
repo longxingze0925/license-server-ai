@@ -1,0 +1,490 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  Table,
+  Button,
+  Space,
+  Modal,
+  Form,
+  Input,
+  InputNumber,
+  Select,
+  Switch,
+  message,
+  Tag,
+  App,
+  Tooltip,
+  Alert,
+} from 'antd';
+import {
+  PlusOutlined,
+  EditOutlined,
+  DeleteOutlined,
+  ThunderboltOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons';
+import { providerCredentialApi } from '../api';
+
+type ProviderOption = { value: string; label: string; disabled?: boolean };
+
+const PROVIDER_OPTIONS: ProviderOption[] = [
+  { value: 'gemini', label: 'Gemini' },
+  { value: 'gpt', label: 'GPT' },
+  { value: 'veo', label: 'Veo' },
+  { value: 'sora', label: 'Sora' },
+  { value: 'grok', label: 'Grok' },
+  { value: 'claude', label: 'Claude（暂未接入）', disabled: true },
+];
+
+const PROVIDER_FILTER_OPTIONS = PROVIDER_OPTIONS.map(({ value, label }) => ({ value, label }));
+
+// 各 Provider 支持的 mode 取值（与客户端 StudioContracts.cs 中的 *RequestModes 对齐）
+const MODE_OPTIONS_BY_PROVIDER: Record<string, { value: string; label: string }[]> = {
+  gemini: [
+    { value: 'official', label: '官转 Official' },
+    { value: 'duoyuan', label: '多元 DuoYuan' },
+  ],
+  gpt: [
+    { value: 'official', label: '官转 Official' },
+    { value: 'gzxsy', label: '工作室 Gzxsy' },
+  ],
+  veo: [
+    { value: 'google', label: 'Google Native' },
+    { value: 'adapter', label: 'Adapter API' },
+    { value: 'duoyuan', label: '多元 DuoYuan' },
+  ],
+  sora: [
+    { value: 'async', label: 'Async' },
+    { value: 'chat', label: 'Chat' },
+  ],
+  grok: [
+    { value: 'official', label: '官转 Official' },
+    { value: 'duoyuan', label: '多元 DuoYuan' },
+    { value: 'suchuang', label: '速创 SuChuang' },
+  ],
+  claude: [{ value: 'official', label: '官转 Official' }],
+};
+
+const HEALTH_LABEL: Record<string, { label: string; color: string }> = {
+  unknown: { label: '未知', color: 'default' },
+  healthy: { label: '健康', color: 'green' },
+  degraded: { label: '降级', color: 'orange' },
+  down: { label: '宕机', color: 'red' },
+};
+
+interface CredentialRow {
+  id: string;
+  provider: string;
+  mode: string;
+  channel_name: string;
+  upstream_base: string;
+  default_model?: string;
+  custom_headers?: string;
+  enabled: boolean;
+  is_default: boolean;
+  priority: number;
+  health_status: string;
+  last_used_at?: string;
+  api_key_set: boolean;
+  api_key_cipher_size?: number;
+  note?: string;
+  created_at: string;
+}
+
+const ProviderCredentials: React.FC = () => {
+  const { modal } = App.useApp();
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<CredentialRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [modalVisible, setModalVisible] = useState(false);
+  const [current, setCurrent] = useState<CredentialRow | null>(null);
+  const [form] = Form.useForm();
+  const selectedProvider = Form.useWatch('provider', form);
+  const selectedMode = Form.useWatch('mode', form);
+  const [providerFilter, setProviderFilter] = useState<string>();
+  const [modeOptions, setModeOptions] = useState<{ value: string; label: string }[]>([]);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result: any = await providerCredentialApi.list({
+        page,
+        page_size: pageSize,
+        provider: providerFilter,
+      });
+      setData(result?.list || []);
+      setTotal(result?.total || 0);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, pageSize, providerFilter]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  const handleProviderChange = (provider: string) => {
+    setModeOptions(MODE_OPTIONS_BY_PROVIDER[provider] ?? []);
+    form.setFieldValue('mode', undefined);
+  };
+
+  const handleCreate = () => {
+    setCurrent(null);
+    form.resetFields();
+    setModeOptions([]);
+    form.setFieldsValue({ enabled: true, priority: 0, is_default: false });
+    setModalVisible(true);
+  };
+
+  const handleEdit = (record: CredentialRow) => {
+    setCurrent(record);
+    setModeOptions(MODE_OPTIONS_BY_PROVIDER[record.provider] ?? []);
+    form.setFieldsValue({
+      provider: record.provider,
+      mode: record.mode,
+      channel_name: record.channel_name,
+      upstream_base: record.upstream_base,
+      default_model: record.default_model,
+      custom_headers: record.custom_headers,
+      enabled: record.enabled,
+      is_default: record.is_default,
+      priority: record.priority,
+      note: record.note,
+      api_key: '', // 留空表示不修改
+    });
+    setModalVisible(true);
+  };
+
+  const handleDelete = (record: CredentialRow) => {
+    modal.confirm({
+      title: '确认删除',
+      content: `确定要删除凭证 "${record.channel_name}" 吗？`,
+      okType: 'danger',
+      onOk: async () => {
+        try {
+          await providerCredentialApi.delete(record.id);
+          message.success('删除成功');
+          fetchData();
+        } catch (e) {
+          console.error(e);
+        }
+      },
+    });
+  };
+
+  const handleSubmit = async () => {
+    try {
+      const values = await form.validateFields();
+      if (current) {
+        const payload: any = { ...values };
+        if (!payload.api_key) {
+          delete payload.api_key; // 留空 = 不修改
+        }
+        await providerCredentialApi.update(current.id, payload);
+        message.success('更新成功');
+      } else {
+        if (!values.api_key) {
+          message.error('新建必须填写 API Key');
+          return;
+        }
+        await providerCredentialApi.create(values);
+        message.success('创建成功');
+      }
+      setModalVisible(false);
+      fetchData();
+    } catch {
+      // form 校验错误已被 antd 捕获
+    }
+  };
+
+  const handleTest = async (record: CredentialRow) => {
+    const hide = message.loading(`正在测试 ${record.channel_name}...`, 0);
+    try {
+      const result: any = await providerCredentialApi.test(record.id);
+      hide();
+      if (result?.ok) {
+        modal.success({
+          title: '连通性测试成功',
+          content: (
+            <div>
+              <p>HTTP 状态：{result.http_status}</p>
+              <p>耗时：{result.latency_ms} ms</p>
+              <p>探测方式：{result.probe_method || 'GET'}</p>
+              <p>探测地址：<code>{result.probe_url}</code></p>
+            </div>
+          ),
+        });
+      } else {
+        modal.error({
+          title: '连通性测试失败',
+          content: (
+            <div>
+              <p>HTTP 状态：{result?.http_status ?? '-'}</p>
+              <p>耗时：{result?.latency_ms} ms</p>
+              <p>探测方式：{result?.probe_method || 'GET'}</p>
+              <p>原因：{result?.reason || '上游返回非 2xx'}</p>
+              {result?.upstream_sample && (
+                <pre style={{ background: '#f5f5f5', padding: 8, maxHeight: 200, overflow: 'auto' }}>
+                  {result.upstream_sample}
+                </pre>
+              )}
+            </div>
+          ),
+          width: 600,
+        });
+      }
+      fetchData();
+    } catch (e) {
+      hide();
+      console.error(e);
+    }
+  };
+
+  const columns = [
+    {
+      title: 'Provider',
+      dataIndex: 'provider',
+      key: 'provider',
+      width: 110,
+      render: (v: string) => <Tag color="blue">{v}</Tag>,
+    },
+    {
+      title: 'Mode',
+      dataIndex: 'mode',
+      key: 'mode',
+      width: 110,
+    },
+    {
+      title: '通道名',
+      dataIndex: 'channel_name',
+      key: 'channel_name',
+    },
+    {
+      title: '上游地址',
+      dataIndex: 'upstream_base',
+      key: 'upstream_base',
+      ellipsis: true,
+      render: (v: string) => (
+        <Tooltip title={v}>
+          <code style={{ fontSize: 12 }}>{v}</code>
+        </Tooltip>
+      ),
+    },
+    {
+      title: '默认',
+      dataIndex: 'is_default',
+      key: 'is_default',
+      width: 60,
+      render: (v: boolean) => (v ? <Tag color="gold">默认</Tag> : null),
+    },
+    {
+      title: '优先级',
+      dataIndex: 'priority',
+      key: 'priority',
+      width: 80,
+    },
+    {
+      title: '启用',
+      dataIndex: 'enabled',
+      key: 'enabled',
+      width: 70,
+      render: (v: boolean) => (
+        <Tag color={v ? 'green' : 'default'}>{v ? '启用' : '禁用'}</Tag>
+      ),
+    },
+    {
+      title: '健康度',
+      dataIndex: 'health_status',
+      key: 'health_status',
+      width: 90,
+      render: (v: string) => {
+        const meta = HEALTH_LABEL[v] || HEALTH_LABEL.unknown;
+        return <Tag color={meta.color}>{meta.label}</Tag>;
+      },
+    },
+    {
+      title: '最近调用',
+      dataIndex: 'last_used_at',
+      key: 'last_used_at',
+      width: 160,
+      render: (v?: string) => (v ? v.replace('T', ' ').slice(0, 19) : '-'),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 260,
+      render: (_: any, record: CredentialRow) => (
+        <Space>
+          <Tooltip title={record.provider === 'claude' ? 'Claude 暂未接入代理能力，不能测试为可用凭证' : undefined}>
+            <Button
+              type="primary"
+              size="small"
+              icon={<ThunderboltOutlined />}
+              disabled={record.provider === 'claude'}
+              onClick={() => handleTest(record)}
+            >
+              测试
+            </Button>
+          </Tooltip>
+          <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>
+            编辑
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={() => handleDelete(record)}
+          >
+            删除
+          </Button>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h2 style={{ margin: 0 }}>AI Provider 凭证</h2>
+        <Space>
+          <Select
+            allowClear
+            placeholder="按 Provider 过滤"
+            style={{ width: 180 }}
+            options={PROVIDER_FILTER_OPTIONS}
+            value={providerFilter}
+            onChange={(v) => {
+              setProviderFilter(v);
+              setPage(1);
+            }}
+          />
+          <Button icon={<ReloadOutlined />} onClick={fetchData}>
+            刷新
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
+            新建凭证
+          </Button>
+        </Space>
+      </div>
+
+      <Table
+        columns={columns}
+        dataSource={data}
+        rowKey="id"
+        loading={loading}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          showTotal: (t) => `共 ${t} 条`,
+          onChange: (p, ps) => {
+            setPage(p);
+            setPageSize(ps);
+          },
+        }}
+      />
+
+      <Modal
+        title={current ? '编辑凭证' : '新建凭证'}
+        open={modalVisible}
+        onOk={handleSubmit}
+        onCancel={() => setModalVisible(false)}
+        width={640}
+        destroyOnClose
+      >
+        <Form form={form} layout="vertical" preserve={false}>
+          <Form.Item
+            name="provider"
+            label="Provider"
+            rules={[{ required: true, message: '请选择 Provider' }]}
+          >
+            <Select
+              options={PROVIDER_OPTIONS}
+              onChange={handleProviderChange}
+              disabled={!!current}
+              placeholder="选择 AI 服务商"
+            />
+          </Form.Item>
+
+          <Form.Item name="mode" label="Mode" rules={[{ required: true, message: '请选择接入方式' }]}>
+            <Select options={modeOptions} placeholder="选择接入方式（mode）" disabled={!!current} />
+          </Form.Item>
+
+          {selectedProvider === 'grok' && selectedMode && selectedMode !== 'official' && (
+            <Alert
+              showIcon
+              type="info"
+              style={{ marginBottom: 16 }}
+              message="该模式会下发为客户端可选生成通道；上游需兼容 /v1/videos/generations 异步视频接口。"
+            />
+          )}
+
+          {selectedProvider === 'claude' && (
+            <Alert
+              showIcon
+              type="warning"
+              style={{ marginBottom: 16 }}
+              message="Claude 当前只保留类型定义，代理 adapter 未接入，不能配置为可用凭证。"
+            />
+          )}
+
+          <Form.Item
+            name="channel_name"
+            label="通道名"
+            rules={[{ required: true, message: '请输入通道名' }, { max: 64 }]}
+          >
+            <Input placeholder="例如：veo-主力1号" />
+          </Form.Item>
+
+          <Form.Item
+            name="upstream_base"
+            label="上游 Base URL"
+            rules={[{ required: true, message: '请输入上游地址' }]}
+          >
+            <Input placeholder="https://api.openai.com" />
+          </Form.Item>
+
+          <Form.Item
+            name="api_key"
+            label={current ? 'API Key（留空 = 不修改）' : 'API Key'}
+            rules={current ? [] : [{ required: true, message: '请输入 API Key' }]}
+            extra="入库立即信封加密；保存后无法再查看明文"
+          >
+            <Input.Password placeholder={current ? '留空表示不修改原 Key' : 'sk-...'} autoComplete="new-password" />
+          </Form.Item>
+
+          <Form.Item name="default_model" label="默认模型 (可选)">
+            <Input placeholder="例如：gpt-4o-mini / gemini-2.5-flash / veo-3" />
+          </Form.Item>
+
+          <Form.Item name="custom_headers" label="自定义请求头 JSON (可选)">
+            <Input.TextArea rows={2} placeholder='{"X-DuoYuan-Token": "xxx"}' />
+          </Form.Item>
+
+          <Space size="large">
+            <Form.Item name="enabled" label="启用" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+            <Form.Item name="is_default" label="设为默认" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+            <Form.Item name="priority" label="优先级">
+              <InputNumber min={0} max={1000} />
+            </Form.Item>
+          </Space>
+
+          <Form.Item name="note" label="备注 (可选)">
+            <Input.TextArea rows={2} maxLength={256} />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div>
+  );
+};
+
+export default ProviderCredentials;

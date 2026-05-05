@@ -1,4 +1,4 @@
-# License Server 部署指南
+﻿# License Server 部署指南
 
 ## 目录
 
@@ -22,8 +22,8 @@
 ```bash
 export GIT_TOKEN=YOUR_TOKEN
 curl -H "Authorization: token $GIT_TOKEN" -fsSL \
-  https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh | \
-  bash -s -- --repo https://github.com/longxingze0925/license-server01.git \
+  https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh | \
+  bash -s -- --repo https://github.com/longxingze0925/license-server-ai.git \
   --branch main --git-token "$GIT_TOKEN" \
   --ssl letsencrypt --domain example.com --email admin@example.com -y
 ```
@@ -31,7 +31,7 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
 **方式二：服务器本地执行（已克隆仓库）**
 
 ```bash
-git clone https://github.com/longxingze0925/license-server01.git /opt/license-server
+git clone https://github.com/longxingze0925/license-server-ai.git /opt/license-server
 cd /opt/license-server
 chmod +x install.sh
 sudo ./install.sh
@@ -42,8 +42,8 @@ sudo ./install.sh
 ```bash
 export GIT_TOKEN=YOUR_TOKEN
 curl -H "Authorization: token $GIT_TOKEN" -fsSL \
-  https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh | \
-  bash -s -- --repo https://github.com/longxingze0925/license-server01.git \
+  https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh | \
+  bash -s -- --repo https://github.com/longxingze0925/license-server-ai.git \
   --branch main --git-token "$GIT_TOKEN" \
   --ssl http -y
 ```
@@ -90,6 +90,7 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
 | `MYSQL_PASSWORD` | 应用数据库密码 | ✅ | 自动生成 |
 | `REDIS_PASSWORD` | Redis 密码 | ✅ | 自动生成 |
 | `JWT_SECRET` | JWT 签名密钥（≥32字符）| ✅ | 自动生成 |
+| `LICENSE_MASTER_KEY` | Provider 凭证加密主密钥（base64 32字节）| ✅ | 自动生成 |
 | `ADMIN_EMAIL` | 管理员邮箱 | ✅ | `admin@example.com` |
 | `ADMIN_PASSWORD` | 管理员初始密码 | ✅ | 自动生成 |
 | `HTTP_PORT` | HTTP 端口 | 可选 | `80` |
@@ -129,8 +130,8 @@ sudo ./install.sh
 ```bash
 export GIT_TOKEN=YOUR_TOKEN
 curl -H "Authorization: token $GIT_TOKEN" -fsSL \
-  https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh | \
-  bash -s -- --repo https://github.com/longxingze0925/license-server01.git \
+  https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh | \
+  bash -s -- --repo https://github.com/longxingze0925/license-server-ai.git \
   --branch main --git-token "$GIT_TOKEN" \
   --ssl letsencrypt --domain example.com --email admin@example.com -y
 ```
@@ -140,8 +141,8 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
 ```bash
 export GIT_TOKEN=YOUR_TOKEN
 curl -H "Authorization: token $GIT_TOKEN" -fsSL \
-  https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh | \
-  bash -s -- --repo https://github.com/longxingze0925/license-server01.git \
+  https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh | \
+  bash -s -- --repo https://github.com/longxingze0925/license-server-ai.git \
   --branch main --git-token "$GIT_TOKEN" \
   --ssl custom --cert /path/to/fullchain.crt --key /path/to/private.key -y
 ```
@@ -151,8 +152,8 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
 ```bash
 export GIT_TOKEN=YOUR_TOKEN
 curl -H "Authorization: token $GIT_TOKEN" -fsSL \
-  https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh | \
-  bash -s -- --repo https://github.com/longxingze0925/license-server01.git \
+  https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh | \
+  bash -s -- --repo https://github.com/longxingze0925/license-server-ai.git \
   --branch main --git-token "$GIT_TOKEN" \
   --ssl http -y
 ```
@@ -269,6 +270,18 @@ echo "0 2 * * * root /opt/license-server/ssl-manager.sh renew" > /etc/cron.d/cer
 
 ### 1. 准备配置文件
 
+推荐直接运行：
+
+```bash
+./deploy.sh
+```
+
+如果当前目录没有 `.env`，脚本会基于 `.env.example` 创建 `.env`，并随机生成数据库密码、JWT 密钥、客户端 token 密钥、`LICENSE_MASTER_KEY` 和初始管理员密码。
+
+如果 `.env` 已存在，脚本会复用里面的值，不会覆盖 `LICENSE_MASTER_KEY`。这个值用于解密数据库里的 Provider API Key，换掉后旧 Provider 凭证将无法解密。
+
+需要完全手动部署时再执行下面步骤。
+
 ```bash
 # 复制环境变量模板
 cp .env.example .env
@@ -280,17 +293,23 @@ nano .env
 ### 2. 修改必要配置
 
 ```env
-# 必须修改的配置
+# 必须准备的配置
 SERVER_IP=你的服务器IP
 MYSQL_ROOT_PASSWORD=你的MySQL密码
 MYSQL_PASSWORD=你的应用密码
 REDIS_PASSWORD=你的Redis密码
 JWT_SECRET=至少32位的随机字符串
+LICENSE_MASTER_KEY=base64编码的32字节随机主密钥
 ```
+
+`LICENSE_MASTER_KEY` 只在第一次部署时随机生成。后续更新、重启、迁移同一个数据库时，都必须复用原来的值。
 
 生成随机密钥：
 ```bash
 # 生成 JWT Secret
+openssl rand -base64 32
+
+# 生成 LICENSE_MASTER_KEY
 openssl rand -base64 32
 
 # 生成密码

@@ -20,17 +20,18 @@ import (
 
 // SecureScriptManager 安全脚本管理器
 type SecureScriptManager struct {
-	client       *Client
-	appSecret    string
-	publicKey    *rsa.PublicKey
-	scriptCache  map[string]*CachedScript
-	mu           sync.RWMutex
-	onExecute    func(scriptID string, status string, err error)
+	client      *Client
+	appSecret   string
+	publicKey   *rsa.PublicKey
+	scriptCache map[string]*CachedScript
+	mu          sync.RWMutex
+	onExecute   func(scriptID string, status string, err error)
 }
 
 // CachedScript 缓存的脚本
 type CachedScript struct {
 	ScriptID    string
+	DeliveryID  string
 	Version     string
 	Content     []byte // 解密后的内容
 	ContentHash string
@@ -41,6 +42,7 @@ type CachedScript struct {
 // EncryptedScriptPackage 加密脚本包
 type EncryptedScriptPackage struct {
 	ScriptID         string `json:"script_id"`
+	DeliveryID       string `json:"delivery_id"`
 	Version          string `json:"version"`
 	ScriptType       string `json:"script_type"`
 	EntryPoint       string `json:"entry_point"`
@@ -104,34 +106,20 @@ func NewSecureScriptManager(client *Client, opts ...SecureScriptOption) *SecureS
 
 // GetScriptVersions 获取脚本版本列表
 func (m *SecureScriptManager) GetScriptVersions() ([]ScriptVersionInfo, error) {
-	url := fmt.Sprintf("%s/api/client/secure-scripts/versions?app_key=%s",
-		m.client.GetServerURL(), m.client.GetAppKey())
-
-	resp, err := m.client.GetHTTPClient().Get(url)
+	data, err := m.client.requestWithClientSession("GET", "/secure-scripts/versions", nil)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	dataBytes, err := json.Marshal(data)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+		return nil, fmt.Errorf("序列化响应失败: %w", err)
 	}
-
-	var result struct {
-		Code    int                 `json:"code"`
-		Message string              `json:"message"`
-		Data    []ScriptVersionInfo `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	var versions []ScriptVersionInfo
+	if err := json.Unmarshal(dataBytes, &versions); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
-
-	if result.Code != 0 {
-		return nil, fmt.Errorf("API错误: %s", result.Message)
-	}
-
-	return result.Data, nil
+	return versions, nil
 }
 
 // FetchScript 获取加密脚本并解密
@@ -148,12 +136,10 @@ func (m *SecureScriptManager) FetchScript(scriptID string) (*CachedScript, error
 
 	// 请求服务器
 	reqBody := map[string]string{
-		"app_key":    m.client.GetAppKey(),
-		"machine_id": m.client.GetMachineID(),
-		"script_id":  scriptID,
+		"script_id": scriptID,
 	}
 
-	data, err := m.client.request("POST", "/secure-scripts/fetch", reqBody)
+	data, err := m.client.requestWithClientSession("POST", "/secure-scripts/fetch", reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("获取脚本失败: %w", err)
 	}
@@ -201,6 +187,7 @@ func (m *SecureScriptManager) FetchScript(scriptID string) (*CachedScript, error
 	// 缓存
 	cached := &CachedScript{
 		ScriptID:    pkg.ScriptID,
+		DeliveryID:  pkg.DeliveryID,
 		Version:     pkg.Version,
 		Content:     content,
 		ContentHash: pkg.ContentHash,
@@ -233,7 +220,7 @@ func (m *SecureScriptManager) ExecuteScript(
 	}
 
 	// 上报开始执行
-	m.reportExecution(scriptID, "", "executing", "", "", 0)
+	m.reportExecution(scriptID, script.DeliveryID, "executing", "", "", 0)
 	if m.onExecute != nil {
 		m.onExecute(scriptID, "executing", nil)
 	}
@@ -251,7 +238,7 @@ func (m *SecureScriptManager) ExecuteScript(
 		errMsg = execErr.Error()
 	}
 
-	m.reportExecution(scriptID, "", status, result, errMsg, duration)
+	m.reportExecution(scriptID, script.DeliveryID, status, result, errMsg, duration)
 	if m.onExecute != nil {
 		m.onExecute(scriptID, status, execErr)
 	}
@@ -341,10 +328,8 @@ func (m *SecureScriptManager) verifySignature(data []byte, signatureBase64 strin
 
 func (m *SecureScriptManager) reportExecution(scriptID, deliveryID, status, result, errorMsg string, duration int) {
 	reqBody := map[string]interface{}{
-		"app_key":    m.client.GetAppKey(),
-		"machine_id": m.client.GetMachineID(),
-		"script_id":  scriptID,
-		"status":     status,
+		"script_id": scriptID,
+		"status":    status,
 	}
 	if deliveryID != "" {
 		reqBody["delivery_id"] = deliveryID
@@ -360,7 +345,7 @@ func (m *SecureScriptManager) reportExecution(scriptID, deliveryID, status, resu
 	}
 
 	// 异步上报
-	go m.client.request("POST", "/secure-scripts/report", reqBody)
+	go m.client.requestWithClientSession("POST", "/secure-scripts/report", reqBody)
 }
 
 func sha256Hash(data []byte) string {

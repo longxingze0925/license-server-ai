@@ -1,4 +1,4 @@
-# License Server - 授权管理平台
+﻿# License Server - 授权管理平台
 
 多应用授权管理平台，支持用户管理、组织管理、授权码管理、设备绑定、脚本下发等功能。
 
@@ -24,13 +24,13 @@
 
 ## 服务器一键安装（Docker，推荐）
 
-> 仓库已开源，默认无需 Token。若使用私有仓库，请准备 GitHub Token 或配置 SSH Key。
+> 公开仓库默认无需 Token。若使用私有仓库，请准备 GitHub Token 或配置 SSH Key。
 > 默认从 GHCR 拉取镜像部署；如需本地构建，请在安装命令末尾加 `--build`。
 
 ### 超短一键命令（交互式）
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
 ```
 
 > 无参数时进入交互模式，会引导你选择证书类型、域名、端口、管理员账号等。
@@ -39,8 +39,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server0
 ### HTTPS（Let's Encrypt，域名）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh | \
-  bash -s -- --repo https://github.com/longxingze0925/license-server01.git \
+curl -fsSL https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh | \
+  bash -s -- --repo https://github.com/longxingze0925/license-server-ai.git \
   --branch main \
   --ssl letsencrypt --domain example.com --email admin@example.com -y
 ```
@@ -48,8 +48,8 @@ curl -fsSL https://raw.githubusercontent.com/longxingze0925/license-server01/mai
 ### HTTPS（自定义证书）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh | \
-  bash -s -- --repo https://github.com/longxingze0925/license-server01.git \
+curl -fsSL https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh | \
+  bash -s -- --repo https://github.com/longxingze0925/license-server-ai.git \
   --branch main \
   --ssl custom --cert /path/to/fullchain.crt --key /path/to/private.key -y
 ```
@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/longxingze0925/license-server01/mai
 ```bash
 LS_SSL=letsencrypt LS_DOMAIN=example.com LS_EMAIL=admin@example.com \
 LS_ADMIN_EMAIL=admin@example.com LS_ADMIN_PASSWORD='Admin@123456' \
-bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
 ```
 
 源码安装示例：
@@ -69,7 +69,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server0
 ```bash
 LS_SOURCE=1 LS_SSL=letsencrypt LS_DOMAIN=example.com LS_EMAIL=admin@example.com \
 LS_ADMIN_EMAIL=admin@example.com LS_ADMIN_PASSWORD='Admin@123456' \
-bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
 ```
 
 自定义证书示例：
@@ -77,7 +77,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server0
 ```bash
 LS_SSL=custom LS_CERT=/path/to/fullchain.crt LS_KEY=/path/to/private.key \
 LS_ADMIN_EMAIL=admin@example.com LS_ADMIN_PASSWORD='Admin@123456' \
-bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
 ```
 
 ### 仅拉取镜像的一键安装（非交互）
@@ -85,7 +85,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server0
 ```bash
 LS_SSL=letsencrypt LS_DOMAIN=example.com LS_EMAIL=admin@example.com \
 LS_IMAGE_TAG=main \
-bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server01/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
 ```
 
 > 若镜像是私有的，请先 `docker login ghcr.io`。

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"license-server/internal/middleware"
 	"license-server/internal/model"
-	"license-server/internal/pkg/crypto"
 	"license-server/internal/pkg/response"
 	"license-server/internal/service"
 	"strconv"
@@ -102,8 +101,21 @@ func (h *SecureScriptHandler) Create(c *gin.Context) {
 	}
 
 	// 解析可选参数
-	timeout, _ := strconv.Atoi(c.DefaultPostForm("timeout", "300"))
-	memoryLimit, _ := strconv.Atoi(c.DefaultPostForm("memory_limit", "512"))
+	timeout, err := strconv.Atoi(c.DefaultPostForm("timeout", "300"))
+	if err != nil || timeout <= 0 {
+		response.BadRequest(c, "超时时间必须是正整数")
+		return
+	}
+	memoryLimit, err := strconv.Atoi(c.DefaultPostForm("memory_limit", "512"))
+	if err != nil || memoryLimit <= 0 {
+		response.BadRequest(c, "内存限制必须是正整数")
+		return
+	}
+	rolloutPercentage, err := strconv.Atoi(c.DefaultPostForm("rollout_percentage", "100"))
+	if err != nil || rolloutPercentage < 0 || rolloutPercentage > 100 {
+		response.BadRequest(c, "灰度比例必须在 0 到 100 之间")
+		return
+	}
 
 	requiredFeatures := c.PostForm("required_features")
 	if requiredFeatures == "" {
@@ -114,30 +126,49 @@ func (h *SecureScriptHandler) Create(c *gin.Context) {
 	if allowedDevices == "" {
 		allowedDevices = "[]"
 	}
+	parameters := c.PostForm("parameters")
+	if parameters == "" {
+		parameters = "{}"
+	}
 
 	// 创建脚本记录
 	script := model.SecureScript{
-		AppID:            appID,
-		Name:             name,
-		Description:      c.PostForm("description"),
-		Version:          version,
-		ScriptType:       model.SecureScriptType(scriptType),
-		EntryPoint:       c.PostForm("entry_point"),
-		EncryptedContent: encryptedContent,
-		ContentHash:      contentHash,
-		StorageKey:       encryptedKey,
-		OriginalSize:     int64(len(content)),
-		EncryptedSize:    int64(len(encryptedContent)),
-		Timeout:          timeout,
-		MemoryLimit:      memoryLimit,
-		Parameters:       c.PostForm("parameters"),
-		RequiredFeatures: requiredFeatures,
-		AllowedDevices:   allowedDevices,
-		Status:           model.SecureScriptStatusDraft,
+		AppID:             appID,
+		Name:              name,
+		Description:       c.PostForm("description"),
+		Version:           version,
+		ScriptType:        model.SecureScriptType(scriptType),
+		EntryPoint:        c.PostForm("entry_point"),
+		EncryptedContent:  encryptedContent,
+		ContentHash:       contentHash,
+		StorageKey:        encryptedKey,
+		OriginalSize:      int64(len(content)),
+		EncryptedSize:     int64(len(encryptedContent)),
+		Timeout:           timeout,
+		MemoryLimit:       memoryLimit,
+		Parameters:        parameters,
+		RequiredFeatures:  requiredFeatures,
+		AllowedDevices:    allowedDevices,
+		RolloutPercentage: rolloutPercentage,
+		Status:            model.SecureScriptStatusDraft,
 	}
 
-	if err := model.DB.Create(&script).Error; err != nil {
-		response.ServerError(c, "创建脚本失败")
+	tx := model.DB.Begin()
+	if err := tx.Create(&script).Error; err != nil {
+		tx.Rollback()
+		response.ServerError(c, "创建脚本失败: "+err.Error())
+		return
+	}
+	if rolloutPercentage == 0 {
+		if err := tx.Model(&script).UpdateColumn("rollout_percentage", 0).Error; err != nil {
+			tx.Rollback()
+			response.ServerError(c, "创建脚本失败: "+err.Error())
+			return
+		}
+		script.RolloutPercentage = 0
+	}
+	if err := tx.Commit().Error; err != nil {
+		response.ServerError(c, "创建脚本失败: "+err.Error())
 		return
 	}
 
@@ -174,8 +205,7 @@ func (h *SecureScriptHandler) List(c *gin.Context) {
 	}
 
 	// 分页
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	page, pageSize := parsePageParams(c, 20, 100)
 	offset := (page - 1) * pageSize
 
 	var total int64
@@ -282,7 +312,7 @@ func (h *SecureScriptHandler) Update(c *gin.Context) {
 		Parameters        string   `json:"parameters"`
 		RequiredFeatures  []string `json:"required_features"`
 		AllowedDevices    []string `json:"allowed_devices"`
-		RolloutPercentage int      `json:"rollout_percentage"`
+		RolloutPercentage *int     `json:"rollout_percentage"`
 		ExpiresAt         *string  `json:"expires_at"`
 	}
 
@@ -319,21 +349,30 @@ func (h *SecureScriptHandler) Update(c *gin.Context) {
 		devicesJSON, _ := json.Marshal(req.AllowedDevices)
 		updates["allowed_devices"] = string(devicesJSON)
 	}
-	if req.RolloutPercentage > 0 && req.RolloutPercentage <= 100 {
-		updates["rollout_percentage"] = req.RolloutPercentage
+	if req.RolloutPercentage != nil {
+		if *req.RolloutPercentage < 0 || *req.RolloutPercentage > 100 {
+			response.BadRequest(c, "灰度比例必须在 0 到 100 之间")
+			return
+		}
+		updates["rollout_percentage"] = *req.RolloutPercentage
 	}
 	if req.ExpiresAt != nil {
 		if *req.ExpiresAt == "" {
 			updates["expires_at"] = nil
 		} else {
 			expiresAt, err := time.Parse(time.RFC3339, *req.ExpiresAt)
-			if err == nil {
-				updates["expires_at"] = expiresAt
+			if err != nil {
+				response.BadRequest(c, "过期时间格式必须是 RFC3339")
+				return
 			}
+			updates["expires_at"] = expiresAt
 		}
 	}
 
-	model.DB.Model(&script).Updates(updates)
+	if err := model.DB.Model(&script).Updates(updates).Error; err != nil {
+		response.ServerError(c, "更新安全脚本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "更新成功", nil)
 }
@@ -408,7 +447,10 @@ func (h *SecureScriptHandler) UpdateContent(c *gin.Context) {
 		"status":            model.SecureScriptStatusDraft, // 更新内容后重置为草稿
 	}
 
-	model.DB.Model(&script).Updates(updates)
+	if err := model.DB.Model(&script).Updates(updates).Error; err != nil {
+		response.ServerError(c, "更新脚本内容失败: "+err.Error())
+		return
+	}
 
 	response.Success(c, gin.H{
 		"id":             script.ID,
@@ -440,7 +482,10 @@ func (h *SecureScriptHandler) Publish(c *gin.Context) {
 	now := time.Now()
 	script.Status = model.SecureScriptStatusPublished
 	script.PublishedAt = &now
-	model.DB.Save(&script)
+	if err := model.DB.Save(&script).Error; err != nil {
+		response.ServerError(c, "发布安全脚本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "发布成功", nil)
 }
@@ -459,7 +504,10 @@ func (h *SecureScriptHandler) Deprecate(c *gin.Context) {
 	}
 
 	script.Status = model.SecureScriptStatusDeprecated
-	model.DB.Save(&script)
+	if err := model.DB.Save(&script).Error; err != nil {
+		response.ServerError(c, "废弃安全脚本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "已废弃", nil)
 }
@@ -478,10 +526,16 @@ func (h *SecureScriptHandler) Delete(c *gin.Context) {
 	}
 
 	// 删除下发记录
-	model.DB.Where("script_id = ?", id).Delete(&model.ScriptDelivery{})
+	if err := model.DB.Where("script_id = ?", id).Delete(&model.ScriptDelivery{}).Error; err != nil {
+		response.ServerError(c, "删除脚本下发记录失败: "+err.Error())
+		return
+	}
 
 	// 删除脚本
-	model.DB.Delete(&script)
+	if err := model.DB.Delete(&script).Error; err != nil {
+		response.ServerError(c, "删除安全脚本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "删除成功", nil)
 }
@@ -508,8 +562,7 @@ func (h *SecureScriptHandler) GetDeliveries(c *gin.Context) {
 	}
 
 	// 分页
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	page, pageSize := parsePageParams(c, 20, 100)
 	offset := (page - 1) * pageSize
 
 	var total int64
@@ -593,16 +646,11 @@ func (h *SecureScriptHandler) GetStats(c *gin.Context) {
 
 // ClientGetVersions 客户端获取脚本版本列表
 func (h *SecureScriptHandler) ClientGetVersions(c *gin.Context) {
-	appKey := c.Query("app_key")
-	if appKey == "" {
-		response.BadRequest(c, "缺少 app_key")
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
 		return
 	}
-
-	// 验证应用
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	if _, ok := loadClientDeviceFromSession(c, app); !ok {
 		return
 	}
 
@@ -618,9 +666,7 @@ func (h *SecureScriptHandler) ClientGetVersions(c *gin.Context) {
 // ClientFetchScript 客户端获取加密脚本
 func (h *SecureScriptHandler) ClientFetchScript(c *gin.Context) {
 	var req struct {
-		AppKey    string `json:"app_key" binding:"required"`
-		MachineID string `json:"machine_id" binding:"required"`
-		ScriptID  string `json:"script_id" binding:"required"`
+		ScriptID string `json:"script_id" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -628,27 +674,17 @@ func (h *SecureScriptHandler) ClientFetchScript(c *gin.Context) {
 		return
 	}
 
-	// 验证应用
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", req.AppKey, model.AppStatusActive).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
 		return
 	}
 
 	// 验证设备授权
-	var device model.Device
-	if err := model.DB.Preload("License").Preload("Subscription").
-		Where("machine_id = ? AND tenant_id = ?", req.MachineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
+	device, ok := loadClientDeviceFromSession(c, app)
+	if !ok {
 		return
 	}
-	if (device.License == nil || device.License.AppID != app.ID) &&
-		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
-		response.Error(c, 401, "设备未绑定当前应用")
-		return
-	}
+	machineID := device.MachineID
 
 	licenseID := ""
 	var features []string
@@ -670,38 +706,39 @@ func (h *SecureScriptHandler) ClientFetchScript(c *gin.Context) {
 	}
 
 	// 检查设备权限
-	if err := h.service.CheckDevicePermission(&script, req.MachineID, features); err != nil {
+	if err := h.service.CheckDevicePermission(&script, machineID, features); err != nil {
 		response.Error(c, 403, err.Error())
 		return
 	}
 
 	// 灰度检查
-	if script.RolloutPercentage < 100 {
-		hash := crypto.SHA256HashString(req.MachineID)
-		hashInt := int(hash[0]) % 100
-		if hashInt >= script.RolloutPercentage {
-			response.Error(c, 403, "脚本暂未对该设备开放")
-			return
-		}
+	if !isMachineInRollout(machineID, script.RolloutPercentage) {
+		response.Error(c, 403, "脚本暂未对该设备开放")
+		return
 	}
 
 	// 准备下发包 (有效期5分钟)
-	pkg, keyHint, err := h.service.PrepareScriptForDelivery(&script, &app, req.MachineID, 5*time.Minute)
+	pkg, keyHint, err := h.service.PrepareScriptForDelivery(&script, app, machineID, 5*time.Minute)
 	if err != nil {
 		response.ServerError(c, "准备脚本失败: "+err.Error())
 		return
 	}
 
 	// 记录下发
-	h.service.RecordDelivery(
+	delivery, err := h.service.RecordDelivery(
 		script.ID,
 		device.ID,
-		req.MachineID,
+		machineID,
 		licenseID,
 		keyHint,
 		time.Unix(pkg.ExpiresAt, 0),
 		c.ClientIP(),
 	)
+	if err != nil {
+		response.ServerError(c, "记录脚本下发失败")
+		return
+	}
+	pkg.DeliveryID = delivery.ID
 
 	response.Success(c, pkg)
 }
@@ -709,8 +746,6 @@ func (h *SecureScriptHandler) ClientFetchScript(c *gin.Context) {
 // ClientReportExecution 客户端上报执行结果
 func (h *SecureScriptHandler) ClientReportExecution(c *gin.Context) {
 	var req struct {
-		AppKey       string `json:"app_key" binding:"required"`
-		MachineID    string `json:"machine_id" binding:"required"`
 		ScriptID     string `json:"script_id" binding:"required"`
 		DeliveryID   string `json:"delivery_id"`
 		Status       string `json:"status" binding:"required"` // executing/success/failed
@@ -724,12 +759,17 @@ func (h *SecureScriptHandler) ClientReportExecution(c *gin.Context) {
 		return
 	}
 
-	// 验证应用
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", req.AppKey, model.AppStatusActive).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
 		return
 	}
+
+	// 验证设备归属应用
+	device, ok := loadClientDeviceFromSession(c, app)
+	if !ok {
+		return
+	}
+	machineID := device.MachineID
 
 	// 验证脚本归属应用
 	var script model.SecureScript
@@ -738,24 +778,15 @@ func (h *SecureScriptHandler) ClientReportExecution(c *gin.Context) {
 		return
 	}
 
-	// 验证设备归属应用
-	var device model.Device
-	if err := model.DB.Preload("License").Preload("Subscription").
-		Where("machine_id = ? AND tenant_id = ?", req.MachineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
-		return
-	}
-	if (device.License == nil || device.License.AppID != app.ID) &&
-		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
-		response.Error(c, 401, "设备未绑定当前应用")
+	status, ok := normalizeClientScriptDeliveryStatus(req.Status)
+	if !ok {
+		response.BadRequest(c, "无效的执行状态")
 		return
 	}
 
 	// 查找下发记录
 	var delivery model.ScriptDelivery
-	query := model.DB.Where("script_id = ? AND machine_id = ?", script.ID, req.MachineID)
+	query := model.DB.Where("script_id = ? AND machine_id = ? AND device_id = ?", script.ID, machineID, device.ID)
 	if req.DeliveryID != "" {
 		query = query.Where("id = ?", req.DeliveryID)
 	}
@@ -767,8 +798,7 @@ func (h *SecureScriptHandler) ClientReportExecution(c *gin.Context) {
 	}
 
 	// 更新状态
-	status := model.ScriptDeliveryStatus(req.Status)
-	if err := h.service.UpdateDeliveryStatus(delivery.ID, status, req.Result, req.ErrorMessage, req.Duration); err != nil {
+	if err := h.service.UpdateDeliveryStatusForDevice(delivery.ID, app.ID, device.ID, machineID, status, req.Result, req.ErrorMessage, req.Duration); err != nil {
 		response.ServerError(c, "更新状态失败")
 		return
 	}

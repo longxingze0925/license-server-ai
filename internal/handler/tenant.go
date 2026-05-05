@@ -6,6 +6,7 @@ import (
 	"license-server/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type TenantHandler struct{}
@@ -35,17 +36,17 @@ func (h *TenantHandler) Get(c *gin.Context) {
 	limits := tenant.GetPlanLimits()
 
 	response.Success(c, gin.H{
-		"id":          tenant.ID,
-		"name":        tenant.Name,
-		"slug":        tenant.Slug,
-		"logo":        tenant.Logo,
-		"email":       tenant.Email,
-		"phone":       tenant.Phone,
-		"website":     tenant.Website,
-		"address":     tenant.Address,
-		"status":      tenant.Status,
-		"plan":        tenant.Plan,
-		"created_at":  tenant.CreatedAt,
+		"id":         tenant.ID,
+		"name":       tenant.Name,
+		"slug":       tenant.Slug,
+		"logo":       tenant.Logo,
+		"email":      tenant.Email,
+		"phone":      tenant.Phone,
+		"website":    tenant.Website,
+		"address":    tenant.Address,
+		"status":     tenant.Status,
+		"plan":       tenant.Plan,
+		"created_at": tenant.CreatedAt,
 		"usage": gin.H{
 			"applications": appCount,
 			"team_members": memberCount,
@@ -129,65 +130,159 @@ func (h *TenantHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	// 开始事务删除所有关联数据
-	tx := model.DB.Begin()
-
-	// 删除设备
-	if err := tx.Where("tenant_id = ?", tenantID).Delete(&model.Device{}).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "删除设备失败")
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := cleanupTenantData(tx, tenantID); err != nil {
+			return err
+		}
+		return tx.Delete(&tenant).Error
+	}); err != nil {
+		response.ServerError(c, "删除租户失败: "+err.Error())
 		return
 	}
 
-	// 删除授权码
-	if err := tx.Where("tenant_id = ?", tenantID).Delete(&model.License{}).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "删除授权码失败")
-		return
-	}
-
-	// 删除订阅
-	if err := tx.Where("tenant_id = ?", tenantID).Delete(&model.Subscription{}).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "删除订阅失败")
-		return
-	}
-
-	// 删除客户
-	if err := tx.Where("tenant_id = ?", tenantID).Delete(&model.Customer{}).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "删除客户失败")
-		return
-	}
-
-	// 删除应用
-	if err := tx.Where("tenant_id = ?", tenantID).Delete(&model.Application{}).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "删除应用失败")
-		return
-	}
-
-	// 删除团队成员
-	if err := tx.Where("tenant_id = ?", tenantID).Delete(&model.TeamMember{}).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "删除团队成员失败")
-		return
-	}
-
-	// 删除团队邀请
-	if err := tx.Where("tenant_id = ?", tenantID).Delete(&model.TeamInvitation{}).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "删除邀请失败")
-		return
-	}
-
-	// 删除租户
-	if err := tx.Delete(&tenant).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "删除租户失败")
-		return
-	}
-
-	tx.Commit()
 	response.SuccessWithMessage(c, "租户已删除", nil)
+}
+
+func cleanupTenantData(tx *gorm.DB, tenantID string) error {
+	var appIDs, teamMemberIDs, customerIDs, licenseIDs, subscriptionIDs, deviceIDs, secureScriptIDs, hotUpdateIDs, webhookIDs, generationTaskIDs []string
+
+	if err := tx.Model(&model.Application{}).Where("tenant_id = ?", tenantID).Pluck("id", &appIDs).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&model.TeamMember{}).Where("tenant_id = ?", tenantID).Pluck("id", &teamMemberIDs).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&model.Customer{}).Where("tenant_id = ?", tenantID).Pluck("id", &customerIDs).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&model.License{}).Where("tenant_id = ?", tenantID).Pluck("id", &licenseIDs).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&model.Subscription{}).Where("tenant_id = ?", tenantID).Pluck("id", &subscriptionIDs).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&model.Device{}).Where("tenant_id = ?", tenantID).Pluck("id", &deviceIDs).Error; err != nil {
+		return err
+	}
+	if err := pluckIDsByAppIDs(tx, &model.SecureScript{}, appIDs, &secureScriptIDs); err != nil {
+		return err
+	}
+	if err := pluckIDsByAppIDs(tx, &model.HotUpdate{}, appIDs, &hotUpdateIDs); err != nil {
+		return err
+	}
+	if err := tx.Model(&model.GenerationTask{}).Where("tenant_id = ?", tenantID).Pluck("id", &generationTaskIDs).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&model.Webhook{}).Where("org_id = ?", tenantID).Pluck("id", &webhookIDs).Error; err != nil {
+		return err
+	}
+
+	teamOrCustomerIDs := append(append([]string{}, teamMemberIDs...), customerIDs...)
+
+	if err := deleteWhereIn(tx, &model.GenerationFile{}, "task_id", generationTaskIDs); err != nil {
+		return err
+	}
+	if err := deleteWhereIn(tx, &model.CreditTransaction{}, "user_id", teamMemberIDs); err != nil {
+		return err
+	}
+	if err := deleteWhereIn(tx, &model.UserCredit{}, "user_id", teamMemberIDs); err != nil {
+		return err
+	}
+	if err := deleteWhereIn(tx, &model.Notification{}, "user_id", teamMemberIDs); err != nil {
+		return err
+	}
+	if err := deleteWhereIn(tx, &model.GenerationTask{}, "id", generationTaskIDs); err != nil {
+		return err
+	}
+	if err := deleteWhereIn(tx, &model.ScriptDelivery{}, "script_id", secureScriptIDs); err != nil {
+		return err
+	}
+	if err := deleteWhereIn(tx, &model.HotUpdateLog{}, "hot_update_id", hotUpdateIDs); err != nil {
+		return err
+	}
+	if err := deleteWhereIn(tx, &model.LicenseEvent{}, "license_id", licenseIDs); err != nil {
+		return err
+	}
+
+	for _, cleanup := range []struct {
+		model interface{}
+		query string
+		args  []interface{}
+	}{
+		{&model.RealtimeInstructionResult{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.RealtimeInstruction{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.DeviceConnection{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserConfig{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserWorkflow{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserBatchTask{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserMaterial{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserPost{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserComment{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserCommentScript{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserFile{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.SyncCheckpoint{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.SyncConflict{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.SyncLog{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserVoiceConfig{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.UserTableData{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.ClientSyncData{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.ClientSession{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.Heartbeat{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.DeviceBlacklist{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.PublishTask{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.ProviderCredential{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.PricingRule{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.AuditLog{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.SecureScript{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.HotUpdate{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.Script{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.AppRelease{}, "app_id IN ?", []interface{}{appIDs}},
+		{&model.Device{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.License{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.Subscription{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.Customer{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.Application{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.TeamInvitation{}, "tenant_id = ?", []interface{}{tenantID}},
+		{&model.TeamMember{}, "tenant_id = ?", []interface{}{tenantID}},
+	} {
+		if len(cleanup.args) == 1 {
+			if ids, ok := cleanup.args[0].([]string); ok && len(ids) == 0 {
+				continue
+			}
+		}
+		if err := tx.Where(cleanup.query, cleanup.args...).Delete(cleanup.model).Error; err != nil {
+			return err
+		}
+	}
+
+	if err := deleteWhereIn(tx, &model.WebhookLog{}, "webhook_id", webhookIDs); err != nil {
+		return err
+	}
+	if err := tx.Where("org_id = ?", tenantID).Delete(&model.Webhook{}).Error; err != nil {
+		return err
+	}
+	if err := tx.Where("key LIKE ?", "tenant:"+tenantID+":%").Delete(&model.Setting{}).Error; err != nil {
+		return err
+	}
+	if len(teamOrCustomerIDs) > 0 {
+		if err := tx.Where("user_id IN ?", teamOrCustomerIDs).Delete(&model.GenerationFile{}).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func pluckIDsByAppIDs(tx *gorm.DB, modelValue interface{}, appIDs []string, out *[]string) error {
+	if len(appIDs) == 0 {
+		return nil
+	}
+	return tx.Model(modelValue).Where("app_id IN ?", appIDs).Pluck("id", out).Error
+}
+
+func deleteWhereIn(tx *gorm.DB, modelValue interface{}, column string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return tx.Where(column+" IN ?", ids).Delete(modelValue).Error
 }

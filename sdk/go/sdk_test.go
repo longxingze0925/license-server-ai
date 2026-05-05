@@ -606,6 +606,34 @@ func TestRuntimeIntegrityChecker(t *testing.T) {
 	fmt.Printf("  Runtime integrity checker working correctly\n")
 }
 
+func TestRuntimeIntegrityCheckerStartStopIsIdempotentAndRestartable(t *testing.T) {
+	ric := NewRuntimeIntegrityChecker()
+	ric.checkInterval = time.Hour
+
+	ric.StartPeriodicCheck()
+	firstStopCh := ric.stopChan
+	if firstStopCh == nil {
+		t.Fatal("StartPeriodicCheck should create a stop channel")
+	}
+
+	ric.StartPeriodicCheck()
+	if ric.stopChan != firstStopCh {
+		t.Fatal("duplicate StartPeriodicCheck should not replace the running checker")
+	}
+
+	ric.Stop()
+	ric.Stop()
+	if ric.stopChan != nil {
+		t.Fatal("Stop should clear the stop channel")
+	}
+
+	ric.StartPeriodicCheck()
+	if ric.stopChan == nil {
+		t.Fatal("StartPeriodicCheck should restart after Stop")
+	}
+	ric.Stop()
+}
+
 // TestObfuscatedValidator tests obfuscated validation
 func TestObfuscatedValidator(t *testing.T) {
 	secretKey := []byte("test-secret-key-for-validation")
@@ -664,6 +692,33 @@ func TestRandomVerificationScheduler(t *testing.T) {
 	}
 
 	fmt.Printf("  Random verification scheduler working correctly\n")
+}
+
+func TestRandomVerificationSchedulerStartStopIsIdempotentAndRestartable(t *testing.T) {
+	rvs := NewRandomVerificationScheduler(time.Hour, time.Hour)
+
+	rvs.Start()
+	firstStopCh := rvs.stopChan
+	if firstStopCh == nil {
+		t.Fatal("Start should create a stop channel")
+	}
+
+	rvs.Start()
+	if rvs.stopChan != firstStopCh {
+		t.Fatal("duplicate Start should not replace the running scheduler")
+	}
+
+	rvs.Stop()
+	rvs.Stop()
+	if rvs.stopChan != nil {
+		t.Fatal("Stop should clear the stop channel")
+	}
+
+	rvs.Start()
+	if rvs.stopChan == nil {
+		t.Fatal("Start should restart after Stop")
+	}
+	rvs.Stop()
 }
 
 // TestHoneypotDetector tests honeypot detection
@@ -945,6 +1000,34 @@ func TestEnhancedAntiDebug(t *testing.T) {
 	}
 
 	fmt.Printf("  Enhanced anti-debug working correctly\n")
+}
+
+func TestEnhancedAntiDebugStartStopIsIdempotentAndRestartable(t *testing.T) {
+	ead := NewEnhancedAntiDebug()
+	ead.checkInterval = time.Hour
+
+	ead.StartContinuousCheck(func() {})
+	firstStopCh := ead.stopChan
+	if firstStopCh == nil {
+		t.Fatal("StartContinuousCheck should create a stop channel")
+	}
+
+	ead.StartContinuousCheck(func() {})
+	if ead.stopChan != firstStopCh {
+		t.Fatal("duplicate StartContinuousCheck should not replace the running checker")
+	}
+
+	ead.Stop()
+	ead.Stop()
+	if ead.stopChan != nil {
+		t.Fatal("Stop should clear the stop channel")
+	}
+
+	ead.StartContinuousCheck(func() {})
+	if ead.stopChan == nil {
+		t.Fatal("StartContinuousCheck should restart after Stop")
+	}
+	ead.Stop()
 }
 
 // TestHardenedSecureClient tests hardened secure client

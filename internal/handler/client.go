@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/clientauth"
 	"license-server/internal/pkg/crypto"
@@ -13,12 +14,51 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type ClientHandler struct{}
 
 func NewClientHandler() *ClientHandler {
 	return &ClientHandler{}
+}
+
+func appAllowsClientAuthMode(app *model.Application, authMode string) bool {
+	if app == nil {
+		return false
+	}
+	switch app.AuthMode {
+	case "", model.AuthModeBoth:
+		return true
+	case model.AuthModeLicense:
+		return authMode == clientauth.AuthModeLicense
+	case model.AuthModeSubscription:
+		return authMode == clientauth.AuthModeSubscription
+	default:
+		return false
+	}
+}
+
+func signClientPayload(app *model.Application, payload gin.H) error {
+	if app == nil {
+		return errors.New("invalid app")
+	}
+	signPayload := gin.H{}
+	for key, value := range payload {
+		if key != "signature" {
+			signPayload[key] = value
+		}
+	}
+	dataBytes, err := json.Marshal(signPayload)
+	if err != nil {
+		return err
+	}
+	signature, err := crypto.Sign(app.PrivateKey, dataBytes)
+	if err != nil {
+		return err
+	}
+	payload["signature"] = signature
+	return nil
 }
 
 // ActivateRequest 激活请求
@@ -35,6 +75,67 @@ type DeviceInfo struct {
 	OS         string `json:"os"`
 	OSVersion  string `json:"os_version"`
 	AppVersion string `json:"app_version"`
+}
+
+func updateClientDeviceForActivation(tx *gorm.DB, device *model.Device, customerID string, info DeviceInfo, ip string, now time.Time) error {
+	if device.Status == model.DeviceStatusBlacklisted {
+		return errors.New("设备已被禁止使用")
+	}
+	device.CustomerID = customerID
+	device.DeviceName = info.Name
+	device.Hostname = info.Hostname
+	device.OSType = info.OS
+	device.OSVersion = info.OSVersion
+	device.AppVersion = info.AppVersion
+	device.IPAddress = ip
+	device.Status = model.DeviceStatusActive
+	device.LastActiveAt = &now
+	device.DeletedAt = gorm.DeletedAt{}
+	return tx.Unscoped().Save(device).Error
+}
+
+func restoreDeletedLicenseDevice(tx *gorm.DB, tenantID, licenseID, machineID, customerID string, info DeviceInfo, ip string, now time.Time) (*model.Device, bool, error) {
+	var device model.Device
+	err := tx.Unscoped().
+		Where("tenant_id = ? AND license_id = ? AND machine_id = ?", tenantID, licenseID, machineID).
+		Where("deleted_at IS NOT NULL").
+		Order("deleted_at DESC").
+		First(&device).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if device.Status == model.DeviceStatusBlacklisted {
+		return nil, false, errors.New("设备已被禁止使用")
+	}
+	if err := updateClientDeviceForActivation(tx, &device, customerID, info, ip, now); err != nil {
+		return nil, false, err
+	}
+	return &device, true, nil
+}
+
+func restoreDeletedSubscriptionDevice(tx *gorm.DB, tenantID, subscriptionID, machineID, customerID string, info DeviceInfo, ip string, now time.Time) (*model.Device, bool, error) {
+	var device model.Device
+	err := tx.Unscoped().
+		Where("tenant_id = ? AND subscription_id = ? AND machine_id = ?", tenantID, subscriptionID, machineID).
+		Where("deleted_at IS NOT NULL").
+		Order("deleted_at DESC").
+		First(&device).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if device.Status == model.DeviceStatusBlacklisted {
+		return nil, false, errors.New("设备已被禁止使用")
+	}
+	if err := updateClientDeviceForActivation(tx, &device, customerID, info, ip, now); err != nil {
+		return nil, false, err
+	}
+	return &device, true, nil
 }
 
 // ActivateResponse 激活响应
@@ -72,136 +173,125 @@ func (h *ClientHandler) Activate(c *gin.Context) {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
-
-	// 检查设备是否在黑名单
-	var blacklist model.DeviceBlacklist
-	if err := model.DB.Where("tenant_id = ? AND machine_id = ? AND (app_id = ? OR app_id IS NULL)", app.TenantID, req.MachineID, app.ID).First(&blacklist).Error; err == nil {
-		response.Error(c, 403, "设备已被禁止使用")
+	if !appAllowsClientAuthMode(&app, clientauth.AuthModeLicense) {
+		response.Error(c, 403, "该应用未启用授权码模式")
 		return
 	}
 
-	// 查找授权
+	if err := ensureDeviceNotBlacklistedForApp(req.MachineID, &app); err != nil {
+		response.Error(c, 403, err.Error())
+		return
+	}
+
 	var license model.License
-	if err := model.DB.First(&license, "license_key = ? AND app_id = ?", req.LicenseKey, app.ID).Error; err != nil {
-		response.Error(c, 400, "无效的授权码")
-		return
-	}
-
-	// 检查授权状态
-	if license.Status == model.LicenseStatusRevoked {
-		response.Error(c, 403, "授权已被吊销")
-		return
-	}
-
-	if license.Status == model.LicenseStatusSuspended {
-		response.Error(c, 403, "授权已被暂停")
-		return
-	}
-
-	// 首次激活
-	if license.Status == model.LicenseStatusPending {
-		now := time.Now()
-		license.ActivatedAt = &now
-
-		// 计算到期时间
-		if license.DurationDays == -1 {
-			// 永久授权
-			license.ExpireAt = nil
-		} else {
-			expireAt := now.AddDate(0, 0, license.DurationDays)
-			license.ExpireAt = &expireAt
-			// 设置宽限期
-			graceExpireAt := expireAt.AddDate(0, 0, app.GracePeriodDays)
-			license.GraceExpireAt = &graceExpireAt
-		}
-
-		license.Status = model.LicenseStatusActive
-
-		// 记录激活事件
-		event := model.LicenseEvent{
-			LicenseID:    license.ID,
-			EventType:    model.LicenseEventActivated,
-			OperatorType: "user",
-			IPAddress:    c.ClientIP(),
-		}
-		model.DB.Create(&event)
-	}
-
-	// 检查是否已过期
-	if license.ExpireAt != nil && time.Now().After(*license.ExpireAt) {
-		// 检查宽限期
-		if license.GraceExpireAt == nil || time.Now().After(*license.GraceExpireAt) {
-			license.Status = model.LicenseStatusExpired
-			model.DB.Save(&license)
-			response.Error(c, 403, "授权已过期")
-			return
-		}
-	}
-
-	// 检查设备数量
-	var deviceCount int64
-	model.DB.Model(&model.Device{}).Where("tenant_id = ? AND license_id = ?", license.TenantID, license.ID).Count(&deviceCount)
-
-	// 检查该设备是否已绑定
-	var existingDevice model.Device
-	deviceExists := model.DB.Where("tenant_id = ? AND license_id = ? AND machine_id = ?", license.TenantID, license.ID, req.MachineID).First(&existingDevice).Error == nil
-
-	if !deviceExists && int(deviceCount) >= license.MaxDevices {
-		response.Error(c, 403, "设备数量已达上限")
-		return
-	}
-
-	// 绑定或更新设备
 	var device model.Device
 	customerID := ""
-	if license.CustomerID != nil {
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&license, "license_key = ? AND app_id = ?", req.LicenseKey, app.ID).Error; err != nil {
+			return err
+		}
+		if license.CustomerID == nil || *license.CustomerID == "" {
+			return errors.New("授权码未绑定客户")
+		}
 		customerID = *license.CustomerID
-	}
-	if deviceExists {
-		device = existingDevice
-		device.TenantID = license.TenantID
-		if license.CustomerID != nil {
-			device.CustomerID = *license.CustomerID
-		}
-		device.DeviceName = req.DeviceInfo.Name
-		device.Hostname = req.DeviceInfo.Hostname
-		device.OSType = req.DeviceInfo.OS
-		device.OSVersion = req.DeviceInfo.OSVersion
-		device.AppVersion = req.DeviceInfo.AppVersion
-		device.IPAddress = c.ClientIP()
-		now := time.Now()
-		device.LastActiveAt = &now
-		if err := model.DB.Save(&device).Error; err != nil {
-			response.ServerError(c, "更新设备失败: "+err.Error())
-			return
-		}
-	} else {
-		now := time.Now()
-		device = model.Device{
-			TenantID:     license.TenantID,
-			CustomerID:   customerID,
-			LicenseID:    &license.ID,
-			MachineID:    req.MachineID,
-			DeviceName:   req.DeviceInfo.Name,
-			Hostname:     req.DeviceInfo.Hostname,
-			OSType:       req.DeviceInfo.OS,
-			OSVersion:    req.DeviceInfo.OSVersion,
-			AppVersion:   req.DeviceInfo.AppVersion,
-			IPAddress:    c.ClientIP(),
-			Status:       model.DeviceStatusActive,
-			LastActiveAt: &now,
-		}
-		if err := model.DB.Create(&device).Error; err != nil {
-			response.ServerError(c, "创建设备失败: "+err.Error())
-			return
-		}
-	}
 
-	// 更新授权验证时间
-	now := time.Now()
-	license.LastValidatedAt = &now
-	if err := model.DB.Save(&license).Error; err != nil {
-		response.ServerError(c, "更新授权状态失败: "+err.Error())
+		if license.Status == model.LicenseStatusRevoked {
+			return errors.New("授权已被吊销")
+		}
+		if license.Status == model.LicenseStatusSuspended {
+			return errors.New("授权已被暂停")
+		}
+
+		now := time.Now()
+		if license.Status == model.LicenseStatusPending {
+			license.ActivatedAt = &now
+			if license.DurationDays == -1 {
+				license.ExpireAt = nil
+			} else {
+				expireAt := now.AddDate(0, 0, license.DurationDays)
+				license.ExpireAt = &expireAt
+				graceExpireAt := expireAt.AddDate(0, 0, app.GracePeriodDays)
+				license.GraceExpireAt = &graceExpireAt
+			}
+			license.Status = model.LicenseStatusActive
+
+			event := model.LicenseEvent{
+				LicenseID:    license.ID,
+				EventType:    model.LicenseEventActivated,
+				OperatorType: "user",
+				IPAddress:    c.ClientIP(),
+			}
+			if err := tx.Create(&event).Error; err != nil {
+				return err
+			}
+		}
+
+		if license.ExpireAt != nil && now.After(*license.ExpireAt) {
+			if license.GraceExpireAt == nil || now.After(*license.GraceExpireAt) {
+				license.Status = model.LicenseStatusExpired
+				_ = tx.Save(&license).Error
+				return errors.New("授权已过期")
+			}
+		}
+
+		var deviceCount int64
+		if err := tx.Model(&model.Device{}).Where("tenant_id = ? AND license_id = ?", license.TenantID, license.ID).Count(&deviceCount).Error; err != nil {
+			return err
+		}
+
+		var existingDevice model.Device
+		err := tx.Where("tenant_id = ? AND license_id = ? AND machine_id = ?", license.TenantID, license.ID, req.MachineID).First(&existingDevice).Error
+		deviceExists := err == nil
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if !deviceExists && int(deviceCount) >= license.MaxDevices {
+			return errors.New("设备数量已达上限")
+		}
+
+		if deviceExists {
+			device = existingDevice
+			if err := updateClientDeviceForActivation(tx, &device, customerID, req.DeviceInfo, c.ClientIP(), now); err != nil {
+				return err
+			}
+		} else if restoredDevice, restored, err := restoreDeletedLicenseDevice(tx, license.TenantID, license.ID, req.MachineID, customerID, req.DeviceInfo, c.ClientIP(), now); err != nil {
+			return err
+		} else if restored {
+			device = *restoredDevice
+		} else {
+			device = model.Device{
+				TenantID:     license.TenantID,
+				CustomerID:   customerID,
+				LicenseID:    &license.ID,
+				MachineID:    req.MachineID,
+				DeviceName:   req.DeviceInfo.Name,
+				Hostname:     req.DeviceInfo.Hostname,
+				OSType:       req.DeviceInfo.OS,
+				OSVersion:    req.DeviceInfo.OSVersion,
+				AppVersion:   req.DeviceInfo.AppVersion,
+				IPAddress:    c.ClientIP(),
+				Status:       model.DeviceStatusActive,
+				LastActiveAt: &now,
+			}
+			if err := tx.Create(&device).Error; err != nil {
+				return err
+			}
+		}
+
+		license.LastValidatedAt = &now
+		return tx.Save(&license).Error
+	}); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Error(c, 400, "无效的授权码")
+			return
+		}
+		switch err.Error() {
+		case "授权码未绑定客户", "授权已被吊销", "授权已被暂停", "授权已过期", "设备数量已达上限", "设备已被禁止使用":
+			response.Error(c, 403, err.Error())
+		default:
+			response.ServerError(c, "激活授权失败: "+err.Error())
+		}
 		return
 	}
 
@@ -285,52 +375,31 @@ func (h *ClientHandler) Verify(c *gin.Context) {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
-
-	// 查找设备
-	var device model.Device
-	if err := model.DB.Preload("License").
-		Where("machine_id = ? AND tenant_id = ? AND license_id IS NOT NULL", req.MachineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 404, "设备未绑定授权")
+	if !appAllowsClientAuthMode(&app, clientauth.AuthModeLicense) {
+		response.Error(c, 403, "该应用未启用授权码模式")
 		return
 	}
 
-	// 检查授权是否属于该应用
-	if device.License == nil || device.License.AppID != app.ID {
-		response.Error(c, 404, "设备未绑定该应用的授权")
+	// 查找当前应用下有效授权设备
+	device, err := loadActiveLicenseDeviceForApp(req.MachineID, &app)
+	if err != nil {
+		response.Error(c, 403, err.Error())
 		return
 	}
-
 	license := device.License
-
-	// 检查授权状态
-	if license.Status == model.LicenseStatusRevoked {
-		response.Error(c, 403, "授权已被吊销")
-		return
-	}
-
-	if license.Status == model.LicenseStatusSuspended {
-		response.Error(c, 403, "授权已被暂停")
-		return
-	}
-
-	// 检查是否过期
-	if license.ExpireAt != nil && time.Now().After(*license.ExpireAt) {
-		if license.GraceExpireAt == nil || time.Now().After(*license.GraceExpireAt) {
-			license.Status = model.LicenseStatusExpired
-			model.DB.Save(license)
-			response.Error(c, 403, "授权已过期")
-			return
-		}
-	}
 
 	// 更新验证时间
 	now := time.Now()
 	license.LastValidatedAt = &now
 	device.LastActiveAt = &now
-	model.DB.Save(license)
-	model.DB.Save(&device)
+	if err := model.DB.Save(license).Error; err != nil {
+		response.ServerError(c, "更新授权状态失败: "+err.Error())
+		return
+	}
+	if err := model.DB.Save(device).Error; err != nil {
+		response.ServerError(c, "更新设备状态失败: "+err.Error())
+		return
+	}
 
 	// 解析 features
 	var features []string
@@ -348,10 +417,10 @@ func (h *ClientHandler) Verify(c *gin.Context) {
 		"features":       features,
 	}
 
-	// 签名
-	dataBytes, _ := json.Marshal(respData)
-	signature, _ := crypto.Sign(app.PrivateKey, dataBytes)
-	respData["signature"] = signature
+	if err := signClientPayload(&app, respData); err != nil {
+		response.ServerError(c, "签名响应失败")
+		return
+	}
 
 	response.Success(c, respData)
 }
@@ -377,22 +446,15 @@ func (h *ClientHandler) Heartbeat(c *gin.Context) {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
-
-	// 查找设备
-	var device model.Device
-	if err := model.DB.Preload("License").Where("machine_id = ? AND tenant_id = ?", req.MachineID, app.TenantID).Order("created_at DESC").First(&device).Error; err != nil {
-		response.Error(c, 404, "设备未绑定")
+	if !appAllowsClientAuthMode(&app, clientauth.AuthModeLicense) {
+		response.Error(c, 403, "该应用未启用授权码模式")
 		return
 	}
 
-	if device.License == nil || device.License.AppID != app.ID {
-		response.Error(c, 404, "设备未绑定该应用")
-		return
-	}
-
-	// 检查授权状态
-	if !device.License.IsValid() {
-		response.Error(c, 403, "授权无效")
+	// 查找当前应用下有效授权设备
+	device, err := loadActiveLicenseDeviceForApp(req.MachineID, &app)
+	if err != nil {
+		response.Error(c, 403, err.Error())
 		return
 	}
 
@@ -404,7 +466,7 @@ func (h *ClientHandler) Heartbeat(c *gin.Context) {
 	if req.AppVersion != "" {
 		device.AppVersion = req.AppVersion
 	}
-	if err := model.DB.Save(&device).Error; err != nil {
+	if err := model.DB.Save(device).Error; err != nil {
 		response.ServerError(c, "更新设备状态失败: "+err.Error())
 		return
 	}
@@ -416,6 +478,7 @@ func (h *ClientHandler) Heartbeat(c *gin.Context) {
 	}
 	heartbeat := model.Heartbeat{
 		TenantID:   device.TenantID,
+		AuthMode:   clientauth.AuthModeLicense,
 		LicenseID:  *device.LicenseID,
 		DeviceID:   device.ID,
 		IPAddress:  c.ClientIP(),
@@ -426,10 +489,15 @@ func (h *ClientHandler) Heartbeat(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, gin.H{
+	respData := gin.H{
 		"valid":          true,
 		"remaining_days": device.License.RemainingDays(),
-	})
+	}
+	if err := signClientPayload(&app, respData); err != nil {
+		response.ServerError(c, "签名响应失败")
+		return
+	}
+	response.Success(c, respData)
 }
 
 // Deactivate 解绑设备
@@ -449,19 +517,15 @@ func (h *ClientHandler) Deactivate(c *gin.Context) {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
-
-	// 查找并删除设备
-	var device model.Device
-	if err := model.DB.Preload("License").
-		Where("machine_id = ? AND tenant_id = ? AND license_id IS NOT NULL", req.MachineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 404, "设备未绑定")
+	if !appAllowsClientAuthMode(&app, clientauth.AuthModeLicense) {
+		response.Error(c, 403, "该应用未启用授权码模式")
 		return
 	}
 
-	if device.License == nil || device.License.AppID != app.ID {
-		response.Error(c, 404, "设备未绑定该应用")
+	// 查找当前应用下有效授权设备
+	device, err := loadActiveLicenseDeviceForApp(req.MachineID, &app)
+	if err != nil {
+		response.Error(c, 403, err.Error())
 		return
 	}
 
@@ -476,12 +540,7 @@ func (h *ClientHandler) Deactivate(c *gin.Context) {
 		if err := tx.Delete(&model.Device{}, "id = ?", device.ID).Error; err != nil {
 			return err
 		}
-		return tx.Model(&model.ClientSession{}).
-			Where("device_id = ? AND revoked_at IS NULL", device.ID).
-			Updates(map[string]interface{}{
-				"revoked_at":   now,
-				"last_used_at": now,
-			}).Error
+		return revokeActiveClientSessionsForDevice(tx, device.ID, now)
 	}); err != nil {
 		if errors.Is(err, errClientUnbindLimitExceeded) {
 			response.Error(c, 400, clientUnbindLimitExceededMessage)
@@ -496,65 +555,71 @@ func (h *ClientHandler) Deactivate(c *gin.Context) {
 
 // GetScriptVersion 获取脚本版本
 func (h *ClientHandler) GetScriptVersion(c *gin.Context) {
-	appKey := c.Query("app_key")
-	if appKey == "" {
-		response.BadRequest(c, "缺少 app_key")
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
 		return
 	}
-
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", appKey).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	device, ok := loadClientDeviceFromSession(c, app)
+	if !ok {
 		return
 	}
 
 	var scripts []model.Script
-	model.DB.Where("app_id = ? AND status = ?", app.ID, model.ScriptStatusActive).Find(&scripts)
+	model.DB.Where("app_id = ? AND status = ?", app.ID, model.ScriptStatusActive).
+		Order("filename ASC").Find(&scripts)
 
-	result := make(map[string]string)
+	items := make([]gin.H, 0, len(scripts))
+	var lastUpdated time.Time
 	for _, script := range scripts {
-		result[script.Filename] = script.Version
+		if !isMachineInRollout(device.MachineID, script.RolloutPercentage) {
+			continue
+		}
+		if script.UpdatedAt.After(lastUpdated) {
+			lastUpdated = script.UpdatedAt
+		}
+		items = append(items, gin.H{
+			"filename":     script.Filename,
+			"version":      script.Version,
+			"version_code": scriptVersionCode(script.Version),
+			"file_size":    script.FileSize,
+			"file_hash":    script.ContentHash,
+			"updated_at":   script.UpdatedAt,
+		})
 	}
 
-	response.Success(c, result)
+	lastUpdatedText := ""
+	if !lastUpdated.IsZero() {
+		lastUpdatedText = lastUpdated.Format(time.RFC3339)
+	}
+	response.Success(c, gin.H{
+		"scripts":      items,
+		"total_count":  len(items),
+		"last_updated": lastUpdatedText,
+	})
 }
 
 // DownloadScript 下载脚本
 func (h *ClientHandler) DownloadScript(c *gin.Context) {
-	appKey := c.Query("app_key")
-	machineID := c.Query("machine_id")
 	filename := c.Param("filename")
 
-	if appKey == "" || machineID == "" {
-		response.BadRequest(c, "缺少参数")
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
 		return
 	}
 
-	// 验证应用
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ?", appKey).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
-		return
-	}
-
-	// 验证设备授权
-	var device model.Device
-	if err := model.DB.Preload("License").
-		Where("machine_id = ? AND tenant_id = ? AND license_id IS NOT NULL", machineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 403, "设备未授权")
-		return
-	}
-
-	if device.License == nil || device.License.AppID != app.ID || !device.License.IsValid() {
-		response.Error(c, 403, "授权无效")
+	// 验证设备授权或订阅
+	device, ok := loadClientDeviceFromSession(c, app)
+	if !ok {
 		return
 	}
 
 	// 获取脚本
 	var script model.Script
 	if err := model.DB.Where("app_id = ? AND filename = ? AND status = ?", app.ID, filename, model.ScriptStatusActive).First(&script).Error; err != nil {
+		response.NotFound(c, "脚本不存在")
+		return
+	}
+	if !isMachineInRollout(device.MachineID, script.RolloutPercentage) {
 		response.NotFound(c, "脚本不存在")
 		return
 	}
@@ -568,28 +633,35 @@ func (h *ClientHandler) DownloadScript(c *gin.Context) {
 
 // GetLatestRelease 获取最新版本
 func (h *ClientHandler) GetLatestRelease(c *gin.Context) {
-	appKey := c.Query("app_key")
-	machineID := c.Query("machine_id")
-	if appKey == "" || machineID == "" {
-		response.BadRequest(c, "缺少 app_key 或 machine_id")
+	app, ok := loadClientAppFromSession(c)
+	if !ok {
+		return
+	}
+	device, ok := loadClientDeviceFromSession(c, app)
+	if !ok {
 		return
 	}
 
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
+	var releases []model.AppRelease
+	if err := model.DB.Where("app_id = ? AND status = ?", app.ID, model.ReleaseStatusPublished).
+		Order("version_code DESC").Find(&releases).Error; err != nil {
+		response.ServerError(c, "查询发布版本失败")
 		return
 	}
-	if !validateClientDeviceForApp(c, &app, machineID) {
-		return
-	}
-
 	var release model.AppRelease
-	if err := model.DB.Where("app_id = ? AND status = ?", app.ID, model.ReleaseStatusPublished).Order("version_code DESC").First(&release).Error; err != nil {
+	found := false
+	for _, candidate := range releases {
+		if isMachineInRollout(device.MachineID, candidate.RolloutPercentage) {
+			release = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
 		response.NotFound(c, "暂无发布版本")
 		return
 	}
-	downloadURL, err := buildClientDownloadURLWithToken(release.DownloadURL, app.ID, machineID, downloadTokenKindRelease)
+	downloadURL, err := buildClientDownloadURLWithToken(release.DownloadURL, app.TenantID, app.ID, device.MachineID, downloadTokenKindRelease)
 	if err != nil {
 		response.ServerError(c, "生成下载链接失败")
 		return
@@ -650,6 +722,10 @@ func (h *ClientHandler) ClientLogin(c *gin.Context) {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
+	if !appAllowsClientAuthMode(&app, clientauth.AuthModeSubscription) {
+		response.Error(c, 403, "该应用未启用账号订阅模式")
+		return
+	}
 
 	// 验证用户（客户）- 需要在同一租户内查找
 	var customer model.Customer
@@ -681,10 +757,8 @@ func (h *ClientHandler) ClientLogin(c *gin.Context) {
 	loginLimiter.RecordSuccess(req.Email)
 	ipLimiter.RecordSuccess(clientIP)
 
-	// 检查设备是否在黑名单
-	var blacklist model.DeviceBlacklist
-	if err := model.DB.Where("tenant_id = ? AND machine_id = ? AND (app_id = ? OR app_id IS NULL)", app.TenantID, req.MachineID, app.ID).First(&blacklist).Error; err == nil {
-		response.Error(c, 403, "设备已被禁止使用")
+	if err := ensureDeviceNotBlacklistedForApp(req.MachineID, &app); err != nil {
+		response.Error(c, 403, err.Error())
 		return
 	}
 
@@ -698,41 +772,53 @@ func (h *ClientHandler) ClientLogin(c *gin.Context) {
 	// 检查订阅是否过期
 	if !subscription.IsValid() {
 		subscription.Status = model.SubscriptionStatusExpired
-		model.DB.Save(&subscription)
+		if err := model.DB.Save(&subscription).Error; err != nil {
+			response.ServerError(c, "更新订阅状态失败: "+err.Error())
+			return
+		}
 		response.Error(c, 403, "订阅已过期")
 		return
 	}
 
-	// 检查设备数量
-	var deviceCount int64
-	model.DB.Model(&model.Device{}).Where("tenant_id = ? AND subscription_id = ?", app.TenantID, subscription.ID).Count(&deviceCount)
-
-	// 检查该设备是否已绑定
-	var existingDevice model.Device
-	deviceExists := model.DB.Where("tenant_id = ? AND subscription_id = ? AND machine_id = ?", app.TenantID, subscription.ID, req.MachineID).First(&existingDevice).Error == nil
-
-	if !deviceExists && int(deviceCount) >= subscription.MaxDevices {
-		response.Error(c, 403, "设备数量已达上限")
-		return
-	}
-
-	// 绑定或更新设备
 	var device model.Device
-	now := time.Now()
-	if deviceExists {
-		device = existingDevice
-		device.DeviceName = req.DeviceInfo.Name
-		device.Hostname = req.DeviceInfo.Hostname
-		device.OSType = req.DeviceInfo.OS
-		device.OSVersion = req.DeviceInfo.OSVersion
-		device.AppVersion = req.DeviceInfo.AppVersion
-		device.IPAddress = c.ClientIP()
-		device.LastActiveAt = &now
-		if err := model.DB.Save(&device).Error; err != nil {
-			response.ServerError(c, "更新设备失败: "+err.Error())
-			return
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&subscription, "id = ? AND tenant_id = ?", subscription.ID, app.TenantID).Error; err != nil {
+			return err
 		}
-	} else {
+		if !subscription.IsValid() {
+			subscription.Status = model.SubscriptionStatusExpired
+			_ = tx.Save(&subscription).Error
+			return errors.New("订阅已过期")
+		}
+
+		var deviceCount int64
+		if err := tx.Model(&model.Device{}).Where("tenant_id = ? AND subscription_id = ?", app.TenantID, subscription.ID).Count(&deviceCount).Error; err != nil {
+			return err
+		}
+
+		var existingDevice model.Device
+		err := tx.Where("tenant_id = ? AND subscription_id = ? AND machine_id = ?", app.TenantID, subscription.ID, req.MachineID).First(&existingDevice).Error
+		deviceExists := err == nil
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if !deviceExists && int(deviceCount) >= subscription.MaxDevices {
+			return errors.New("设备数量已达上限")
+		}
+
+		now := time.Now()
+		if deviceExists {
+			device = existingDevice
+			return updateClientDeviceForActivation(tx, &device, customer.ID, req.DeviceInfo, c.ClientIP(), now)
+		}
+
+		if restoredDevice, restored, err := restoreDeletedSubscriptionDevice(tx, app.TenantID, subscription.ID, req.MachineID, customer.ID, req.DeviceInfo, c.ClientIP(), now); err != nil {
+			return err
+		} else if restored {
+			device = *restoredDevice
+			return nil
+		}
+
 		device = model.Device{
 			TenantID:       app.TenantID,
 			CustomerID:     customer.ID,
@@ -747,10 +833,15 @@ func (h *ClientHandler) ClientLogin(c *gin.Context) {
 			Status:         model.DeviceStatusActive,
 			LastActiveAt:   &now,
 		}
-		if err := model.DB.Create(&device).Error; err != nil {
-			response.ServerError(c, "创建设备失败: "+err.Error())
-			return
+		return tx.Create(&device).Error
+	}); err != nil {
+		switch err.Error() {
+		case "订阅已过期", "设备数量已达上限", "设备已被禁止使用":
+			response.Error(c, 403, err.Error())
+		default:
+			response.ServerError(c, "绑定设备失败: "+err.Error())
 		}
+		return
 	}
 
 	// 解析 features
@@ -786,10 +877,10 @@ func (h *ClientHandler) ClientLogin(c *gin.Context) {
 	respData["session_id"] = sessionTokens.SessionID
 	respData["auth_mode"] = sessionTokens.AuthMode
 
-	// 签名
-	dataBytes, _ := json.Marshal(respData)
-	signature, _ := crypto.Sign(app.PrivateKey, dataBytes)
-	respData["signature"] = signature
+	if err := signClientPayload(&app, respData); err != nil {
+		response.ServerError(c, "签名响应失败")
+		return
+	}
 
 	response.Success(c, respData)
 }
@@ -798,9 +889,26 @@ func (h *ClientHandler) ClientLogin(c *gin.Context) {
 type ClientRegisterRequest struct {
 	AppKey         string `json:"app_key" binding:"required"`
 	Email          string `json:"email" binding:"required,email"`
-	Password       string `json:"password" binding:"required,min=6"`
+	Password       string `json:"password" binding:"required"`
 	PasswordHashed bool   `json:"password_hashed"` // 标记密码是否已预哈希
 	Name           string `json:"name"`
+}
+
+func defaultCustomerOwnerID(tenantID string) string {
+	var owner model.TeamMember
+	if err := model.DB.
+		Where("tenant_id = ? AND role = ? AND status = ?", tenantID, model.RoleOwner, model.MemberStatusActive).
+		Order("created_at ASC").
+		First(&owner).Error; err == nil {
+		return owner.ID
+	}
+	if err := model.DB.
+		Where("tenant_id = ? AND role IN ? AND status = ?", tenantID, []model.TeamMemberRole{model.RoleOwner, model.RoleAdmin}, model.MemberStatusActive).
+		Order("created_at ASC").
+		First(&owner).Error; err == nil {
+		return owner.ID
+	}
+	return ""
 }
 
 // ClientRegister 客户端用户注册
@@ -810,6 +918,14 @@ func (h *ClientHandler) ClientRegister(c *gin.Context) {
 		response.BadRequest(c, "参数错误: "+err.Error())
 		return
 	}
+	if req.PasswordHashed {
+		response.BadRequest(c, "注册必须提交原始密码")
+		return
+	}
+	if err := validatePasswordPolicy(req.Password); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	// 验证应用
 	var app model.Application
@@ -817,10 +933,14 @@ func (h *ClientHandler) ClientRegister(c *gin.Context) {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
+	if !appAllowsClientAuthMode(&app, clientauth.AuthModeSubscription) {
+		response.Error(c, 403, "该应用未启用账号订阅模式")
+		return
+	}
 
 	// 检查邮箱是否已注册（同一租户内）
 	var existingCustomer model.Customer
-	if err := model.DB.First(&existingCustomer, "email = ? AND tenant_id = ?", req.Email, app.TenantID).Error; err == nil {
+	if err := model.DB.Unscoped().First(&existingCustomer, "email = ? AND tenant_id = ?", req.Email, app.TenantID).Error; err == nil {
 		response.Error(c, 400, "该邮箱已注册")
 		return
 	}
@@ -828,6 +948,7 @@ func (h *ClientHandler) ClientRegister(c *gin.Context) {
 	// 创建客户
 	customer := model.Customer{
 		TenantID: app.TenantID,
+		OwnerID:  defaultCustomerOwnerID(app.TenantID),
 		Email:    req.Email,
 		Name:     req.Name,
 		Status:   model.CustomerStatusActive,
@@ -838,16 +959,10 @@ func (h *ClientHandler) ClientRegister(c *gin.Context) {
 		return
 	}
 
-	if err := model.DB.Create(&customer).Error; err != nil {
-		response.ServerError(c, "注册失败")
-		return
-	}
-
 	// 自动创建免费订阅
 	now := time.Now()
 	subscription := model.Subscription{
 		TenantID:   app.TenantID,
-		CustomerID: customer.ID,
 		AppID:      app.ID,
 		PlanType:   model.PlanTypeFree,
 		MaxDevices: app.MaxDevicesDefault,
@@ -855,7 +970,16 @@ func (h *ClientHandler) ClientRegister(c *gin.Context) {
 		Status:     model.SubscriptionStatusActive,
 		StartAt:    &now,
 	}
-	model.DB.Create(&subscription)
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&customer).Error; err != nil {
+			return err
+		}
+		subscription.CustomerID = customer.ID
+		return tx.Create(&subscription).Error
+	}); err != nil {
+		response.ServerError(c, "注册失败: "+err.Error())
+		return
+	}
 
 	response.Success(c, gin.H{
 		"customer_id":     customer.ID,
@@ -863,6 +987,60 @@ func (h *ClientHandler) ClientRegister(c *gin.Context) {
 		"subscription_id": subscription.ID,
 		"plan_type":       subscription.PlanType,
 	})
+}
+
+// ClientChangePassword 修改客户端账号密码
+func (h *ClientHandler) ClientChangePassword(c *gin.Context) {
+	var req struct {
+		OldPassword    string `json:"old_password" binding:"required"`
+		NewPassword    string `json:"new_password" binding:"required"`
+		PasswordHashed bool   `json:"password_hashed"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+
+	if req.PasswordHashed {
+		response.BadRequest(c, "修改密码必须提交原始密码")
+		return
+	}
+	if err := validatePasswordPolicy(req.NewPassword); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+
+	tenantID := middleware.GetClientTenantID(c)
+	customerID := middleware.GetClientCustomerID(c)
+	authMode := middleware.GetClientAuthMode(c)
+	if tenantID == "" || customerID == "" {
+		response.Unauthorized(c, "会话无效")
+		return
+	}
+	if authMode != clientauth.AuthModeSubscription {
+		response.Forbidden(c, "授权码模式不支持修改账号密码")
+		return
+	}
+
+	var customer model.Customer
+	if err := model.DB.First(&customer, "id = ? AND tenant_id = ?", customerID, tenantID).Error; err != nil {
+		response.Unauthorized(c, "账号不存在")
+		return
+	}
+	if !customer.CheckPasswordWithPreHash(req.OldPassword, req.PasswordHashed) {
+		response.Error(c, 400, "原密码错误")
+		return
+	}
+	if err := customer.SetPasswordWithPreHash(req.NewPassword, req.PasswordHashed); err != nil {
+		response.ServerError(c, "密码处理失败")
+		return
+	}
+	if err := model.DB.Save(&customer).Error; err != nil {
+		response.ServerError(c, "修改密码失败")
+		return
+	}
+
+	response.SuccessWithMessage(c, "密码修改成功", nil)
 }
 
 // ==================== 订阅模式心跳和验证 ====================
@@ -888,31 +1066,19 @@ func (h *ClientHandler) SubscriptionHeartbeat(c *gin.Context) {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
-
-	// 查找设备（订阅模式）- 按 machine_id 查找最新的记录
-	var device model.Device
-	if err := model.DB.Preload("Subscription").
-		Where("machine_id = ? AND tenant_id = ? AND subscription_id IS NOT NULL", req.MachineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 404, "设备未绑定")
+	if !appAllowsClientAuthMode(&app, clientauth.AuthModeSubscription) {
+		response.Error(c, 403, "该应用未启用账号订阅模式")
 		return
 	}
 
-	// 检查是否有订阅
+	// 查找当前应用下有效订阅设备
+	device, err := loadActiveSubscriptionDeviceForApp(req.MachineID, &app)
+	if err != nil {
+		response.Error(c, 403, err.Error())
+		return
+	}
 	if device.SubscriptionID == nil || *device.SubscriptionID == "" {
-		response.Error(c, 404, "设备未绑定订阅")
-		return
-	}
-
-	if device.Subscription == nil || device.Subscription.AppID != app.ID {
-		response.Error(c, 404, "设备未绑定该应用")
-		return
-	}
-
-	// 检查订阅状态
-	if !device.Subscription.IsValid() {
-		response.Error(c, 403, "订阅无效或已过期")
+		response.Error(c, 400, "设备订阅信息异常")
 		return
 	}
 
@@ -924,12 +1090,32 @@ func (h *ClientHandler) SubscriptionHeartbeat(c *gin.Context) {
 	if req.AppVersion != "" {
 		device.AppVersion = req.AppVersion
 	}
-	model.DB.Save(&device)
+	if err := model.DB.Save(device).Error; err != nil {
+		response.ServerError(c, "更新设备状态失败: "+err.Error())
+		return
+	}
+	heartbeat := model.Heartbeat{
+		TenantID:       device.TenantID,
+		AuthMode:       clientauth.AuthModeSubscription,
+		SubscriptionID: *device.SubscriptionID,
+		DeviceID:       device.ID,
+		IPAddress:      c.ClientIP(),
+		AppVersion:     req.AppVersion,
+	}
+	if err := model.DB.Create(&heartbeat).Error; err != nil {
+		response.ServerError(c, "记录心跳失败: "+err.Error())
+		return
+	}
 
-	response.Success(c, gin.H{
+	respData := gin.H{
 		"valid":          true,
 		"remaining_days": device.Subscription.RemainingDays(),
-	})
+	}
+	if err := signClientPayload(&app, respData); err != nil {
+		response.ServerError(c, "签名响应失败")
+		return
+	}
+	response.Success(c, respData)
 }
 
 // SubscriptionVerifyRequest 订阅模式验证请求
@@ -952,54 +1138,26 @@ func (h *ClientHandler) SubscriptionVerify(c *gin.Context) {
 		response.Error(c, 400, "无效的应用")
 		return
 	}
-
-	// 查找设备（订阅模式）- 按 machine_id 查找最新的记录
-	var device model.Device
-	if err := model.DB.Preload("Subscription").
-		Where("machine_id = ? AND tenant_id = ? AND subscription_id IS NOT NULL", req.MachineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 404, "设备未绑定")
+	if !appAllowsClientAuthMode(&app, clientauth.AuthModeSubscription) {
+		response.Error(c, 403, "该应用未启用账号订阅模式")
 		return
 	}
 
-	// 检查是否有订阅
-	if device.SubscriptionID == nil || *device.SubscriptionID == "" {
-		response.Error(c, 404, "设备未绑定订阅")
+	// 查找当前应用下有效订阅设备
+	device, err := loadActiveSubscriptionDeviceForApp(req.MachineID, &app)
+	if err != nil {
+		response.Error(c, 403, err.Error())
 		return
 	}
-
-	// 检查订阅是否属于该应用
-	if device.Subscription == nil || device.Subscription.AppID != app.ID {
-		response.Error(c, 404, "设备未绑定该应用的订阅")
-		return
-	}
-
 	subscription := device.Subscription
-
-	// 检查订阅状态
-	if subscription.Status == model.SubscriptionStatusCancelled {
-		response.Error(c, 403, "订阅已取消")
-		return
-	}
-
-	if subscription.Status == model.SubscriptionStatusSuspended {
-		response.Error(c, 403, "订阅已暂停")
-		return
-	}
-
-	// 检查是否过期
-	if subscription.ExpireAt != nil && time.Now().After(*subscription.ExpireAt) {
-		subscription.Status = model.SubscriptionStatusExpired
-		model.DB.Save(subscription)
-		response.Error(c, 403, "订阅已过期")
-		return
-	}
 
 	// 更新活跃时间
 	now := time.Now()
 	device.LastActiveAt = &now
-	model.DB.Save(&device)
+	if err := model.DB.Save(device).Error; err != nil {
+		response.ServerError(c, "更新设备状态失败: "+err.Error())
+		return
+	}
 
 	// 解析 features
 	var features []string
@@ -1017,10 +1175,10 @@ func (h *ClientHandler) SubscriptionVerify(c *gin.Context) {
 		"features":        features,
 	}
 
-	// 签名
-	dataBytes, _ := json.Marshal(respData)
-	signature, _ := crypto.Sign(app.PrivateKey, dataBytes)
-	respData["signature"] = signature
+	if err := signClientPayload(&app, respData); err != nil {
+		response.ServerError(c, "签名响应失败")
+		return
+	}
 
 	response.Success(c, respData)
 }

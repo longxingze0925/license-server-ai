@@ -1,0 +1,79 @@
+server:
+  host: "127.0.0.1"
+  port: 8081
+  mode: "debug"
+  tls:
+    enabled: false
+    cert_file: "./certs/server.crt"
+    key_file: "./certs/server.key"
+
+database:
+  driver: "mysql"
+  host: "127.0.0.1"
+  port: 3306
+  username: "root"
+  password: ""
+  database: "license_server"
+  charset: "utf8mb4"
+  max_idle_conns: 10
+  max_open_conns: 100
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+
+jwt:
+  secret: "test-jwt-secret-only-for-local-m1-verification-32chars"
+  expire_hours: 24
+
+rsa:
+  key_size: 2048
+
+storage:
+  scripts_dir: "./storage/scripts"
+  releases_dir: "./storage/releases"
+  generations_root: "./storage/generations"
+  generation_keep_days: 15
+
+ai:
+  async_task_timeout_minutes: 120
+
+log:
+  level: "info"
+  file: "./logs/app.log"
+  max_size: 100
+  max_backups: 5
+  max_age: 30
+
+email:
+  enabled: false
+  smtp_host: "smtp.example.com"
+  smtp_port: 587
+  username: ""
+  password: ""
+  from: "noreply@example.com"
+
+security:
+  max_login_attempts: 5
+  login_lock_minutes: 15
+  ip_max_attempts: 20
+  ip_lock_minutes: 30
+  password_min_length: 6
+  password_require_num: false
+  password_require_sym: false
+  csrf_enabled: false
+  csrf_token_expiry: 60
+  csrf_cookie_name: "csrf_token"
+  enable_security_headers: true
+  api_rate_limit: 1000
+  auth_rate_limit: 1000
+  client_rate_limit: 1000
+  client_auth_rate_limit: 1000
+  heartbeat_rate_limit: 1000
+  allowed_origins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3000"

@@ -8,6 +8,12 @@ const Profile: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [profile, setProfile] = useState<any>(null);
   const [passwordForm] = Form.useForm();
+  const roleLabels: Record<string, { color: string; text: string }> = {
+    owner: { color: 'gold', text: '所有者' },
+    admin: { color: 'red', text: '管理员' },
+    developer: { color: 'blue', text: '开发者' },
+    viewer: { color: 'default', text: '只读' },
+  };
 
   useEffect(() => {
     fetchProfile();
@@ -50,7 +56,9 @@ const Profile: React.FC = () => {
               <div style={{ textAlign: 'center', marginBottom: 24 }}>
                 <Avatar size={80} icon={<UserOutlined />} src={profile.avatar} />
                 <h3 style={{ marginTop: 12, marginBottom: 4 }}>{profile.name}</h3>
-                <Tag color="blue">{profile.role === 'admin' ? '管理员' : '普通用户'}</Tag>
+                <Tag color={roleLabels[profile.role]?.color || 'default'}>
+                  {roleLabels[profile.role]?.text || profile.role}
+                </Tag>
               </div>
               <Descriptions column={1} bordered size="small">
                 <Descriptions.Item label={<><MailOutlined /> 邮箱</>}>
@@ -92,7 +100,9 @@ const Profile: React.FC = () => {
               label="新密码"
               rules={[
                 { required: true, message: '请输入新密码' },
-                { min: 6, message: '密码至少6位' },
+                { min: 8, message: '密码至少8位' },
+                { pattern: /\d/, message: '密码必须包含数字' },
+                { pattern: /[^A-Za-z0-9]/, message: '密码必须包含特殊字符' },
               ]}
             >
               <Input.Password placeholder="请输入新密码" />

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"path/filepath"
@@ -18,43 +19,49 @@ func getSafeDownloadFilename(c *gin.Context) (string, bool) {
 	return filename, true
 }
 
-func validateClientAppByQuery(c *gin.Context) (*model.Application, string, bool) {
-	appKey := strings.TrimSpace(c.Query("app_key"))
-	if appKey == "" {
-		response.BadRequest(c, "缺少 app_key")
-		return nil, "", false
-	}
-
-	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", appKey, model.AppStatusActive).Error; err != nil {
-		response.Error(c, 400, "无效的应用")
-		return nil, "", false
-	}
-
-	return &app, strings.TrimSpace(c.Query("machine_id")), true
-}
-
 func validateClientDeviceForApp(c *gin.Context, app *model.Application, machineID string) bool {
 	if machineID == "" {
 		return true
 	}
 
-	var device model.Device
-	if err := model.DB.Preload("License").Preload("Subscription").
-		Where("machine_id = ? AND tenant_id = ?", machineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		response.Error(c, 401, "设备未授权")
-		return false
-	}
-
-	if (device.License == nil || device.License.AppID != app.ID) &&
-		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
-		response.Error(c, 401, "设备未绑定当前应用")
+	if _, err := loadActiveDeviceForApp(machineID, app); err != nil {
+		response.Error(c, 401, err.Error())
 		return false
 	}
 
 	return true
+}
+
+func loadClientAppFromSession(c *gin.Context) (*model.Application, bool) {
+	appID := middleware.GetClientAppID(c)
+	tenantID := middleware.GetClientTenantID(c)
+	if appID == "" || tenantID == "" {
+		response.Unauthorized(c, "客户端会话无效")
+		return nil, false
+	}
+
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ? AND status = ?", appID, tenantID, model.AppStatusActive).Error; err != nil {
+		response.Error(c, 400, "无效的应用")
+		return nil, false
+	}
+
+	return &app, true
+}
+
+func loadClientDeviceFromSession(c *gin.Context, app *model.Application) (*model.Device, bool) {
+	machineID := middleware.GetClientMachineID(c)
+	deviceID := middleware.GetClientDeviceID(c)
+	device, err := loadActiveDeviceForApp(machineID, app)
+	if err != nil {
+		response.Error(c, 401, err.Error())
+		return nil, false
+	}
+	if deviceID != "" && device.ID != deviceID {
+		response.Unauthorized(c, "客户端会话与设备不匹配")
+		return nil, false
+	}
+	return device, true
 }
 
 func validateClientDownloadContext(c *gin.Context, filename, expectedKind string) (*model.Application, string, bool) {
@@ -71,7 +78,11 @@ func validateClientDownloadContext(c *gin.Context, filename, expectedKind string
 		}
 
 		var app model.Application
-		if err := model.DB.First(&app, "id = ? AND status = ?", claims.AppID, model.AppStatusActive).Error; err != nil {
+		query := model.DB.Where("id = ? AND status = ?", claims.AppID, model.AppStatusActive)
+		if claims.TenantID != "" {
+			query = query.Where("tenant_id = ?", claims.TenantID)
+		}
+		if err := query.First(&app).Error; err != nil {
 			response.Error(c, 400, "无效的应用")
 			return nil, "", false
 		}
@@ -82,17 +93,21 @@ func validateClientDownloadContext(c *gin.Context, filename, expectedKind string
 		return &app, claims.MachineID, true
 	}
 
-	app, machineID, ok := validateClientAppByQuery(c)
-	if !ok {
+	session, err := middleware.AuthenticateClientRequest(c)
+	if err != nil {
+		response.Unauthorized(c, "缺少下载令牌或客户端认证")
 		return nil, "", false
 	}
-	if machineID == "" {
-		response.BadRequest(c, "缺少 machine_id")
+	middleware.SetClientSessionContext(c, session)
+
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ? AND status = ?", session.AppID, session.TenantID, model.AppStatusActive).Error; err != nil {
+		response.Error(c, 400, "无效的应用")
 		return nil, "", false
 	}
-	if !validateClientDeviceForApp(c, app, machineID) {
+	if !validateClientDeviceForApp(c, &app, session.MachineID) {
 		return nil, "", false
 	}
 
-	return app, machineID, true
+	return &app, session.MachineID, true
 }

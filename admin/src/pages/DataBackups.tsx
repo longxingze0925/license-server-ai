@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Table, Card, Space, Modal, Tag, Select, Descriptions, Tabs, Spin, Button, message, Empty } from 'antd';
 import { DatabaseOutlined, EyeOutlined, EyeInvisibleOutlined } from '@ant-design/icons';
 import { appApi } from '../api';
@@ -12,6 +12,7 @@ const dataTypeLabels: Record<string, string> = {
   scripts: '话术管理',
   danmaku_groups: '互动规则',
   ai_config: 'AI配置',
+  random_word_ai_config: '随机词AI配置',
 };
 
 const DataBackups: React.FC = () => {
@@ -25,16 +26,11 @@ const DataBackups: React.FC = () => {
   const [detailVisible, setDetailVisible] = useState(false);
   const [backupDetail, setBackupDetail] = useState<any>(null);
   const [showApiKey, setShowApiKey] = useState(false);
+  const [secretLoading, setSecretLoading] = useState(false);
 
   useEffect(() => {
     fetchApps();
   }, []);
-
-  useEffect(() => {
-    if (selectedApp) {
-      fetchUsers();
-    }
-  }, [selectedApp]);
 
   const fetchApps = async () => {
     try {
@@ -52,7 +48,7 @@ const DataBackups: React.FC = () => {
     }
   };
 
-  const fetchUsers = async () => {
+  const fetchUsers = useCallback(async () => {
     if (!selectedApp) return;
     setLoading(true);
     try {
@@ -64,11 +60,19 @@ const DataBackups: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedApp]);
+
+  useEffect(() => {
+    if (selectedApp) {
+      setSelectedUser(null);
+      setBackups({});
+      fetchUsers();
+    }
+  }, [fetchUsers, selectedApp]);
 
   const fetchUserBackups = async (userId: string) => {
     try {
-      const result: any = await request.get(`/admin/backups/users/${userId}`);
+      const result: any = await request.get(`/admin/backups/users/${userId}`, { params: { app_id: selectedApp } });
       setBackups(result?.backups || {});
     } catch (error) {
       console.error(error);
@@ -81,14 +85,34 @@ const DataBackups: React.FC = () => {
     fetchUserBackups(user.user_id);
   };
 
+  const fetchBackupDetail = async (backupId: string, revealSecret = false) => {
+    const result: any = await request.get(`/admin/backups/${backupId}`, {
+      params: revealSecret ? { reveal_secret: true } : undefined,
+    });
+    setBackupDetail(result);
+  };
+
   const handleViewDetail = async (backup: any) => {
     try {
-      const result: any = await request.get(`/admin/backups/${backup.id}`);
-      setBackupDetail(result);
+      await fetchBackupDetail(backup.id);
       setShowApiKey(false); // 重置 API Key 显示状态
       setDetailVisible(true);
     } catch (error) {
       console.error(error);
+    }
+  };
+
+  const toggleApiKeyVisible = async () => {
+    if (!backupDetail?.id) return;
+    const nextVisible = !showApiKey;
+    setSecretLoading(true);
+    try {
+      await fetchBackupDetail(backupDetail.id, nextVisible);
+      setShowApiKey(nextVisible);
+    } catch {
+      message.error('读取 API Key 失败');
+    } finally {
+      setSecretLoading(false);
     }
   };
 
@@ -99,7 +123,7 @@ const DataBackups: React.FC = () => {
       if (selectedUser) {
         fetchUserBackups(selectedUser.user_id);
       }
-    } catch (error) {
+    } catch {
       message.error('操作失败');
     }
   };
@@ -245,7 +269,7 @@ const DataBackups: React.FC = () => {
         }
       }
 
-      if (dataType === 'ai_config') {
+      if (dataType === 'ai_config' || dataType === 'random_word_ai_config') {
         // AI配置
         const maskApiKey = (key: string) => {
           if (!key || key.length <= 8) return '********';
@@ -265,7 +289,8 @@ const DataBackups: React.FC = () => {
                   type="link"
                   size="small"
                   icon={showApiKey ? <EyeInvisibleOutlined /> : <EyeOutlined />}
-                  onClick={() => setShowApiKey(!showApiKey)}
+                  loading={secretLoading}
+                  onClick={toggleApiKeyVisible}
                 >
                   {showApiKey ? '隐藏' : '显示'}
                 </Button>
@@ -348,7 +373,11 @@ const DataBackups: React.FC = () => {
       <Modal
         title="备份详情"
         open={detailVisible}
-        onCancel={() => setDetailVisible(false)}
+        onCancel={() => {
+          setDetailVisible(false);
+          setShowApiKey(false);
+          setBackupDetail(null);
+        }}
         footer={null}
         width={700}
       >

@@ -12,6 +12,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   FileTextOutlined,
+  BarChartOutlined,
   CrownOutlined,
   StopOutlined,
   DownloadOutlined,
@@ -20,6 +21,10 @@ import {
   ToolOutlined,
   TeamOutlined,
   CloudSyncOutlined,
+  ApiOutlined,
+  DollarOutlined,
+  TagsOutlined,
+  SendOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '../store';
 
@@ -30,6 +35,7 @@ type MenuItem = Required<MenuProps>['items'][number];
 // 所有菜单项定义
 const allMenuItems: MenuItem[] = [
   { key: '/', icon: <DashboardOutlined />, label: '仪表盘' },
+  { key: '/analytics', icon: <BarChartOutlined />, label: '数据分析' },
   {
     key: 'auth',
     icon: <SafetyCertificateOutlined />,
@@ -50,6 +56,18 @@ const allMenuItems: MenuItem[] = [
     ],
   },
   { key: '/apps', icon: <AppstoreOutlined />, label: '应用管理' },
+  { key: '/instructions', icon: <SendOutlined />, label: '实时指令' },
+  { key: '/secure-scripts', icon: <SafetyCertificateOutlined />, label: '安全脚本' },
+  {
+    key: 'ai',
+    icon: <ApiOutlined />,
+    label: 'AI 转发',
+    children: [
+      { key: '/provider-credentials', icon: <ApiOutlined />, label: 'Provider 凭证' },
+      { key: '/pricing-rules', icon: <TagsOutlined />, label: '计价规则' },
+      { key: '/user-credits', icon: <DollarOutlined />, label: '用户额度' },
+    ],
+  },
   { key: '/backups', icon: <CloudSyncOutlined />, label: '数据备份' },
   { key: '/team', icon: <TeamOutlined />, label: '团队管理' },
   {
@@ -64,17 +82,25 @@ const allMenuItems: MenuItem[] = [
 ];
 
 // 只读用户需要隐藏的菜单
-const viewerHiddenMenus = ['/apps', '/team', 'system', 'device'];
+const viewerHiddenMenus = ['/team', 'system', 'ai', '/backups', '/instructions', '/secure-scripts'];
+const aiManagerRoles = ['owner', 'admin'];
+const appManagerRoles = ['owner', 'admin', 'developer'];
 
 // 根据角色过滤菜单
 const getMenuItemsByRole = (role?: string): MenuItem[] => {
-  if (role === 'viewer') {
-    return allMenuItems.filter(item => {
-      const key = (item as any)?.key;
-      return !viewerHiddenMenus.includes(key);
-    });
-  }
-  return allMenuItems;
+  return allMenuItems.filter(item => {
+    const key = (item as any)?.key;
+    if (role === 'viewer' && viewerHiddenMenus.includes(key)) {
+      return false;
+    }
+    if ((key === 'ai' || key === '/backups') && !aiManagerRoles.includes(role || '')) {
+      return false;
+    }
+    if ((key === '/instructions' || key === '/secure-scripts') && !appManagerRoles.includes(role || '')) {
+      return false;
+    }
+    return true;
+  });
 };
 
 const MainLayout: React.FC = () => {
@@ -93,6 +119,7 @@ const MainLayout: React.FC = () => {
     if (['/licenses', '/subscriptions'].includes(path)) return ['auth'];
     if (['/devices', '/blacklist'].includes(path)) return ['device'];
     if (['/audit', '/export', '/settings'].includes(path)) return ['system'];
+    if (['/provider-credentials', '/pricing-rules', '/user-credits'].includes(path)) return ['ai'];
     return [];
   };
 

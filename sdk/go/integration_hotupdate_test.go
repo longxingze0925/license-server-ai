@@ -40,18 +40,16 @@ func TestIntegration_HotUpdate_CheckUpdate(t *testing.T) {
 	fmt.Println("\n检查更新...")
 	updateInfo, err := updateManager.CheckUpdate()
 	if err != nil {
-		// 如果没有更新，这不是错误
-		fmt.Printf("检查更新结果: %v\n", err)
-	} else {
-		fmt.Printf("更新信息:\n")
-		fmt.Printf("  有更新: %v\n", updateInfo.HasUpdate)
-		if updateInfo.HasUpdate {
-			fmt.Printf("  从版本: %s\n", updateInfo.FromVersion)
-			fmt.Printf("  到版本: %s\n", updateInfo.ToVersion)
-			fmt.Printf("  更新类型: %s\n", updateInfo.UpdateType)
-			fmt.Printf("  强制更新: %v\n", updateInfo.ForceUpdate)
-			fmt.Printf("  更新日志: %s\n", updateInfo.Changelog)
-		}
+		t.Fatalf("检查更新失败: %v", err)
+	}
+	fmt.Printf("更新信息:\n")
+	fmt.Printf("  有更新: %v\n", updateInfo.HasUpdate)
+	if updateInfo.HasUpdate {
+		fmt.Printf("  从版本: %s\n", updateInfo.FromVersion)
+		fmt.Printf("  到版本: %s\n", updateInfo.ToVersion)
+		fmt.Printf("  更新类型: %s\n", updateInfo.UpdateType)
+		fmt.Printf("  强制更新: %v\n", updateInfo.ForceUpdate)
+		fmt.Printf("  更新日志: %s\n", updateInfo.Changelog)
 	}
 
 	fmt.Println("\n热更新检查测试通过!")
@@ -83,12 +81,11 @@ func TestIntegration_HotUpdate_GetHistory(t *testing.T) {
 	fmt.Println("\n获取更新历史...")
 	history, err := updateManager.GetUpdateHistory()
 	if err != nil {
-		fmt.Printf("获取历史结果: %v\n", err)
-	} else {
-		fmt.Printf("更新历史记录数: %d\n", len(history))
-		for i, record := range history {
-			fmt.Printf("  记录 %d: %v\n", i+1, record)
-		}
+		t.Fatalf("获取更新历史失败: %v", err)
+	}
+	fmt.Printf("更新历史记录数: %d\n", len(history))
+	for i, record := range history {
+		fmt.Printf("  记录 %d: %v\n", i+1, record)
 	}
 
 	fmt.Println("\n热更新历史测试通过!")

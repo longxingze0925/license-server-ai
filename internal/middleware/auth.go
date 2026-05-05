@@ -37,11 +37,24 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		var member model.TeamMember
+		if err := model.DB.Where("id = ? AND tenant_id = ?", claims.UserID, claims.TenantID).First(&member).Error; err != nil {
+			response.Forbidden(c, "用户不存在")
+			c.Abort()
+			return
+		}
+		if member.Status != model.MemberStatusActive {
+			response.Forbidden(c, "账号已被禁用")
+			c.Abort()
+			return
+		}
+
 		// 将用户信息存入上下文
-		c.Set("user_id", claims.UserID)
-		c.Set("tenant_id", claims.TenantID)
-		c.Set("email", claims.Email)
-		c.Set("role", claims.Role)
+		c.Set("user_id", member.ID)
+		c.Set("tenant_id", member.TenantID)
+		c.Set("email", member.Email)
+		c.Set("role", string(member.Role))
+		c.Set("team_member", member)
 
 		c.Next()
 	}
@@ -83,8 +96,20 @@ func PermissionMiddleware(permission string) gin.HandlerFunc {
 
 		// 获取用户信息
 		var member model.TeamMember
-		if err := model.DB.Where("id = ? AND tenant_id = ?", userID, tenantID).First(&member).Error; err != nil {
-			response.Forbidden(c, "用户不存在")
+		if cached, ok := c.Get("team_member"); ok {
+			if m, ok := cached.(model.TeamMember); ok {
+				member = m
+			}
+		}
+		if member.ID == "" {
+			if err := model.DB.Where("id = ? AND tenant_id = ?", userID, tenantID).First(&member).Error; err != nil {
+				response.Forbidden(c, "用户不存在")
+				c.Abort()
+				return
+			}
+		}
+		if member.Status != model.MemberStatusActive {
+			response.Forbidden(c, "账号已被禁用")
 			c.Abort()
 			return
 		}

@@ -12,10 +12,10 @@ import (
 // Customer 客户 - 软件最终用户
 type Customer struct {
 	ID        string         `gorm:"type:char(36);primaryKey" json:"id"`
-	TenantID  string         `gorm:"type:char(36);index;not null" json:"tenant_id"`
-	OwnerID   string         `gorm:"type:char(36);index" json:"owner_id"` // 所属团队成员ID
-	Email     string         `gorm:"type:varchar(100);index;not null" json:"email"` // 同一租户内唯一
-	Password  string         `gorm:"type:varchar(255)" json:"-"`                    // 可为空（仅授权码模式不需要密码）
+	TenantID  string         `gorm:"type:char(36);index;not null;uniqueIndex:idx_customers_tenant_email" json:"tenant_id"`
+	OwnerID   string         `gorm:"type:char(36);index" json:"owner_id"`                                            // 所属团队成员ID
+	Email     string         `gorm:"type:varchar(100);not null;uniqueIndex:idx_customers_tenant_email" json:"email"` // 同一租户内唯一
+	Password  string         `gorm:"type:varchar(255)" json:"-"`                                                     // 可为空（仅授权码模式不需要密码）
 	Name      string         `gorm:"type:varchar(100)" json:"name"`
 	Phone     string         `gorm:"type:varchar(20)" json:"phone"`
 	Company   string         `gorm:"type:varchar(100)" json:"company"` // 客户所属公司

@@ -39,6 +39,11 @@ rsa:
 storage:
   scripts_dir: "./storage/scripts"
   releases_dir: "./storage/releases"
+  generations_root: "./storage/generations"
+  generation_keep_days: 15
+
+ai:
+  async_task_timeout_minutes: 120
 
 log:
   level: "info"  # debug, info, warn, error
@@ -80,6 +85,10 @@ security:
     - "https://your-domain.com"
     - "https://admin.your-domain.com"
 
+  # 可信反向代理。使用 Nginx / Docker 时填代理 IP 或网段，例如 127.0.0.1、172.16.0.0/12。
+  # 不配置时不信任 X-Forwarded-For，限流和审计 IP 会使用直连 IP。
+  trusted_proxies: []
+
   # 上传与请求限制
   max_release_upload_mb: 500    # 发布版本上传上限（MB）
   max_request_body_mb: 1024     # 全局请求体上限（MB）
@@ -97,6 +106,14 @@ security:
   client_access_token_secret: ""          # 留空复用 jwt.secret
   client_access_token_expire_seconds: 900  # 15 分钟
   client_refresh_token_expire_seconds: 2592000 # 30 天
+
+  # API 速率限制（每分钟）
+  # 生产环境按真实用户量调整；反向代理后必须同时配置 trusted_proxies，避免所有客户端共用代理 IP 限流。
+  api_rate_limit: 300
+  auth_rate_limit: 20
+  client_rate_limit: 120
+  client_auth_rate_limit: 30
+  heartbeat_rate_limit: 300
 
 # ============================================
 # 生产环境部署检查清单

@@ -1,17 +1,28 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Table, Button, Space, Modal, Form, Input, InputNumber, message, Tag, App } from 'antd';
+import { Table, Button, Space, Modal, Form, Input, InputNumber, message, Tag, App, Select } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, SettingOutlined, MinusCircleOutlined } from '@ant-design/icons';
 import { appApi } from '../api';
+import { useAuthStore } from '../store';
 
 const Apps: React.FC = () => {
   const { modal } = App.useApp();
+  const { user } = useAuthStore();
   const navigate = useNavigate();
+  const role = user?.role || '';
+  const canCreateOrUpdateApp = ['owner', 'admin', 'developer'].includes(role);
+  const canDeleteApp = ['owner', 'admin'].includes(role);
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<any[]>([]);
   const [modalVisible, setModalVisible] = useState(false);
   const [currentApp, setCurrentApp] = useState<any>(null);
   const [form] = Form.useForm();
+
+  const renderAuthMode = (mode?: string) => {
+    if (mode === 'license') return <Tag color="blue">授权码</Tag>;
+    if (mode === 'subscription') return <Tag color="purple">账号订阅</Tag>;
+    return <Tag color="green">两者都支持</Tag>;
+  };
 
   useEffect(() => {
     fetchData();
@@ -30,12 +41,20 @@ const Apps: React.FC = () => {
   };
 
   const handleCreate = () => {
+    if (!canCreateOrUpdateApp) {
+      return;
+    }
+
     setCurrentApp(null);
     form.resetFields();
     setModalVisible(true);
   };
 
   const handleEdit = (record: any) => {
+    if (!canCreateOrUpdateApp) {
+      return;
+    }
+
     setCurrentApp(record);
     form.setFieldsValue({
       ...record,
@@ -45,6 +64,10 @@ const Apps: React.FC = () => {
   };
 
   const handleDelete = (record: any) => {
+    if (!canDeleteApp) {
+      return;
+    }
+
     modal.confirm({
       title: '确认删除',
       content: `确定要删除应用 "${record.name}" 吗？`,
@@ -61,6 +84,10 @@ const Apps: React.FC = () => {
   };
 
   const handleSubmit = async () => {
+    if (!canCreateOrUpdateApp) {
+      return;
+    }
+
     try {
       const values = await form.validateFields();
       if (currentApp) {
@@ -88,6 +115,7 @@ const Apps: React.FC = () => {
         </Tag>
       ),
     },
+    { title: '授权模式', dataIndex: 'auth_mode', key: 'auth_mode', render: renderAuthMode },
     { title: '默认设备数', dataIndex: 'max_devices_default', key: 'max_devices_default' },
     { title: '心跳间隔', dataIndex: 'heartbeat_interval', key: 'heartbeat_interval', render: (v: number) => `${v}秒` },
     { title: '创建时间', dataIndex: 'created_at', key: 'created_at', render: (v: string) => v?.slice(0, 10) },
@@ -96,8 +124,8 @@ const Apps: React.FC = () => {
       render: (_: any, record: any) => (
         <Space>
           <Button type="primary" size="small" icon={<SettingOutlined />} onClick={() => navigate(`/apps/${record.id}`)}>管理</Button>
-          <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>编辑</Button>
-          <Button type="link" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record)}>删除</Button>
+          {canCreateOrUpdateApp && <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>编辑</Button>}
+          {canDeleteApp && <Button type="link" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record)}>删除</Button>}
         </Space>
       ),
     },
@@ -107,7 +135,7 @@ const Apps: React.FC = () => {
     <div>
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
         <h2 style={{ margin: 0 }}>应用管理</h2>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>创建应用</Button>
+        {canCreateOrUpdateApp && <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>创建应用</Button>}
       </div>
 
       <Table columns={columns} dataSource={data} rowKey="id" loading={loading} />
@@ -126,6 +154,13 @@ const Apps: React.FC = () => {
           </Form.Item>
           <Form.Item name="description" label="描述">
             <Input.TextArea placeholder="请输入描述" rows={3} />
+          </Form.Item>
+          <Form.Item name="auth_mode" label="授权模式" initialValue="both" rules={[{ required: true, message: '请选择授权模式' }]}>
+            <Select>
+              <Select.Option value="both">两者都支持</Select.Option>
+              <Select.Option value="license">仅授权码</Select.Option>
+              <Select.Option value="subscription">仅账号订阅</Select.Option>
+            </Select>
           </Form.Item>
           <Form.Item name="max_devices_default" label="默认设备数" initialValue={1}>
             <InputNumber min={1} style={{ width: '100%' }} />

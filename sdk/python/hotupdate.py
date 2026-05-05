@@ -42,6 +42,7 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Callable, List
 from enum import Enum
+from urllib.parse import urljoin
 
 try:
     import requests
@@ -115,22 +116,11 @@ class HotUpdateManager:
             更新信息字典，如果没有更新返回 None
         """
         try:
-            url = f"{self.client.server_url}/api/client/hotupdate/check"
-            params = {
-                "app_key": self.client.app_key,
-                "version": self.current_version,
-                "machine_id": self.client.machine_id
-            }
-
-            # 使用 client 的 session（支持证书固定）
-            session = getattr(self.client, '_session', None) or requests
-            resp = session.get(url, params=params, timeout=30)
-            result = resp.json()
-
-            if result.get('code') != 0:
-                raise HotUpdateError(result.get('message', '检查更新失败'))
-
-            data = result.get('data', {})
+            data = self.client._request_with_client_auth(
+                'GET',
+                '/hotupdate/check',
+                {'version': self.current_version}
+            ) or {}
 
             with self._lock:
                 self._latest_update = data
@@ -174,50 +164,64 @@ class HotUpdateManager:
             self._notify_callback(HotUpdateStatus.DOWNLOADING, 0)
 
             # 构建下载URL
-            download_url = self.client.server_url + update_info['download_url']
+            download_url = update_info['download_url']
+            if not download_url.startswith(('http://', 'https://')):
+                download_url = urljoin(self.client.server_url, download_url)
 
-            # 使用 client 的 session（支持证书固定）
-            session = getattr(self.client, '_session', None) or requests
+            resp, update_info = self._open_download_response(update_info, download_url)
 
-            # 下载文件
-            resp = session.get(download_url, stream=True, timeout=300)
-            resp.raise_for_status()
+            file_path = ""
+            temp_path = ""
+            try:
+                total_size = int(resp.headers.get('content-length', 0))
 
-            total_size = int(resp.headers.get('content-length', 0))
+                # 创建文件
+                filename = f"update_{update_info.get('from_version', 'unknown')}_to_{update_info['to_version']}.zip"
+                file_path = os.path.join(self.update_dir, filename)
+                temp_path = f"{file_path}.part"
+                try:
+                    os.remove(temp_path)
+                except FileNotFoundError:
+                    pass
 
-            # 创建文件
-            filename = f"update_{update_info.get('from_version', 'unknown')}_to_{update_info['to_version']}.zip"
-            file_path = os.path.join(self.update_dir, filename)
+                downloaded = 0
+                hash_obj = hashlib.sha256()
 
-            downloaded = 0
-            hash_obj = hashlib.sha256()
+                with open(temp_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=32 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                            hash_obj.update(chunk)
+                            downloaded += len(chunk)
 
-            with open(file_path, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=32 * 1024):
-                    if chunk:
-                        f.write(chunk)
-                        hash_obj.update(chunk)
-                        downloaded += len(chunk)
+                            if progress_callback:
+                                progress_callback(downloaded, total_size)
 
-                        if progress_callback:
-                            progress_callback(downloaded, total_size)
-
-                        if total_size > 0:
-                            progress = downloaded / total_size
-                            self._notify_callback(HotUpdateStatus.DOWNLOADING, progress)
+                            if total_size > 0:
+                                progress = downloaded / total_size
+                                self._notify_callback(HotUpdateStatus.DOWNLOADING, progress)
+            except Exception:
+                if temp_path:
+                    self._remove_file_if_exists(temp_path)
+                raise
+            finally:
+                resp.close()
 
             # 验证哈希
             file_hash = hash_obj.hexdigest()
             expected_hash = update_info.get('file_hash', '')
 
             if expected_hash and file_hash != expected_hash:
-                os.remove(file_path)
+                self._remove_file_if_exists(temp_path)
                 error = HotUpdateError("文件校验失败")
-                self._report_status(update_info.get('id'), HotUpdateStatus.FAILED, str(error))
-                self._notify_callback(HotUpdateStatus.FAILED, 0, error)
                 raise error
 
-            self._verify_update_signature(update_info, file_hash, downloaded)
+            try:
+                self._verify_update_signature(update_info, file_hash, downloaded)
+                os.replace(temp_path, file_path)
+            except Exception:
+                self._remove_file_if_exists(temp_path)
+                raise
 
             self._notify_callback(HotUpdateStatus.DOWNLOADING, 1)
             return file_path
@@ -227,10 +231,39 @@ class HotUpdateManager:
             self._report_status(update_info.get('id'), HotUpdateStatus.FAILED, str(error))
             self._notify_callback(HotUpdateStatus.FAILED, 0, error)
             raise error
+        except Exception as e:
+            error = e if isinstance(e, HotUpdateError) else HotUpdateError(f"下载失败: {e}")
+            self._report_status(update_info.get('id'), HotUpdateStatus.FAILED, str(error))
+            self._notify_callback(HotUpdateStatus.FAILED, 0, error)
+            raise error
 
         finally:
             with self._lock:
                 self._is_updating = False
+
+    def _open_download_response(self, update_info: Dict, download_url: str):
+        session = getattr(self.client, '_session', None) or requests
+        resp = session.get(download_url, stream=True, timeout=300)
+        if resp.status_code not in (401, 403):
+            resp.raise_for_status()
+            return resp, update_info
+
+        resp.close()
+        refreshed = self.check_update()
+        if (
+            not refreshed
+            or refreshed.get('id') != update_info.get('id')
+            or not refreshed.get('download_url')
+        ):
+            raise HotUpdateError("下载链接已过期，未找到可用的新链接")
+
+        refreshed_url = refreshed['download_url']
+        if not refreshed_url.startswith(('http://', 'https://')):
+            refreshed_url = urljoin(self.client.server_url, refreshed_url)
+
+        resp = session.get(refreshed_url, stream=True, timeout=300)
+        resp.raise_for_status()
+        return resp, refreshed
 
     def apply_update(
         self,
@@ -283,8 +316,11 @@ class HotUpdateManager:
             self._extract_update(update_file, target_dir)
         except Exception as e:
             # 回滚
-            self._rollback(backup_path, target_dir)
-            error = HotUpdateError(f"解压失败: {e}")
+            try:
+                self._rollback(backup_path, target_dir)
+                error = HotUpdateError(f"解压失败: {e}")
+            except Exception as rollback_error:
+                error = HotUpdateError(f"解压失败: {e}; 回滚也失败: {rollback_error}")
             self._report_status(update_info.get('id'), HotUpdateStatus.FAILED, str(error))
             self._notify_callback(HotUpdateStatus.FAILED, 0, error)
             raise error
@@ -292,8 +328,11 @@ class HotUpdateManager:
         # 执行更新后钩子
         if post_update_hook and not post_update_hook():
             # 回滚
-            self._rollback(backup_path, target_dir)
-            error = HotUpdateError("更新后检查失败，已回滚")
+            try:
+                self._rollback(backup_path, target_dir)
+                error = HotUpdateError("更新后检查失败，已回滚")
+            except Exception as rollback_error:
+                error = HotUpdateError(f"更新后检查失败，回滚也失败: {rollback_error}")
             self._report_status(update_info.get('id'), HotUpdateStatus.ROLLBACK, str(error))
             self._notify_callback(HotUpdateStatus.ROLLBACK, 0, error)
             raise error
@@ -371,21 +410,7 @@ class HotUpdateManager:
     def get_update_history(self) -> List[Dict]:
         """获取更新历史"""
         try:
-            url = f"{self.client.server_url}/api/client/hotupdate/history"
-            params = {
-                "app_key": self.client.app_key,
-                "machine_id": self.client.machine_id
-            }
-
-            # 使用 client 的 session（支持证书固定）
-            session = getattr(self.client, '_session', None) or requests
-            resp = session.get(url, params=params, timeout=30)
-            result = resp.json()
-
-            if result.get('code') != 0:
-                return []
-
-            return result.get('data', [])
+            return self.client._request_with_client_auth('GET', '/hotupdate/history') or []
 
         except:
             return []
@@ -416,23 +441,17 @@ class HotUpdateManager:
             return
 
         try:
-            url = f"{self.client.server_url}/api/client/hotupdate/report"
             data = {
-                "app_key": self.client.app_key,
                 "hot_update_id": hot_update_id,
-                "machine_id": self.client.machine_id,
                 "from_version": self.current_version,
                 "status": status.value
             }
             if error_msg:
                 data["error_message"] = error_msg
 
-            # 使用 client 的 session（支持证书固定）
-            session = getattr(self.client, '_session', None) or requests
-
             # 异步上报
             threading.Thread(
-                target=lambda: session.post(url, json=data, timeout=10),
+                target=lambda: self.client._request_with_client_auth('POST', '/hotupdate/report', data),
                 daemon=True
             ).start()
         except:
@@ -450,6 +469,13 @@ class HotUpdateManager:
                 self.callback(status, progress, error)
             except:
                 pass
+
+    @staticmethod
+    def _remove_file_if_exists(file_path: str):
+        try:
+            os.remove(file_path)
+        except FileNotFoundError:
+            pass
 
     def _verify_update_signature(self, update_info: Dict, file_hash: str, file_size: int):
         file_signature = update_info.get('file_signature', '')
@@ -487,7 +513,7 @@ class HotUpdateManager:
         # 检查是否是 zip 文件
         if zipfile.is_zipfile(zip_file):
             with zipfile.ZipFile(zip_file, 'r') as zf:
-                zf.extractall(target_dir)
+                self._safe_extract_zip(zf, target_dir)
         else:
             # 如果不是 zip，尝试直接复制
             if os.path.isdir(zip_file):
@@ -495,17 +521,54 @@ class HotUpdateManager:
             else:
                 shutil.copy2(zip_file, target_dir)
 
+    def _safe_extract_zip(self, zf: zipfile.ZipFile, target_dir: str):
+        """安全解压 zip，防止路径穿越写出目标目录"""
+        target_root = os.path.abspath(target_dir)
+        target_prefix = target_root + os.sep
+
+        for member in zf.infolist():
+            member_path = os.path.abspath(os.path.join(target_root, member.filename))
+            if member_path != target_root and not member_path.startswith(target_prefix):
+                raise HotUpdateError(f"更新包包含非法路径: {member.filename}")
+
+            zf.extract(member, target_root)
+
     def _rollback(self, backup_path: str, target_dir: str) -> bool:
         """回滚"""
         try:
-            # 删除当前目录内容
-            if os.path.exists(target_dir):
-                shutil.rmtree(target_dir)
+            if not os.path.isdir(backup_path):
+                raise HotUpdateError("备份目录不存在")
 
-            # 从备份恢复
-            shutil.copytree(backup_path, target_dir)
+            parent = os.path.dirname(os.path.abspath(target_dir)) or "."
+            os.makedirs(parent, exist_ok=True)
+
+            restore_path = f"{target_dir}.rollback"
+            failed_path = f"{target_dir}.failed_{int(time.time() * 1000)}"
+            if os.path.exists(restore_path):
+                shutil.rmtree(restore_path)
+            if os.path.exists(failed_path):
+                shutil.rmtree(failed_path)
+            shutil.copytree(backup_path, restore_path)
+
+            target_existed = os.path.exists(target_dir)
+            if target_existed:
+                os.rename(target_dir, failed_path)
+            try:
+                os.rename(restore_path, target_dir)
+            except Exception:
+                if target_existed and os.path.exists(failed_path):
+                    os.rename(failed_path, target_dir)
+                raise
+
+            if target_existed and os.path.exists(failed_path):
+                shutil.rmtree(failed_path)
             return True
         except Exception as e:
+            try:
+                if 'restore_path' in locals() and os.path.exists(restore_path):
+                    shutil.rmtree(restore_path)
+            except:
+                pass
             raise HotUpdateError(f"回滚失败: {e}")
 
     def _clean_old_backups(self, keep: int = 3):

@@ -19,21 +19,30 @@ func NewExportHandler() *ExportHandler {
 
 // ExportLicenses 导出授权数据
 func (h *ExportHandler) ExportLicenses(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	appID := c.Query("app_id")
 	status := c.Query("status")
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
 
-	query := model.DB.Model(&model.License{}).Preload("Application").Where("tenant_id = ?", tenantID)
+	query := scopedLicenseQuery(c).Preload("Application")
 
 	if appID != "" {
-		query = query.Where("app_id = ?", appID)
+		query = query.Where("licenses.app_id = ?", appID)
 	}
 	if status != "" {
-		query = query.Where("status = ?", status)
+		query = query.Where("licenses.status = ?", status)
+	}
+	var ok bool
+	query, ok = applyCreatedAtDateRangeForColumn(c, query, "licenses.created_at", startDate, endDate)
+	if !ok {
+		return
 	}
 
 	var licenses []model.License
-	query.Order("created_at DESC").Find(&licenses)
+	if err := query.Order("licenses.created_at DESC").Find(&licenses).Error; err != nil {
+		response.ServerError(c, "查询授权数据失败")
+		return
+	}
 
 	// 设置响应头
 	filename := fmt.Sprintf("licenses_%s.csv", time.Now().Format("20060102_150405"))
@@ -42,16 +51,19 @@ func (h *ExportHandler) ExportLicenses(c *gin.Context) {
 	c.Header("Content-Transfer-Encoding", "binary")
 
 	// 写入 BOM 以支持 Excel 中文显示
-	c.Writer.Write([]byte{0xEF, 0xBB, 0xBF})
+	if !writeCSVBom(c) {
+		return
+	}
 
 	writer := csv.NewWriter(c.Writer)
-	defer writer.Flush()
 
 	// 写入表头
-	writer.Write([]string{
+	if !writeCSVRow(c, writer, []string{
 		"授权码", "应用名称", "类型", "状态", "有效期(天)", "最大设备数",
 		"激活时间", "到期时间", "创建时间",
-	})
+	}) {
+		return
+	}
 
 	// 写入数据
 	for _, license := range licenses {
@@ -68,7 +80,7 @@ func (h *ExportHandler) ExportLicenses(c *gin.Context) {
 			expireAt = license.ExpireAt.Format("2006-01-02 15:04:05")
 		}
 
-		writer.Write([]string{
+		if !writeCSVRow(c, writer, []string{
 			license.LicenseKey,
 			appName,
 			string(license.Type),
@@ -78,23 +90,35 @@ func (h *ExportHandler) ExportLicenses(c *gin.Context) {
 			activatedAt,
 			expireAt,
 			license.CreatedAt.Format("2006-01-02 15:04:05"),
-		})
+		}) {
+			return
+		}
 	}
+	flushCSV(c, writer)
 }
 
 // ExportDevices 导出设备数据
 func (h *ExportHandler) ExportDevices(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	status := c.Query("status")
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
 
-	query := model.DB.Model(&model.Device{}).Where("tenant_id = ?", tenantID)
+	query := scopedDeviceQuery(c)
 
 	if status != "" {
-		query = query.Where("status = ?", status)
+		query = query.Where("devices.status = ?", status)
+	}
+	var ok bool
+	query, ok = applyCreatedAtDateRangeForColumn(c, query, "devices.created_at", startDate, endDate)
+	if !ok {
+		return
 	}
 
 	var devices []model.Device
-	query.Order("created_at DESC").Find(&devices)
+	if err := query.Order("devices.created_at DESC").Find(&devices).Error; err != nil {
+		response.ServerError(c, "查询设备数据失败")
+		return
+	}
 
 	// 设置响应头
 	filename := fmt.Sprintf("devices_%s.csv", time.Now().Format("20060102_150405"))
@@ -102,16 +126,19 @@ func (h *ExportHandler) ExportDevices(c *gin.Context) {
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 	c.Header("Content-Transfer-Encoding", "binary")
 
-	c.Writer.Write([]byte{0xEF, 0xBB, 0xBF})
+	if !writeCSVBom(c) {
+		return
+	}
 
 	writer := csv.NewWriter(c.Writer)
-	defer writer.Flush()
 
 	// 写入表头
-	writer.Write([]string{
+	if !writeCSVRow(c, writer, []string{
 		"设备名称", "机器码", "主机名", "操作系统", "系统版本",
 		"IP地址", "IP归属地", "状态", "最后心跳", "绑定时间",
-	})
+	}) {
+		return
+	}
 
 	// 写入数据
 	for _, device := range devices {
@@ -121,7 +148,7 @@ func (h *ExportHandler) ExportDevices(c *gin.Context) {
 		}
 		location := device.IPCountry + " " + device.IPCity
 
-		writer.Write([]string{
+		if !writeCSVRow(c, writer, []string{
 			device.DeviceName,
 			device.MachineID,
 			device.Hostname,
@@ -132,23 +159,35 @@ func (h *ExportHandler) ExportDevices(c *gin.Context) {
 			string(device.Status),
 			lastHeartbeat,
 			device.CreatedAt.Format("2006-01-02 15:04:05"),
-		})
+		}) {
+			return
+		}
 	}
+	flushCSV(c, writer)
 }
 
 // ExportCustomers 导出客户数据
 func (h *ExportHandler) ExportCustomers(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	status := c.Query("status")
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
 
-	query := model.DB.Model(&model.Customer{}).Where("tenant_id = ?", tenantID)
+	query := scopedCustomerQuery(c)
 
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
+	var ok bool
+	query, ok = applyCreatedAtDateRangeForColumn(c, query, "customers.created_at", startDate, endDate)
+	if !ok {
+		return
+	}
 
 	var customers []model.Customer
-	query.Order("created_at DESC").Find(&customers)
+	if err := query.Order("customers.created_at DESC").Find(&customers).Error; err != nil {
+		response.ServerError(c, "查询客户数据失败")
+		return
+	}
 
 	// 设置响应头
 	filename := fmt.Sprintf("customers_%s.csv", time.Now().Format("20060102_150405"))
@@ -156,15 +195,18 @@ func (h *ExportHandler) ExportCustomers(c *gin.Context) {
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 	c.Header("Content-Transfer-Encoding", "binary")
 
-	c.Writer.Write([]byte{0xEF, 0xBB, 0xBF})
+	if !writeCSVBom(c) {
+		return
+	}
 
 	writer := csv.NewWriter(c.Writer)
-	defer writer.Flush()
 
 	// 写入表头
-	writer.Write([]string{
+	if !writeCSVRow(c, writer, []string{
 		"姓名", "邮箱", "电话", "公司", "状态", "最后登录", "注册时间",
-	})
+	}) {
+		return
+	}
 
 	// 写入数据
 	for _, customer := range customers {
@@ -173,7 +215,7 @@ func (h *ExportHandler) ExportCustomers(c *gin.Context) {
 			lastLogin = customer.LastLoginAt.Format("2006-01-02 15:04:05")
 		}
 
-		writer.Write([]string{
+		if !writeCSVRow(c, writer, []string{
 			customer.Name,
 			customer.Email,
 			customer.Phone,
@@ -181,27 +223,42 @@ func (h *ExportHandler) ExportCustomers(c *gin.Context) {
 			string(customer.Status),
 			lastLogin,
 			customer.CreatedAt.Format("2006-01-02 15:04:05"),
-		})
+		}) {
+			return
+		}
 	}
+	flushCSV(c, writer)
 }
 
 // ExportAuditLogs 导出审计日志
 func (h *ExportHandler) ExportAuditLogs(c *gin.Context) {
+	if current, ok := c.Get("team_member"); ok {
+		if member, ok := current.(model.TeamMember); !ok || !member.HasPermission("audit:read") {
+			response.Forbidden(c, "没有导出审计日志权限")
+			return
+		}
+	} else {
+		response.Forbidden(c, "没有导出审计日志权限")
+		return
+	}
+
 	tenantID := middleware.GetTenantID(c)
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 
 	query := model.DB.Model(&model.AuditLog{}).Where("tenant_id = ?", tenantID)
 
-	if startDate != "" {
-		query = query.Where("created_at >= ?", startDate+" 00:00:00")
-	}
-	if endDate != "" {
-		query = query.Where("created_at <= ?", endDate+" 23:59:59")
+	var ok bool
+	query, ok = applyCreatedAtDateRangeForColumn(c, query, "created_at", startDate, endDate)
+	if !ok {
+		return
 	}
 
 	var logs []model.AuditLog
-	query.Order("created_at DESC").Limit(10000).Find(&logs)
+	if err := query.Order("created_at DESC").Limit(10000).Find(&logs).Error; err != nil {
+		response.ServerError(c, "查询审计日志失败")
+		return
+	}
 
 	// 设置响应头
 	filename := fmt.Sprintf("audit_logs_%s.csv", time.Now().Format("20060102_150405"))
@@ -209,19 +266,22 @@ func (h *ExportHandler) ExportAuditLogs(c *gin.Context) {
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 	c.Header("Content-Transfer-Encoding", "binary")
 
-	c.Writer.Write([]byte{0xEF, 0xBB, 0xBF})
+	if !writeCSVBom(c) {
+		return
+	}
 
 	writer := csv.NewWriter(c.Writer)
-	defer writer.Flush()
 
 	// 写入表头
-	writer.Write([]string{
+	if !writeCSVRow(c, writer, []string{
 		"时间", "用户邮箱", "操作", "资源", "描述", "IP地址", "状态码", "耗时(ms)",
-	})
+	}) {
+		return
+	}
 
 	// 写入数据
 	for _, log := range logs {
-		writer.Write([]string{
+		if !writeCSVRow(c, writer, []string{
 			log.CreatedAt.Format("2006-01-02 15:04:05"),
 			log.UserEmail,
 			log.Action,
@@ -230,8 +290,11 @@ func (h *ExportHandler) ExportAuditLogs(c *gin.Context) {
 			log.IPAddress,
 			fmt.Sprintf("%d", log.ResponseCode),
 			fmt.Sprintf("%d", log.Duration),
-		})
+		}) {
+			return
+		}
 	}
+	flushCSV(c, writer)
 }
 
 // GetExportFormats 获取支持的导出格式
@@ -247,4 +310,27 @@ func (h *ExportHandler) GetExportFormats(c *gin.Context) {
 			{"key": "audit_logs", "name": "审计日志"},
 		},
 	})
+}
+
+func writeCSVBom(c *gin.Context) bool {
+	if _, err := c.Writer.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		_ = c.Error(err)
+		return false
+	}
+	return true
+}
+
+func writeCSVRow(c *gin.Context, writer *csv.Writer, row []string) bool {
+	if err := writer.Write(row); err != nil {
+		_ = c.Error(err)
+		return false
+	}
+	return true
+}
+
+func flushCSV(c *gin.Context, writer *csv.Writer) {
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		_ = c.Error(err)
+	}
 }

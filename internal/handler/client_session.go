@@ -110,7 +110,8 @@ func (h *ClientHandler) ClientRefresh(c *gin.Context) {
 		return
 	}
 
-	if err := model.DB.First(&model.Application{}, "id = ? AND status = ?", session.AppID, model.AppStatusActive).Error; err != nil {
+	var app model.Application
+	if err := model.DB.First(&app, "id = ? AND status = ?", session.AppID, model.AppStatusActive).Error; err != nil {
 		response.Unauthorized(c, "应用已失效，请重新登录")
 		return
 	}
@@ -125,6 +126,20 @@ func (h *ClientHandler) ClientRefresh(c *gin.Context) {
 			Where("id = ?", session.ID).
 			Update("revoked_at", now).Error
 		response.Unauthorized(c, "设备信息不一致，请重新登录")
+		return
+	}
+	if device.Status == model.DeviceStatusBlacklisted {
+		_ = model.DB.Model(&model.ClientSession{}).
+			Where("id = ?", session.ID).
+			Update("revoked_at", now).Error
+		response.Unauthorized(c, "设备已被禁止使用")
+		return
+	}
+	if err := ensureDeviceNotBlacklistedForApp(session.MachineID, &app); err != nil {
+		_ = model.DB.Model(&model.ClientSession{}).
+			Where("id = ?", session.ID).
+			Update("revoked_at", now).Error
+		response.Unauthorized(c, err.Error())
 		return
 	}
 
@@ -278,8 +293,12 @@ func (h *ClientHandler) UnbindCurrentDevice(c *gin.Context) {
 	}
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ? AND status = ?", appID, model.AppStatusActive).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ? AND status = ?", appID, tenantID, model.AppStatusActive).Error; err != nil {
 		response.Error(c, 400, "无效的应用")
+		return
+	}
+	if !appAllowsClientAuthMode(&app, authMode) {
+		response.Forbidden(c, "该应用未启用当前会话模式")
 		return
 	}
 

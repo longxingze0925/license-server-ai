@@ -21,7 +21,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 )
 
 // ==================== 验证结果分散化 ====================
@@ -29,12 +28,12 @@ import (
 // DistributedValidationResult 分散验证结果
 // 不使用单一 bool，而是使用多个分散的验证点
 type DistributedValidationResult struct {
-	tokens    [4]uint64  // 4个分散的验证令牌
-	timestamp int64      // 验证时间戳
-	nonce     uint64     // 随机数
-	checksum  uint64     // 校验和
-	sequence  uint32     // 序列号
-	valid     [4]uint32  // 分散的有效标志（加密存储）
+	tokens    [4]uint64 // 4个分散的验证令牌
+	timestamp int64     // 验证时间戳
+	nonce     uint64    // 随机数
+	checksum  uint64    // 校验和
+	sequence  uint32    // 序列号
+	valid     [4]uint32 // 分散的有效标志（加密存储）
 }
 
 // HardenedDistributedValidator 强化分散验证器
@@ -318,14 +317,14 @@ type EnhancedAntiDebug struct {
 	detected      int32
 	onDetected    func()
 	stopChan      chan struct{}
-	stopOnce      sync.Once // 防止重复关闭 channel
+	mu            sync.Mutex
+	running       bool
 }
 
 // NewEnhancedAntiDebug 创建增强反调试检测器
 func NewEnhancedAntiDebug() *EnhancedAntiDebug {
 	return &EnhancedAntiDebug{
 		checkInterval: 5 * time.Second,
-		stopChan:      make(chan struct{}),
 	}
 }
 
@@ -430,19 +429,7 @@ func (ead *EnhancedAntiDebug) checkLinuxDebugFlags() bool {
 
 // checkBreakpoints 检测软件断点
 func (ead *EnhancedAntiDebug) checkBreakpoints() bool {
-	// 检查关键函数是否被设置断点（0xCC = INT3）
-	// 获取当前函数的地址
-	pc, _, _, ok := runtime.Caller(0)
-	if !ok {
-		return false
-	}
-
-	// 读取函数入口点
-	ptr := uintptr(pc)
-	firstByte := *(*byte)(unsafe.Pointer(ptr))
-
-	// 0xCC 是 INT3 断点指令
-	return firstByte == 0xCC
+	return detectCurrentFunctionBreakpoint()
 }
 
 // checkParentProcess 检测父进程
@@ -464,10 +451,29 @@ func (ead *EnhancedAntiDebug) checkParentProcess() bool {
 
 // StartContinuousCheck 启动持续检测
 func (ead *EnhancedAntiDebug) StartContinuousCheck(onDetected func()) {
+	ead.mu.Lock()
 	ead.onDetected = onDetected
+	if ead.running {
+		ead.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	interval := ead.checkInterval
+	ead.stopChan = stopCh
+	ead.running = true
+	ead.mu.Unlock()
 
 	go func() {
-		ticker := time.NewTicker(ead.checkInterval)
+		defer func() {
+			ead.mu.Lock()
+			if ead.stopChan == stopCh {
+				ead.running = false
+				ead.stopChan = nil
+			}
+			ead.mu.Unlock()
+		}()
+
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for {
@@ -475,11 +481,14 @@ func (ead *EnhancedAntiDebug) StartContinuousCheck(onDetected func()) {
 			case <-ticker.C:
 				if ead.IsDebuggerPresent() {
 					atomic.StoreInt32(&ead.detected, 1)
-					if ead.onDetected != nil {
-						ead.onDetected()
+					ead.mu.Lock()
+					onDetected := ead.onDetected
+					ead.mu.Unlock()
+					if onDetected != nil {
+						onDetected()
 					}
 				}
-			case <-ead.stopChan:
+			case <-stopCh:
 				return
 			}
 		}
@@ -488,9 +497,14 @@ func (ead *EnhancedAntiDebug) StartContinuousCheck(onDetected func()) {
 
 // Stop 停止检测
 func (ead *EnhancedAntiDebug) Stop() {
-	ead.stopOnce.Do(func() {
-		close(ead.stopChan)
-	})
+	ead.mu.Lock()
+	defer ead.mu.Unlock()
+	if !ead.running || ead.stopChan == nil {
+		return
+	}
+	close(ead.stopChan)
+	ead.running = false
+	ead.stopChan = nil
 }
 
 // WasDetected 是否检测到调试器

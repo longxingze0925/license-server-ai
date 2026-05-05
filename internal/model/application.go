@@ -101,30 +101,30 @@ type Script struct {
 type HotUpdate struct {
 	BaseModel
 	AppID           string          `gorm:"type:varchar(36);not null;index" json:"app_id"`
-	FromVersion     string          `gorm:"type:varchar(20);not null" json:"from_version"`     // 源版本（* 表示任意版本）
-	ToVersion       string          `gorm:"type:varchar(20);not null" json:"to_version"`       // 目标版本
-	VersionCode     int             `gorm:"default:0" json:"version_code"`                     // 版本代码
-	PatchType       HotUpdateType   `gorm:"type:varchar(20);default:full" json:"patch_type"`   // 更新类型
-	UpdateMode      string          `gorm:"type:varchar(20);default:mixed" json:"update_mode"` // 更新模式: exe/script/resource/mixed
-	PatchURL        string          `gorm:"type:varchar(500)" json:"patch_url"`                // 补丁下载地址
-	PatchSize       int64           `json:"patch_size"`                                        // 补丁大小
-	PatchHash       string          `gorm:"type:varchar(64)" json:"patch_hash"`                // 补丁哈希
-	PatchSignature  string          `gorm:"type:text" json:"patch_signature"`                  // 补丁签名
-	FullURL         string          `gorm:"type:varchar(500)" json:"full_url"`                 // 完整包下载地址
-	FullSize        int64           `json:"full_size"`                                         // 完整包大小
-	FullHash        string          `gorm:"type:varchar(64)" json:"full_hash"`                 // 完整包哈希
-	FullSignature   string          `gorm:"type:text" json:"full_signature"`                   // 完整包签名
-	Manifest        string          `gorm:"type:text" json:"manifest"`                         // 更新清单 JSON
-	Changelog       string          `gorm:"type:text" json:"changelog"`                        // 更新日志
-	ForceUpdate     bool            `gorm:"default:false" json:"force_update"`                 // 是否强制更新
-	RestartRequired bool            `gorm:"default:false" json:"restart_required"`             // 是否需要重启
-	MinAppVersion   string          `gorm:"type:varchar(20)" json:"min_app_version"`           // 最低支持版本
-	RolloutPercent  int             `gorm:"default:100" json:"rollout_percentage"`             // 灰度比例
-	Status          HotUpdateStatus `gorm:"type:varchar(20);default:draft" json:"status"`      // 状态
-	PublishedAt     *time.Time      `json:"published_at"`                                      // 发布时间
-	DownloadCount   int64           `gorm:"default:0" json:"download_count"`                   // 下载次数
-	SuccessCount    int64           `gorm:"default:0" json:"success_count"`                    // 成功次数
-	FailCount       int64           `gorm:"default:0" json:"fail_count"`                       // 失败次数
+	FromVersion     string          `gorm:"type:varchar(20);not null" json:"from_version"`                // 源版本（* 表示任意版本）
+	ToVersion       string          `gorm:"type:varchar(20);not null" json:"to_version"`                  // 目标版本
+	VersionCode     int             `gorm:"default:0" json:"version_code"`                                // 版本代码
+	PatchType       HotUpdateType   `gorm:"type:varchar(20);default:full" json:"patch_type"`              // 更新类型
+	UpdateMode      string          `gorm:"type:varchar(20);default:mixed" json:"update_mode"`            // 更新模式: exe/script/resource/mixed
+	PatchURL        string          `gorm:"type:varchar(500)" json:"patch_url"`                           // 补丁下载地址
+	PatchSize       int64           `json:"patch_size"`                                                   // 补丁大小
+	PatchHash       string          `gorm:"type:varchar(64)" json:"patch_hash"`                           // 补丁哈希
+	PatchSignature  string          `gorm:"type:text" json:"patch_signature"`                             // 补丁签名
+	FullURL         string          `gorm:"type:varchar(500)" json:"full_url"`                            // 完整包下载地址
+	FullSize        int64           `json:"full_size"`                                                    // 完整包大小
+	FullHash        string          `gorm:"type:varchar(64)" json:"full_hash"`                            // 完整包哈希
+	FullSignature   string          `gorm:"type:text" json:"full_signature"`                              // 完整包签名
+	Manifest        string          `gorm:"type:text" json:"manifest"`                                    // 更新清单 JSON
+	Changelog       string          `gorm:"type:text" json:"changelog"`                                   // 更新日志
+	ForceUpdate     bool            `gorm:"default:false" json:"force_update"`                            // 是否强制更新
+	RestartRequired bool            `gorm:"default:false" json:"restart_required"`                        // 是否需要重启
+	MinAppVersion   string          `gorm:"type:varchar(20)" json:"min_app_version"`                      // 最低支持版本
+	RolloutPercent  int             `gorm:"column:rollout_percent;default:100" json:"rollout_percentage"` // 灰度比例
+	Status          HotUpdateStatus `gorm:"type:varchar(20);default:draft" json:"status"`                 // 状态
+	PublishedAt     *time.Time      `json:"published_at"`                                                 // 发布时间
+	DownloadCount   int64           `gorm:"default:0" json:"download_count"`                              // 下载次数
+	SuccessCount    int64           `gorm:"default:0" json:"success_count"`                               // 成功次数
+	FailCount       int64           `gorm:"default:0" json:"fail_count"`                                  // 失败次数
 	// 关联
 	Application *Application `gorm:"foreignKey:AppID" json:"application,omitempty"`
 }

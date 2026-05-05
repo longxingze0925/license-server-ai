@@ -103,7 +103,7 @@ type TeamInviteMemberRequest struct {
 // CreateMemberRequest 创建成员请求
 type CreateMemberRequest struct {
 	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=6"`
+	Password string `json:"password" binding:"required"`
 	Name     string `json:"name" binding:"required"`
 	Role     string `json:"role" binding:"required"`
 	Phone    string `json:"phone"`
@@ -117,6 +117,10 @@ func (h *TeamMemberHandler) Create(c *gin.Context) {
 	var req CreateMemberRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+	if err := validatePasswordPolicy(req.Password); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -176,9 +180,9 @@ func (h *TeamMemberHandler) Create(c *gin.Context) {
 
 // UpdateMemberRequest 更新成员请求
 type UpdateMemberRequest struct {
-	Email string `json:"email"`
-	Name  string `json:"name"`
-	Phone string `json:"phone"`
+	Email *string `json:"email" binding:"omitempty,email"`
+	Name  *string `json:"name"`
+	Phone *string `json:"phone"`
 }
 
 // Update 更新成员信息
@@ -213,20 +217,24 @@ func (h *TeamMemberHandler) Update(c *gin.Context) {
 	}
 
 	// 如果修改邮箱，检查是否已存在
-	if req.Email != "" && req.Email != member.Email {
+	if req.Email != nil && *req.Email == "" {
+		response.BadRequest(c, "邮箱不能为空")
+		return
+	}
+	if req.Email != nil && *req.Email != member.Email {
 		var existingMember model.TeamMember
-		if err := model.DB.Where("email = ? AND id != ?", req.Email, memberID).First(&existingMember).Error; err == nil {
+		if err := model.DB.Where("email = ? AND id != ?", *req.Email, memberID).First(&existingMember).Error; err == nil {
 			response.Error(c, 400, "该邮箱已被使用")
 			return
 		}
-		member.Email = req.Email
+		member.Email = *req.Email
 	}
 
-	if req.Name != "" {
-		member.Name = req.Name
+	if req.Name != nil {
+		member.Name = *req.Name
 	}
-	if req.Phone != "" {
-		member.Phone = req.Phone
+	if req.Phone != nil {
+		member.Phone = *req.Phone
 	}
 
 	if err := model.DB.Save(&member).Error; err != nil {
@@ -239,7 +247,7 @@ func (h *TeamMemberHandler) Update(c *gin.Context) {
 
 // ResetPasswordRequest 重置密码请求
 type ResetPasswordRequest struct {
-	Password string `json:"password" binding:"required,min=6"`
+	Password string `json:"password" binding:"required"`
 }
 
 // ResetPassword 重置成员密码
@@ -252,6 +260,10 @@ func (h *TeamMemberHandler) ResetPassword(c *gin.Context) {
 	var req ResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+	if err := validatePasswordPolicy(req.Password); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -502,7 +514,10 @@ func (h *TeamMemberHandler) RevokeInvitation(c *gin.Context) {
 	}
 
 	invitation.Status = model.InviteStatusRevoked
-	model.DB.Save(&invitation)
+	if err := model.DB.Save(&invitation).Error; err != nil {
+		response.ServerError(c, "撤销邀请失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "邀请已撤销", nil)
 }
@@ -526,7 +541,10 @@ func (h *TeamMemberHandler) ResendInvitation(c *gin.Context) {
 	// 更新过期时间和 token
 	invitation.Token = uuid.New().String()
 	invitation.ExpireAt = time.Now().AddDate(0, 0, 7)
-	model.DB.Save(&invitation)
+	if err := model.DB.Save(&invitation).Error; err != nil {
+		response.ServerError(c, "重发邀请失败: "+err.Error())
+		return
+	}
 
 	// TODO: 重新发送邀请邮件
 
@@ -536,7 +554,7 @@ func (h *TeamMemberHandler) ResendInvitation(c *gin.Context) {
 // AcceptInviteRequest 接受邀请请求
 type AcceptInviteRequest struct {
 	Token    string `json:"token" binding:"required"`
-	Password string `json:"password" binding:"required,min=6"`
+	Password string `json:"password" binding:"required"`
 	Name     string `json:"name" binding:"required"`
 }
 
@@ -545,6 +563,10 @@ func (h *TeamMemberHandler) AcceptInvite(c *gin.Context) {
 	var req AcceptInviteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+	if err := validatePasswordPolicy(req.Password); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -561,7 +583,10 @@ func (h *TeamMemberHandler) AcceptInvite(c *gin.Context) {
 
 	if invitation.IsExpired() {
 		invitation.Status = model.InviteStatusExpired
-		model.DB.Save(&invitation)
+		if err := model.DB.Save(&invitation).Error; err != nil {
+			response.ServerError(c, "更新邀请状态失败: "+err.Error())
+			return
+		}
 		response.Error(c, 400, "邀请已过期")
 		return
 	}

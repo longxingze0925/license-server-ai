@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type AuthHandler struct{}
@@ -24,7 +25,7 @@ func NewAuthHandler() *AuthHandler {
 // RegisterRequest 注册请求（创建新租户）
 type RegisterRequest struct {
 	Email      string `json:"email" binding:"required,email"`
-	Password   string `json:"password" binding:"required,min=6"`
+	Password   string `json:"password" binding:"required"`
 	Name       string `json:"name" binding:"required"`
 	TenantName string `json:"tenant_name"` // 可选，默认使用用户名
 }
@@ -40,6 +41,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+	if err := validatePasswordPolicy(req.Password); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -64,44 +69,36 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		slug = slug + "-" + uuid.New().String()[:8]
 	}
 
-	// 开始事务
-	tx := model.DB.Begin()
-
-	// 创建租户
 	tenant := model.Tenant{
 		Name:   tenantName,
 		Slug:   slug,
 		Status: model.TenantStatusActive,
 		Plan:   model.TenantPlanFree,
 	}
-	if err := tx.Create(&tenant).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "创建租户失败")
-		return
-	}
-
-	// 创建团队成员（Owner）
 	member := model.TeamMember{
-		TenantID: tenant.ID,
-		Email:    req.Email,
-		Name:     req.Name,
-		Role:     model.RoleOwner,
-		Status:   model.MemberStatusActive,
+		Email:  req.Email,
+		Name:   req.Name,
+		Role:   model.RoleOwner,
+		Status: model.MemberStatusActive,
 	}
 	if err := member.SetPassword(req.Password); err != nil {
-		tx.Rollback()
 		response.ServerError(c, "密码加密失败")
 		return
 	}
 
-	if err := tx.Create(&member).Error; err != nil {
-		tx.Rollback()
-		response.ServerError(c, "创建用户失败")
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&tenant).Error; err != nil {
+			return err
+		}
+		member.TenantID = tenant.ID
+		if err := tx.Create(&member).Error; err != nil {
+			return err
+		}
+		return service.NewPricingService().EnsureDefaultRulesForTenantTx(tx, tenant.ID)
+	}); err != nil {
+		response.ServerError(c, "注册失败: "+err.Error())
 		return
 	}
-
-	// 提交事务
-	tx.Commit()
 
 	// 生成 Token（包含租户ID）
 	token, err := crypto.GenerateTokenWithTenant(member.ID, tenant.ID, member.Email, string(member.Role), config.Get().JWT.Secret, config.Get().JWT.ExpireHours)
@@ -244,16 +241,16 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 
 	response.Success(c, gin.H{
 		"user": gin.H{
-			"id":               member.ID,
-			"email":            member.Email,
-			"name":             member.Name,
-			"phone":            member.Phone,
-			"avatar":           member.Avatar,
-			"role":             member.Role,
-			"email_verified":   member.EmailVerified,
+			"id":                 member.ID,
+			"email":              member.Email,
+			"name":               member.Name,
+			"phone":              member.Phone,
+			"avatar":             member.Avatar,
+			"role":               member.Role,
+			"email_verified":     member.EmailVerified,
 			"two_factor_enabled": member.TwoFactorEnabled,
-			"created_at":       member.CreatedAt,
-			"last_login_at":    member.LastLoginAt,
+			"created_at":         member.CreatedAt,
+			"last_login_at":      member.LastLoginAt,
 		},
 		"tenant": gin.H{
 			"id":               tenant.ID,
@@ -270,7 +267,7 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 // ChangePasswordRequest 修改密码请求
 type ChangePasswordRequest struct {
 	OldPassword string `json:"old_password" binding:"required"`
-	NewPassword string `json:"new_password" binding:"required,min=6"`
+	NewPassword string `json:"new_password" binding:"required"`
 }
 
 // ChangePassword 修改密码
@@ -280,6 +277,10 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+	if err := validatePasswordPolicy(req.NewPassword); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 

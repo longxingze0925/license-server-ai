@@ -9,7 +9,7 @@
 
 set -e
 
-REPO_URL_DEFAULT="https://github.com/longxingze0925/license-server01.git"
+REPO_URL_DEFAULT="https://github.com/longxingze0925/license-server-ai.git"
 REPO_BRANCH_DEFAULT="main"
 INSTALL_DIR_DEFAULT="/opt/license-server"
 

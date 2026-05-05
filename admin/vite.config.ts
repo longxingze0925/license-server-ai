@@ -7,15 +7,60 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          // 将 React 相关库分离
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          // 将 Ant Design 分离
-          'vendor-antd': ['antd', '@ant-design/icons'],
-          // 将图表库分离
-          'vendor-charts': ['recharts'],
-          // 将工具库分离
-          'vendor-utils': ['axios', 'zustand', 'dayjs'],
+        manualChunks(id) {
+          const normalizedId = id.replace(/\\/g, '/');
+          if (!normalizedId.includes('/node_modules/')) {
+            return;
+          }
+
+          if (normalizedId.includes('/react/') || normalizedId.includes('/react-dom/') || normalizedId.includes('/react-router-dom/')) {
+            return 'vendor-react';
+          }
+          if (normalizedId.includes('/@ant-design/icons/')) {
+            return 'vendor-icons';
+          }
+          if (
+            normalizedId.includes('/recharts/') ||
+            normalizedId.includes('/d3-')
+          ) {
+            return 'vendor-charts';
+          }
+          if (normalizedId.includes('/axios/') || normalizedId.includes('/zustand/') || normalizedId.includes('/dayjs/')) {
+            return 'vendor-utils';
+          }
+          if (
+            normalizedId.includes('/rc-picker/') ||
+            normalizedId.includes('/antd/es/date-picker/') ||
+            normalizedId.includes('/antd/es/calendar/')
+          ) {
+            return 'vendor-antd-date';
+          }
+          if (
+            normalizedId.includes('/rc-table/') ||
+            normalizedId.includes('/rc-pagination/') ||
+            normalizedId.includes('/rc-virtual-list/') ||
+            normalizedId.includes('/antd/es/table/') ||
+            normalizedId.includes('/antd/es/pagination/')
+          ) {
+            return 'vendor-antd-table';
+          }
+          if (
+            normalizedId.includes('/rc-select/') ||
+            normalizedId.includes('/rc-tree/') ||
+            normalizedId.includes('/rc-cascader/') ||
+            normalizedId.includes('/antd/es/select/') ||
+            normalizedId.includes('/antd/es/tree-select/')
+          ) {
+            return 'vendor-antd-select';
+          }
+          if (
+            normalizedId.includes('/antd/') ||
+            normalizedId.includes('/@ant-design/') ||
+            normalizedId.includes('/@rc-component/') ||
+            normalizedId.includes('/rc-')
+          ) {
+            return 'vendor-antd-core';
+          }
         },
       },
     },

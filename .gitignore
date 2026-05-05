@@ -40,6 +40,8 @@ storage/releases/*
 !storage/releases/hotupdate/
 storage/releases/hotupdate/*
 !storage/releases/hotupdate/.gitkeep
+storage/generations/*
+!storage/generations/.gitkeep
 
 # ===== Go 编译产物 =====
 *.exe
@@ -63,6 +65,10 @@ admin/dist/
 admin/.env.local
 admin/.env.production.local
 
+# ===== .NET 构建产物 =====
+sdk/dotnet/**/bin/
+sdk/dotnet/**/obj/
+
 # ===== IDE 和编辑器 =====
 .idea/
 .vscode/
@@ -73,9 +79,12 @@ admin/.env.production.local
 # ===== 临时文件 =====
 tmp/
 temp/
+.codex_tmp_cache/
+**/__pycache__/
 *.tmp
 *.bak
 vendor/
+**/.time_check
 
 # ===== Docker 卷数据 =====
 mysql_data/

@@ -1,7 +1,10 @@
 package model
 
 import (
+	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // License 授权模型
@@ -113,6 +116,16 @@ type LicenseEvent struct {
 	OperatorType string           `gorm:"type:varchar(20);default:system" json:"operator_type"`
 	IPAddress    string           `gorm:"type:varchar(45)" json:"ip_address"`
 	Notes        string           `gorm:"type:text" json:"notes"`
+}
+
+func (e *LicenseEvent) BeforeSave(tx *gorm.DB) error {
+	if strings.TrimSpace(e.FromValue) == "" {
+		e.FromValue = "{}"
+	}
+	if strings.TrimSpace(e.ToValue) == "" {
+		e.ToValue = "{}"
+	}
+	return nil
 }
 
 type LicenseEventType string

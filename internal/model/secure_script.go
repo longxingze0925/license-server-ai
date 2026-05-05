@@ -5,24 +5,24 @@ import "time"
 // SecureScript 安全脚本模型
 type SecureScript struct {
 	BaseModel
-	AppID       string             `gorm:"type:varchar(36);not null;index" json:"app_id"`
-	Name        string             `gorm:"type:varchar(100);not null" json:"name"`
-	Description string             `gorm:"type:text" json:"description"`
-	Version     string             `gorm:"type:varchar(20);not null" json:"version"`
-	ScriptType  SecureScriptType   `gorm:"type:varchar(20);default:python" json:"script_type"` // python/lua/instruction
-	EntryPoint  string             `gorm:"type:varchar(100)" json:"entry_point"`               // 入口函数名
+	AppID       string           `gorm:"type:varchar(36);not null;index" json:"app_id"`
+	Name        string           `gorm:"type:varchar(100);not null" json:"name"`
+	Description string           `gorm:"type:text" json:"description"`
+	Version     string           `gorm:"type:varchar(20);not null" json:"version"`
+	ScriptType  SecureScriptType `gorm:"type:varchar(20);default:python" json:"script_type"` // python/lua/instruction
+	EntryPoint  string           `gorm:"type:varchar(100)" json:"entry_point"`               // 入口函数名
 
 	// 加密存储
-	EncryptedContent []byte `gorm:"type:longblob;not null" json:"-"`        // AES加密后的脚本内容
-	ContentHash      string `gorm:"type:varchar(64);not null" json:"hash"`  // 原始内容SHA256
-	StorageKey       string `gorm:"type:varchar(500);not null" json:"-"`    // 存储密钥(RSA加密)
-	OriginalSize     int64  `json:"original_size"`                          // 原始大小
-	EncryptedSize    int64  `json:"encrypted_size"`                         // 加密后大小
+	EncryptedContent []byte `gorm:"type:longblob;not null" json:"-"`       // AES加密后的脚本内容
+	ContentHash      string `gorm:"type:varchar(64);not null" json:"hash"` // 原始内容SHA256
+	StorageKey       string `gorm:"type:varchar(500);not null" json:"-"`   // 存储密钥(RSA加密)
+	OriginalSize     int64  `json:"original_size"`                         // 原始大小
+	EncryptedSize    int64  `json:"encrypted_size"`                        // 加密后大小
 
 	// 执行配置
-	Timeout     int    `gorm:"default:300" json:"timeout"`       // 执行超时(秒)
-	MemoryLimit int    `gorm:"default:512" json:"memory_limit"`  // 内存限制(MB)
-	Parameters  string `gorm:"type:json" json:"parameters"`      // 参数定义 JSON
+	Timeout     int    `gorm:"default:300" json:"timeout"`      // 执行超时(秒)
+	MemoryLimit int    `gorm:"default:512" json:"memory_limit"` // 内存限制(MB)
+	Parameters  string `gorm:"type:json" json:"parameters"`     // 参数定义 JSON
 
 	// 权限控制
 	RequiredFeatures string `gorm:"type:json" json:"required_features"` // 需要的功能权限 JSON数组
@@ -73,15 +73,15 @@ type ScriptDelivery struct {
 	LicenseID string `gorm:"type:varchar(36);index" json:"license_id"`
 
 	// 下发信息
-	DeliveryKey string    `gorm:"type:varchar(64);not null" json:"-"`  // 本次下发的密钥提示
-	ExpiresAt   time.Time `json:"expires_at"`                          // 本次下发过期时间
+	DeliveryKey string    `gorm:"type:varchar(64);not null" json:"-"` // 本次下发的密钥提示
+	ExpiresAt   time.Time `json:"expires_at"`                         // 本次下发过期时间
 	IPAddress   string    `gorm:"type:varchar(45)" json:"ip_address"`
 
 	// 执行状态
 	Status       ScriptDeliveryStatus `gorm:"type:varchar(20);default:pending" json:"status"`
 	ExecutedAt   *time.Time           `json:"executed_at"`
 	CompletedAt  *time.Time           `json:"completed_at"`
-	Duration     int                  `json:"duration"`       // 执行耗时(毫秒)
+	Duration     int                  `json:"duration"`                // 执行耗时(毫秒)
 	Result       string               `gorm:"type:text" json:"result"` // 执行结果摘要
 	ErrorMessage string               `gorm:"type:text" json:"error_message"`
 
@@ -123,7 +123,7 @@ type RealtimeInstruction struct {
 	Status    InstructionStatus `gorm:"type:varchar(20);default:pending" json:"status"`
 	ExpiresAt time.Time         `json:"expires_at"` // 过期时间
 	SentAt    *time.Time        `json:"sent_at"`
-	AckedAt   *time.Time        `json:"acked_at"`   // 客户端确认时间
+	AckedAt   *time.Time        `json:"acked_at"` // 客户端确认时间
 	Result    string            `gorm:"type:text" json:"result"`
 
 	// 关联
@@ -175,6 +175,24 @@ const (
 
 func (RealtimeInstruction) TableName() string {
 	return "realtime_instructions"
+}
+
+// RealtimeInstructionResult 实时指令按设备执行结果
+type RealtimeInstructionResult struct {
+	BaseModel
+	InstructionID string            `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_instruction_device" json:"instruction_id"`
+	AppID         string            `gorm:"type:varchar(36);not null;index" json:"app_id"`
+	DeviceID      string            `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_instruction_device" json:"device_id"`
+	MachineID     string            `gorm:"type:varchar(128);not null;index" json:"machine_id"`
+	Status        InstructionStatus `gorm:"type:varchar(20);not null" json:"status"`
+	Result        string            `gorm:"type:text" json:"result"`
+	AckedAt       *time.Time        `json:"acked_at"`
+
+	Instruction *RealtimeInstruction `gorm:"foreignKey:InstructionID" json:"instruction,omitempty"`
+}
+
+func (RealtimeInstructionResult) TableName() string {
+	return "realtime_instruction_results"
 }
 
 // DeviceConnection 设备连接状态 (用于 WebSocket)

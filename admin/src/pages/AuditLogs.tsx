@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Table, Form, Select, DatePicker, Button, Tag, Modal, Descriptions, Card, Row, Col, Statistic } from 'antd';
 import { FileTextOutlined } from '@ant-design/icons';
 import { auditApi } from '../api';
@@ -16,12 +16,7 @@ const AuditLogs: React.FC = () => {
   const [filters, setFilters] = useState<any>();
   const [stats, setStats] = useState<any>(null);
 
-  useEffect(() => {
-    fetchData();
-    fetchStats();
-  }, []);
-
-  const fetchData = async (page = 1, pageSize = 20, filterParams = filters) => {
+  const fetchData = useCallback(async (page = 1, pageSize = 20, filterParams: any = {}) => {
     setLoading(true);
     try {
       const res: any = await auditApi.list({ page, page_size: pageSize, ...filterParams });
@@ -35,16 +30,21 @@ const AuditLogs: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const res: any = await auditApi.getStats({ days: 7 });
       setStats(res);
     } catch (error) {
       console.error(error);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+    fetchStats();
+  }, [fetchData, fetchStats]);
 
   const handleView = (record: any) => {
     setCurrentLog(record);
@@ -52,7 +52,7 @@ const AuditLogs: React.FC = () => {
   };
 
   const handleTableChange = (pag: any) => {
-    fetchData(pag.current, pag.pageSize);
+    fetchData(pag.current, pag.pageSize, filters);
   };
 
   const handleSearch = (values: any) => {
@@ -90,6 +90,12 @@ const AuditLogs: React.FC = () => {
       organization: '组织',
       script: '脚本',
       release: '版本',
+      hotupdate: '热更新',
+      publish_task: '发布任务',
+      provider_credential: 'Provider 凭证',
+      pricing_rule: '计价规则',
+      credit: '额度',
+      instruction: '实时指令',
     };
     return resourceMap[resource] || resource;
   };

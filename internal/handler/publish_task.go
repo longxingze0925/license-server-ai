@@ -6,6 +6,7 @@ import (
 	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
+	"log"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -321,30 +322,36 @@ func (h *PublishTaskHandler) markTaskRunning(taskID string, progress int, messag
 		"message":    message,
 		"started_at": &now,
 	}
-	model.DB.Model(&model.PublishTask{}).Where("id = ?", taskID).Updates(updates)
+	if err := model.DB.Model(&model.PublishTask{}).Where("id = ?", taskID).Updates(updates).Error; err != nil {
+		log.Printf("更新发布任务运行状态失败: task=%s err=%v", taskID, err)
+	}
 }
 
 func (h *PublishTaskHandler) markTaskFailed(taskID, errMsg string) {
 	now := time.Now()
-	model.DB.Model(&model.PublishTask{}).Where("id = ?", taskID).Updates(map[string]interface{}{
+	if err := model.DB.Model(&model.PublishTask{}).Where("id = ?", taskID).Updates(map[string]interface{}{
 		"status":        model.PublishTaskStatusFailed,
 		"progress":      100,
 		"message":       "执行失败",
 		"error_message": errMsg,
 		"finished_at":   &now,
-	})
+	}).Error; err != nil {
+		log.Printf("更新发布任务失败状态失败: task=%s err=%v", taskID, err)
+	}
 }
 
 func (h *PublishTaskHandler) markTaskSuccess(taskID, message string, result map[string]interface{}) {
 	resultJSON, _ := json.Marshal(result)
 	now := time.Now()
-	model.DB.Model(&model.PublishTask{}).Where("id = ?", taskID).Updates(map[string]interface{}{
+	if err := model.DB.Model(&model.PublishTask{}).Where("id = ?", taskID).Updates(map[string]interface{}{
 		"status":      model.PublishTaskStatusSuccess,
 		"progress":    100,
 		"message":     message,
 		"result_json": string(resultJSON),
 		"finished_at": &now,
-	})
+	}).Error; err != nil {
+		log.Printf("更新发布任务成功状态失败: task=%s err=%v", taskID, err)
+	}
 }
 
 func (h *PublishTaskHandler) writeTaskAuditLog(
@@ -383,7 +390,7 @@ func (h *PublishTaskHandler) writeTaskAuditLog(
 	}
 	payloadJSON, _ := json.Marshal(payload)
 
-	log := model.AuditLog{
+	auditLog := model.AuditLog{
 		TenantID:     task.TenantID,
 		UserID:       task.RequestedBy,
 		UserEmail:    task.RequestedEmail,
@@ -396,7 +403,9 @@ func (h *PublishTaskHandler) writeTaskAuditLog(
 		RequestBody:  string(payloadJSON),
 		ResponseCode: responseCode,
 	}
-	model.DB.Create(&log)
+	if err := model.DB.Create(&auditLog).Error; err != nil {
+		log.Printf("写入发布任务审计日志失败: task=%s err=%v", task.ID, err)
+	}
 }
 
 func displayAuditResource(resource string) string {

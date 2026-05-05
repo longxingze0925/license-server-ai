@@ -9,6 +9,21 @@ import (
 	"time"
 )
 
+func requireAvailableSecureScript(t *testing.T, client *Client) (*SecureScriptManager, string) {
+	t.Helper()
+	scriptManager := NewSecureScriptManager(client,
+		WithAppSecret("test_app_secret"),
+	)
+	versions, err := scriptManager.GetScriptVersions()
+	if err != nil {
+		t.Fatalf("获取脚本版本列表失败: %v", err)
+	}
+	if len(versions) == 0 {
+		t.Skip("当前测试环境没有已发布的安全脚本，跳过需要真实脚本的集成测试")
+	}
+	return scriptManager, versions[0].ScriptID
+}
+
 // TestIntegration_SecureScript_GetVersions 测试获取脚本版本列表
 func TestIntegration_SecureScript_GetVersions(t *testing.T) {
 	requireIntegrationServer(t)
@@ -38,13 +53,12 @@ func TestIntegration_SecureScript_GetVersions(t *testing.T) {
 	fmt.Println("\n获取脚本版本列表...")
 	versions, err := scriptManager.GetScriptVersions()
 	if err != nil {
-		fmt.Printf("获取版本列表结果: %v\n", err)
-	} else {
-		fmt.Printf("脚本版本数: %d\n", len(versions))
-		for _, v := range versions {
-			fmt.Printf("  脚本ID: %s, 名称: %s, 版本: %s\n",
-				v.ScriptID, v.Name, v.Version)
-		}
+		t.Fatalf("获取版本列表失败: %v", err)
+	}
+	fmt.Printf("脚本版本数: %d\n", len(versions))
+	for _, v := range versions {
+		fmt.Printf("  脚本ID: %s, 名称: %s, 版本: %s\n",
+			v.ScriptID, v.Name, v.Version)
 	}
 
 	fmt.Println("\n安全脚本 - 获取版本列表测试通过!")
@@ -69,26 +83,20 @@ func TestIntegration_SecureScript_FetchScript(t *testing.T) {
 		t.Fatalf("登录失败: %v", err)
 	}
 
-	// 创建安全脚本管理器
-	scriptManager := NewSecureScriptManager(client,
-		WithAppSecret("test_app_secret"),
-	)
+	scriptManager, testScriptID := requireAvailableSecureScript(t, client)
 
-	// 尝试获取脚本
-	testScriptID := "test_script_001"
 	fmt.Printf("\n获取脚本 %s...\n", testScriptID)
 	script, err := scriptManager.FetchScript(testScriptID)
 	if err != nil {
-		fmt.Printf("获取脚本结果: %v\n", err)
-	} else {
-		fmt.Printf("获取成功!\n")
-		fmt.Printf("  脚本ID: %s\n", script.ScriptID)
-		fmt.Printf("  版本: %s\n", script.Version)
-		fmt.Printf("  内容长度: %d 字节\n", len(script.Content))
-		fmt.Printf("  内容哈希: %s\n", script.ContentHash)
-		fmt.Printf("  获取时间: %s\n", script.FetchedAt.Format(time.RFC3339))
-		fmt.Printf("  过期时间: %s\n", script.ExpiresAt.Format(time.RFC3339))
+		t.Fatalf("获取脚本失败: %v", err)
 	}
+	fmt.Printf("获取成功!\n")
+	fmt.Printf("  脚本ID: %s\n", script.ScriptID)
+	fmt.Printf("  版本: %s\n", script.Version)
+	fmt.Printf("  内容长度: %d 字节\n", len(script.Content))
+	fmt.Printf("  内容哈希: %s\n", script.ContentHash)
+	fmt.Printf("  获取时间: %s\n", script.FetchedAt.Format(time.RFC3339))
+	fmt.Printf("  过期时间: %s\n", script.ExpiresAt.Format(time.RFC3339))
 
 	fmt.Println("\n安全脚本 - 获取加密脚本测试通过!")
 }
@@ -111,12 +119,7 @@ func TestIntegration_SecureScript_CacheManagement(t *testing.T) {
 		t.Fatalf("登录失败: %v", err)
 	}
 
-	// 创建安全脚本管理器
-	scriptManager := NewSecureScriptManager(client,
-		WithAppSecret("test_app_secret"),
-	)
-
-	testScriptID := "test_cache_script"
+	scriptManager, testScriptID := requireAvailableSecureScript(t, client)
 
 	// 检查缓存（应该为空）
 	fmt.Println("\n检查初始缓存状态...")
@@ -124,31 +127,34 @@ func TestIntegration_SecureScript_CacheManagement(t *testing.T) {
 	if cached == nil {
 		fmt.Println("缓存为空 (预期)")
 	} else {
-		fmt.Printf("意外发现缓存: %s\n", cached.ScriptID)
+		t.Fatalf("初始缓存应该为空，实际发现: %s", cached.ScriptID)
 	}
 
 	// 尝试获取脚本（会缓存）
 	fmt.Printf("\n尝试获取脚本 %s...\n", testScriptID)
 	script, err := scriptManager.FetchScript(testScriptID)
 	if err != nil {
-		fmt.Printf("获取脚本失败: %v (这可能是预期的，因为脚本不存在)\n", err)
-	} else {
-		// 再次检查缓存
-		fmt.Println("\n再次检查缓存...")
-		cached = scriptManager.GetCachedScript(testScriptID)
-		if cached != nil {
-			fmt.Printf("缓存命中! 脚本ID: %s, 版本: %s\n", cached.ScriptID, cached.Version)
-		}
-
-		// 验证从缓存获取
-		fmt.Println("\n验证从缓存获取...")
-		script2, err := scriptManager.FetchScript(testScriptID)
-		if err != nil {
-			fmt.Printf("从缓存获取失败: %v\n", err)
-		} else if script2.ScriptID == script.ScriptID {
-			fmt.Println("从缓存获取成功!")
-		}
+		t.Fatalf("获取脚本失败: %v", err)
 	}
+
+	// 再次检查缓存
+	fmt.Println("\n再次检查缓存...")
+	cached = scriptManager.GetCachedScript(testScriptID)
+	if cached == nil {
+		t.Fatalf("脚本获取成功后缓存仍为空: %s", testScriptID)
+	}
+	fmt.Printf("缓存命中! 脚本ID: %s, 版本: %s\n", cached.ScriptID, cached.Version)
+
+	// 验证从缓存获取
+	fmt.Println("\n验证从缓存获取...")
+	script2, err := scriptManager.FetchScript(testScriptID)
+	if err != nil {
+		t.Fatalf("从缓存获取失败: %v", err)
+	}
+	if script2.ScriptID != script.ScriptID {
+		t.Fatalf("缓存脚本ID不匹配: 期望 %s 实际 %s", script.ScriptID, script2.ScriptID)
+	}
+	fmt.Println("从缓存获取成功!")
 
 	// 清除缓存
 	fmt.Println("\n清除缓存...")
@@ -182,6 +188,7 @@ func TestIntegration_SecureScript_ExecuteCallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("登录失败: %v", err)
 	}
+	_, testScriptID := requireAvailableSecureScript(t, client)
 
 	// 回调计数
 	callbackCount := 0
@@ -201,7 +208,6 @@ func TestIntegration_SecureScript_ExecuteCallback(t *testing.T) {
 	)
 
 	// 尝试执行脚本
-	testScriptID := "test_callback_script"
 	fmt.Printf("\n尝试执行脚本 %s...\n", testScriptID)
 
 	// 定义一个简单的执行器
@@ -212,15 +218,20 @@ func TestIntegration_SecureScript_ExecuteCallback(t *testing.T) {
 
 	result, err := scriptManager.ExecuteScript(testScriptID, map[string]interface{}{"test": true}, executor)
 	if err != nil {
-		fmt.Printf("执行结果: 错误=%v\n", err)
-	} else {
-		fmt.Printf("执行结果: %s\n", result)
+		t.Fatalf("执行脚本失败: %v", err)
 	}
+	fmt.Printf("执行结果: %s\n", result)
 
 	fmt.Printf("\n回调统计:\n")
 	fmt.Printf("  总回调次数: %d\n", callbackCount)
 	fmt.Printf("  最后状态: %s\n", lastStatus)
 	fmt.Printf("  最后错误: %v\n", lastError)
+	if callbackCount == 0 {
+		t.Fatal("执行回调未触发")
+	}
+	if lastStatus != "success" || lastError != nil {
+		t.Fatalf("执行回调状态异常: status=%s err=%v", lastStatus, lastError)
+	}
 
 	fmt.Println("\n安全脚本 - 执行回调测试通过!")
 }
@@ -243,14 +254,9 @@ func TestIntegration_SecureScript_ExecuteWithMockScript(t *testing.T) {
 		t.Fatalf("登录失败: %v", err)
 	}
 
-	// 创建安全脚本管理器
-	scriptManager := NewSecureScriptManager(client,
-		WithAppSecret("test_app_secret"),
-	)
+	scriptManager, testScriptID := requireAvailableSecureScript(t, client)
 
 	// 尝试执行脚本（使用不同的执行器）
-	testScriptID := "mock_script"
-
 	// 执行器1: 返回成功
 	fmt.Println("\n测试成功执行器...")
 	successExecutor := func(content []byte, args map[string]interface{}) (string, error) {
@@ -259,10 +265,9 @@ func TestIntegration_SecureScript_ExecuteWithMockScript(t *testing.T) {
 
 	result, err := scriptManager.ExecuteScript(testScriptID, nil, successExecutor)
 	if err != nil {
-		fmt.Printf("执行结果: 错误=%v\n", err)
-	} else {
-		fmt.Printf("执行结果: %s\n", result)
+		t.Fatalf("成功执行器执行失败: %v", err)
 	}
+	fmt.Printf("执行结果: %s\n", result)
 
 	// 执行器2: 返回错误
 	fmt.Println("\n测试失败执行器...")
@@ -274,7 +279,7 @@ func TestIntegration_SecureScript_ExecuteWithMockScript(t *testing.T) {
 	if err != nil {
 		fmt.Printf("执行结果: 错误=%v (预期)\n", err)
 	} else {
-		fmt.Printf("执行结果: %s\n", result)
+		t.Fatalf("失败执行器应该返回错误，实际结果: %s", result)
 	}
 
 	fmt.Println("\n安全脚本 - 模拟脚本执行测试通过!")
@@ -366,12 +371,11 @@ func TestIntegration_SecureScript_FullWorkflow(t *testing.T) {
 	fmt.Println("\n--- 步骤3: 获取可用脚本列表 ---")
 	versions, err := scriptManager.GetScriptVersions()
 	if err != nil {
-		fmt.Printf("获取脚本列表失败: %v\n", err)
-	} else {
-		fmt.Printf("可用脚本数: %d\n", len(versions))
-		for _, v := range versions {
-			fmt.Printf("  - %s (v%s)\n", v.Name, v.Version)
-		}
+		t.Fatalf("获取脚本列表失败: %v", err)
+	}
+	fmt.Printf("可用脚本数: %d\n", len(versions))
+	for _, v := range versions {
+		fmt.Printf("  - %s (v%s)\n", v.Name, v.Version)
 	}
 
 	// 步骤4: 尝试获取和执行脚本
@@ -383,7 +387,7 @@ func TestIntegration_SecureScript_FullWorkflow(t *testing.T) {
 		// 获取脚本
 		script, err := scriptManager.FetchScript(scriptID)
 		if err != nil {
-			fmt.Printf("获取脚本失败: %v\n", err)
+			t.Fatalf("获取脚本失败: %v", err)
 		} else {
 			fmt.Printf("获取成功! 版本: %s\n", script.Version)
 
@@ -394,7 +398,7 @@ func TestIntegration_SecureScript_FullWorkflow(t *testing.T) {
 					return fmt.Sprintf("执行完成，处理了 %d 字节", len(content)), nil
 				})
 			if err != nil {
-				fmt.Printf("执行失败: %v\n", err)
+				t.Fatalf("执行失败: %v", err)
 			} else {
 				fmt.Printf("执行结果: %s\n", result)
 			}
@@ -407,6 +411,8 @@ func TestIntegration_SecureScript_FullWorkflow(t *testing.T) {
 		_, err := scriptManager.FetchScript(testScriptID)
 		if err != nil {
 			fmt.Printf("预期的错误: %v\n", err)
+		} else {
+			t.Fatalf("获取不存在的脚本应该失败: %s", testScriptID)
 		}
 	}
 
@@ -451,14 +457,17 @@ func TestIntegration_SecureScript_ConcurrentAccess(t *testing.T) {
 	// 并发获取脚本版本
 	fmt.Println("\n并发获取脚本版本...")
 	done := make(chan bool, 5)
+	errCh := make(chan error, 5)
 
 	for i := 0; i < 5; i++ {
 		go func(id int) {
 			_, err := scriptManager.GetScriptVersions()
 			if err != nil {
 				fmt.Printf("  协程 %d: 错误 - %v\n", id, err)
+				errCh <- err
 			} else {
 				fmt.Printf("  协程 %d: 成功\n", id)
+				errCh <- nil
 			}
 			done <- true
 		}(i)
@@ -467,6 +476,9 @@ func TestIntegration_SecureScript_ConcurrentAccess(t *testing.T) {
 	// 等待所有协程完成
 	for i := 0; i < 5; i++ {
 		<-done
+		if err := <-errCh; err != nil {
+			t.Fatalf("并发获取脚本版本失败: %v", err)
+		}
 	}
 
 	// 并发缓存操作
@@ -520,6 +532,8 @@ func TestIntegration_SecureScript_ErrorHandling(t *testing.T) {
 	_, err = managerNoSecret.FetchScript("test_script")
 	if err != nil {
 		fmt.Printf("预期的错误: %v\n", err)
+	} else {
+		t.Fatal("未设置 AppSecret 获取脚本应该失败")
 	}
 
 	// 测试2: 获取不存在的脚本
@@ -530,6 +544,8 @@ func TestIntegration_SecureScript_ErrorHandling(t *testing.T) {
 	_, err = managerWithSecret.FetchScript("non_existent_script_12345")
 	if err != nil {
 		fmt.Printf("预期的错误: %v\n", err)
+	} else {
+		t.Fatal("获取不存在的脚本应该失败")
 	}
 
 	// 测试3: 执行不存在的脚本
@@ -540,6 +556,8 @@ func TestIntegration_SecureScript_ErrorHandling(t *testing.T) {
 		})
 	if err != nil {
 		fmt.Printf("预期的错误: %v\n", err)
+	} else {
+		t.Fatal("执行不存在的脚本应该失败")
 	}
 
 	// 测试4: 获取空脚本ID的缓存

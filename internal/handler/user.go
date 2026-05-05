@@ -18,7 +18,7 @@ func NewUserHandler() *UserHandler {
 // CreateUserRequest 创建用户请求
 type CreateUserRequest struct {
 	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=6"`
+	Password string `json:"password" binding:"required"`
 	Name     string `json:"name" binding:"required"`
 	Role     string `json:"role"`
 }
@@ -28,6 +28,10 @@ func (h *UserHandler) Create(c *gin.Context) {
 	var req CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+	if err := validatePasswordPolicy(req.Password); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -200,7 +204,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 
 // UserResetPasswordRequest 重置用户密码请求
 type UserResetPasswordRequest struct {
-	NewPassword string `json:"new_password" binding:"required,min=6"`
+	NewPassword string `json:"new_password" binding:"required"`
 }
 
 // ResetPassword 重置用户密码
@@ -210,6 +214,10 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 	var req UserResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+	if err := validatePasswordPolicy(req.NewPassword); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -246,14 +254,20 @@ func (h *UserHandler) Delete(c *gin.Context) {
 
 	// 检查是否有关联数据
 	var licenseCount int64
-	model.DB.Model(&model.License{}).Where("user_id = ?", id).Count(&licenseCount)
+	if err := model.DB.Model(&model.License{}).Where("user_id = ?", id).Count(&licenseCount).Error; err != nil {
+		response.ServerError(c, "检查用户关联授权失败: "+err.Error())
+		return
+	}
 	if licenseCount > 0 {
 		response.Error(c, 400, "用户有关联的授权，无法删除")
 		return
 	}
 
 	// 删除用户的组织关联
-	model.DB.Where("user_id = ?", id).Delete(&model.OrganizationUser{})
+	if err := model.DB.Where("user_id = ?", id).Delete(&model.OrganizationUser{}).Error; err != nil {
+		response.ServerError(c, "删除用户组织关联失败: "+err.Error())
+		return
+	}
 
 	// 删除用户
 	if err := model.DB.Delete(&user).Error; err != nil {

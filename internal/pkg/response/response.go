@@ -2,6 +2,7 @@ package response
 
 import (
 	"net/http"
+	"reflect"
 
 	"github.com/gin-gonic/gin"
 )
@@ -26,7 +27,7 @@ func Success(c *gin.Context, data interface{}) {
 	c.JSON(http.StatusOK, Response{
 		Code:    0,
 		Message: "success",
-		Data:    data,
+		Data:    normalizeJSONValue(data),
 	})
 }
 
@@ -35,7 +36,7 @@ func SuccessWithMessage(c *gin.Context, message string, data interface{}) {
 	c.JSON(http.StatusOK, Response{
 		Code:    0,
 		Message: message,
-		Data:    data,
+		Data:    normalizeJSONValue(data),
 	})
 }
 
@@ -45,7 +46,7 @@ func SuccessPage(c *gin.Context, list interface{}, total int64, page, pageSize i
 		Code:    0,
 		Message: "success",
 		Data: PageData{
-			List:     list,
+			List:     normalizeJSONValue(list),
 			Total:    total,
 			Page:     page,
 			PageSize: pageSize,
@@ -53,12 +54,86 @@ func SuccessPage(c *gin.Context, list interface{}, total int64, page, pageSize i
 	})
 }
 
+func normalizeJSONValue(value interface{}) interface{} {
+	if value == nil {
+		return nil
+	}
+	normalized := normalizeJSONReflect(reflect.ValueOf(value))
+	if !normalized.IsValid() {
+		return nil
+	}
+	return normalized.Interface()
+}
+
+func normalizeJSONReflect(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+
+	if value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return value
+		}
+		return normalizeJSONReflect(value.Elem())
+	}
+
+	switch value.Kind() {
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.MakeSlice(value.Type(), 0, 0)
+		}
+		out := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(normalizeAssignableValue(normalizeJSONReflect(value.Index(i)), value.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(normalizeAssignableValue(normalizeJSONReflect(value.Index(i)), value.Index(i)))
+		}
+		return out
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.MakeMap(value.Type())
+		}
+		out := reflect.MakeMapWithSize(value.Type(), value.Len())
+		for _, key := range value.MapKeys() {
+			item := value.MapIndex(key)
+			out.SetMapIndex(key, normalizeAssignableValue(normalizeJSONReflect(item), item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func normalizeAssignableValue(value reflect.Value, fallback reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return reflect.Zero(fallback.Type())
+	}
+	if value.Type().AssignableTo(fallback.Type()) {
+		return value
+	}
+	if value.Type().ConvertibleTo(fallback.Type()) {
+		return value.Convert(fallback.Type())
+	}
+	return fallback
+}
+
 // Error 错误响应
 func Error(c *gin.Context, code int, message string) {
-	c.JSON(http.StatusOK, Response{
+	c.JSON(httpStatusFromCode(code), Response{
 		Code:    code,
 		Message: message,
 	})
+}
+
+func httpStatusFromCode(code int) int {
+	if code >= 100 && code <= 599 {
+		return code
+	}
+	return http.StatusInternalServerError
 }
 
 // BadRequest 参数错误

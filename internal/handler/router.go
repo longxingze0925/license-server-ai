@@ -3,13 +3,14 @@ package handler
 import (
 	"license-server/internal/config"
 	"license-server/internal/middleware"
+	"license-server/internal/service"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 // SetupRouter 设置路由
-func SetupRouter(r *gin.Engine) {
+func SetupRouter(r *gin.Engine, asyncRunner *service.AsyncRunnerService) {
 	cfg := config.Get()
 
 	// 全局中间件
@@ -26,11 +27,11 @@ func SetupRouter(r *gin.Engine) {
 	}
 
 	// 速率限制器
-	limiter := middleware.NewRateLimiter(100, time.Minute)          // 普通接口：每分钟100次
-	authLimiter := middleware.NewRateLimiter(10, time.Minute)       // 认证接口：每分钟10次
-	clientLimiter := middleware.NewRateLimiter(30, time.Minute)     // 客户端接口：每分钟30次
-	clientAuthLimiter := middleware.NewRateLimiter(5, time.Minute)  // 客户端认证：每分钟5次
-	heartbeatLimiter := middleware.NewRateLimiter(120, time.Minute) // 心跳接口：每分钟120次
+	limiter := middleware.NewRateLimiter(cfg.Security.APIRateLimit, time.Minute)                  // 普通接口
+	authLimiter := middleware.NewRateLimiter(cfg.Security.AuthRateLimit, time.Minute)             // 认证接口
+	clientLimiter := middleware.NewRateLimiter(cfg.Security.ClientRateLimit, time.Minute)         // 客户端接口
+	clientAuthLimiter := middleware.NewRateLimiter(cfg.Security.ClientAuthRateLimit, time.Minute) // 客户端认证
+	heartbeatLimiter := middleware.NewRateLimiter(cfg.Security.HeartbeatRateLimit, time.Minute)   // 心跳接口
 
 	// 健康检查
 	r.GET("/health", func(c *gin.Context) {
@@ -66,6 +67,9 @@ func SetupRouter(r *gin.Engine) {
 	wsHandler := NewWebSocketHandler()
 	dataSyncHandler := NewDataSyncHandler()
 	clientSyncHandler := NewClientSyncHandler()
+	if asyncRunner != nil {
+		asyncRunner.SetTaskStatusNotifier(GetHub())
+	}
 
 	// ==================== 公开接口 ====================
 	// 用户认证（更严格的速率限制）
@@ -101,6 +105,7 @@ func SetupRouter(r *gin.Engine) {
 		clientProtected.Use(middleware.ClientAuthMiddleware())
 		{
 			clientProtected.POST("/auth/logout", clientHandler.ClientLogout)
+			clientProtected.PUT("/auth/password", clientHandler.ClientChangePassword)
 			clientProtected.DELETE("/devices/self", clientHandler.UnbindCurrentDevice)
 		}
 
@@ -113,36 +118,38 @@ func SetupRouter(r *gin.Engine) {
 		}
 
 		// 脚本相关
-		client.GET("/scripts/version", clientHandler.GetScriptVersion)
-		client.GET("/scripts/:filename", clientHandler.DownloadScript)
+		client.GET("/scripts/version", middleware.ClientAuthMiddleware(), clientHandler.GetScriptVersion)
+		client.GET("/scripts/:filename", middleware.ClientAuthMiddleware(), clientHandler.DownloadScript)
 
 		// 版本更新
-		client.GET("/releases/latest", clientHandler.GetLatestRelease)
+		client.GET("/releases/latest", middleware.ClientAuthMiddleware(), clientHandler.GetLatestRelease)
 		client.GET("/releases/download/:filename", releaseHandler.DownloadRelease)
 
 		// 热更新
-		client.GET("/hotupdate/check", hotUpdateHandler.CheckUpdate)
+		client.GET("/hotupdate/check", middleware.ClientAuthMiddleware(), hotUpdateHandler.CheckUpdate)
 		client.GET("/hotupdate/download/:filename", hotUpdateHandler.DownloadUpdate)
-		client.POST("/hotupdate/report", hotUpdateHandler.ReportUpdateStatus)
-		client.GET("/hotupdate/history", hotUpdateHandler.GetUpdateHistory)
+		client.POST("/hotupdate/report", middleware.ClientAuthMiddleware(), hotUpdateHandler.ReportUpdateStatus)
+		client.GET("/hotupdate/history", middleware.ClientAuthMiddleware(), hotUpdateHandler.GetUpdateHistory)
 
 		// 安全脚本
-		client.GET("/secure-scripts/versions", secureScriptHandler.ClientGetVersions)
-		client.POST("/secure-scripts/fetch", secureScriptHandler.ClientFetchScript)
-		client.POST("/secure-scripts/report", secureScriptHandler.ClientReportExecution)
+		client.GET("/secure-scripts/versions", middleware.ClientAuthMiddleware(), secureScriptHandler.ClientGetVersions)
+		client.POST("/secure-scripts/fetch", middleware.ClientAuthMiddleware(), secureScriptHandler.ClientFetchScript)
+		client.POST("/secure-scripts/report", middleware.ClientAuthMiddleware(), secureScriptHandler.ClientReportExecution)
 
 		// 客户端数据备份同步
 		clientBackup := client.Group("/backup")
+		clientBackup.Use(middleware.ClientAuthMiddleware())
 		{
 			clientBackup.POST("/push", clientSyncHandler.Push)
 			clientBackup.GET("/pull", clientSyncHandler.Pull)
 		}
 
 		// WebSocket 连接
-		client.GET("/ws", wsHandler.HandleWebSocket)
+		client.GET("/ws", middleware.ClientAuthMiddleware(), wsHandler.HandleWebSocket)
 
 		// 数据同步 API
 		sync := client.Group("/sync")
+		sync.Use(middleware.ClientAuthMiddleware())
 		{
 			// 核心同步接口
 			sync.GET("/changes", dataSyncHandler.GetChanges)
@@ -188,15 +195,17 @@ func SetupRouter(r *gin.Engine) {
 	authenticated := api.Group("")
 	authenticated.Use(middleware.AuthMiddleware())
 	authenticated.Use(middleware.TenantMiddleware())
+	authenticated.Use(middleware.CSRFMiddleware())
 	{
 		// 用户信息
+		authenticated.GET("/auth/csrf-token", middleware.GenerateCSRFToken)
 		authenticated.GET("/auth/profile", authHandler.GetProfile)
 		authenticated.PUT("/auth/password", authHandler.ChangePassword)
 
 		// 租户管理
 		tenant := authenticated.Group("/tenant")
 		{
-			tenant.GET("", tenantHandler.Get)
+			tenant.GET("", middleware.PermissionMiddleware("tenant:read"), tenantHandler.Get)
 			tenant.PUT("", middleware.PermissionMiddleware("tenant:update"), tenantHandler.Update)
 			tenant.DELETE("", middleware.OwnerMiddleware(), tenantHandler.Delete)
 		}
@@ -204,13 +213,39 @@ func SetupRouter(r *gin.Engine) {
 		// 团队成员管理
 		team := authenticated.Group("/team")
 		{
-			team.GET("/members", teamMemberHandler.List)
-			team.GET("/members/:id", teamMemberHandler.Get)
+			team.GET("/members", middleware.PermissionMiddleware("member:read"), teamMemberHandler.List)
+			team.GET("/members/:id", middleware.PermissionMiddleware("member:read"), teamMemberHandler.Get)
 			team.POST("/members", middleware.PermissionMiddleware("member:invite"), teamMemberHandler.Create)
-			team.PUT("/members/:id", teamMemberHandler.Update)
-			team.POST("/members/:id/reset-password", teamMemberHandler.ResetPassword)
+			team.PUT("/members/:id", middleware.PermissionMiddleware("member:update"), teamMemberHandler.Update)
+			team.POST("/members/:id/reset-password", middleware.PermissionMiddleware("member:update"), teamMemberHandler.ResetPassword)
 			team.PUT("/members/:id/role", middleware.PermissionMiddleware("member:update"), teamMemberHandler.UpdateRole)
 			team.DELETE("/members/:id", middleware.PermissionMiddleware("member:delete"), teamMemberHandler.Remove)
+		}
+
+		// 用户额度（自己看自己）
+		creditHandler := NewCreditHandler()
+		authenticated.GET("/credits/me", creditHandler.MyBalance)
+		authenticated.GET("/credits/me/transactions", creditHandler.MyTransactions)
+
+		// AI Provider 转发（客户端）
+		userProxyHandler := NewProxyHandler(asyncRunner)
+		fileHandler := NewGenerationFileHandler()
+		taskHandler := NewGenerationTaskHandler()
+		proxy := authenticated.Group("/proxy")
+		proxy.Use(middleware.ConcurrencyMiddleware())
+		{
+			proxy.GET("/capabilities", userProxyHandler.Capabilities)
+			proxy.POST("/:provider/chat", userProxyHandler.Chat)
+			proxy.POST("/:provider/generate", userProxyHandler.Generate)
+
+			// 任务查询
+			proxy.GET("/tasks", taskHandler.MyList)
+			proxy.GET("/tasks/:id", taskHandler.MyTask)
+
+			// 生成结果文件
+			proxy.GET("/files", fileHandler.List)
+			proxy.GET("/files/:id", fileHandler.Download)
+			proxy.DELETE("/files/:id", fileHandler.Delete)
 		}
 	}
 
@@ -218,19 +253,25 @@ func SetupRouter(r *gin.Engine) {
 	admin := api.Group("/admin")
 	admin.Use(middleware.AuthMiddleware())
 	admin.Use(middleware.TenantMiddleware())
+	admin.Use(middleware.CSRFMiddleware())
 	admin.Use(middleware.AuditMiddleware())
 	{
 		// 统计数据
-		admin.GET("/statistics/dashboard", statsHandler.Dashboard)
-		admin.GET("/statistics/apps/:app_id", statsHandler.AppStatistics)
-		admin.GET("/statistics/license-trend", statsHandler.LicenseTrend)
-		admin.GET("/statistics/device-trend", statsHandler.DeviceTrend)
-		admin.GET("/statistics/heartbeat-trend", statsHandler.HeartbeatTrend)
-		admin.GET("/statistics/license-type", statsHandler.LicenseTypeDistribution)
-		admin.GET("/statistics/device-os", statsHandler.DeviceOSDistribution)
+		statistics := admin.Group("/statistics")
+		statistics.Use(middleware.PermissionMiddleware("stats:read"))
+		{
+			statistics.GET("/dashboard", statsHandler.Dashboard)
+			statistics.GET("/apps/:app_id", statsHandler.AppStatistics)
+			statistics.GET("/license-trend", statsHandler.LicenseTrend)
+			statistics.GET("/device-trend", statsHandler.DeviceTrend)
+			statistics.GET("/heartbeat-trend", statsHandler.HeartbeatTrend)
+			statistics.GET("/license-type", statsHandler.LicenseTypeDistribution)
+			statistics.GET("/device-os", statsHandler.DeviceOSDistribution)
+		}
 
 		// 客户管理
 		customers := admin.Group("/customers")
+		customers.Use(middleware.PermissionMiddleware("customer:read"))
 		{
 			customers.POST("", middleware.PermissionMiddleware("customer:create"), customerHandler.Create)
 			customers.GET("", customerHandler.List)
@@ -247,6 +288,7 @@ func SetupRouter(r *gin.Engine) {
 
 		// 应用管理
 		apps := admin.Group("/apps")
+		apps.Use(middleware.PermissionMiddleware("app:read"))
 		{
 			apps.POST("", middleware.PermissionMiddleware("app:create"), appHandler.Create)
 			apps.GET("", appHandler.List)
@@ -281,6 +323,7 @@ func SetupRouter(r *gin.Engine) {
 
 		// 脚本管理
 		scripts := admin.Group("/scripts")
+		scripts.Use(middleware.PermissionMiddleware("app:read"))
 		{
 			scripts.GET("/:id", scriptHandler.Get)
 			scripts.PUT("/:id", middleware.PermissionMiddleware("app:update"), scriptHandler.Update)
@@ -290,6 +333,7 @@ func SetupRouter(r *gin.Engine) {
 
 		// 版本管理
 		releases := admin.Group("/releases")
+		releases.Use(middleware.PermissionMiddleware("app:read"))
 		{
 			releases.GET("/:id", releaseHandler.Get)
 			releases.PUT("/:id", middleware.PermissionMiddleware("app:update"), releaseHandler.Update)
@@ -301,6 +345,7 @@ func SetupRouter(r *gin.Engine) {
 
 		// 热更新管理
 		hotupdate := admin.Group("/hotupdate")
+		hotupdate.Use(middleware.PermissionMiddleware("app:read"))
 		{
 			hotupdate.GET("/:id", hotUpdateHandler.Get)
 			hotupdate.PUT("/:id", middleware.PermissionMiddleware("app:update"), hotUpdateHandler.Update)
@@ -313,10 +358,11 @@ func SetupRouter(r *gin.Engine) {
 		}
 
 		// 发布异步任务
-		admin.GET("/tasks/:id", middleware.PermissionMiddleware("app:update"), publishTaskHandler.GetTask)
+		admin.GET("/tasks/:id", middleware.PermissionMiddleware("app:read"), publishTaskHandler.GetTask)
 
 		// 安全脚本管理
 		secureScripts := admin.Group("/secure-scripts")
+		secureScripts.Use(middleware.PermissionMiddleware("app:read"))
 		{
 			secureScripts.GET("/:id", secureScriptHandler.Get)
 			secureScripts.PUT("/:id", middleware.PermissionMiddleware("app:update"), secureScriptHandler.Update)
@@ -329,6 +375,7 @@ func SetupRouter(r *gin.Engine) {
 
 		// 实时指令管理
 		instructions := admin.Group("/instructions")
+		instructions.Use(middleware.PermissionMiddleware("app:read"))
 		{
 			instructions.POST("/send", middleware.PermissionMiddleware("app:update"), wsHandler.SendInstruction)
 			instructions.GET("", wsHandler.ListInstructions)
@@ -337,6 +384,7 @@ func SetupRouter(r *gin.Engine) {
 
 		// 授权管理
 		licenses := admin.Group("/licenses")
+		licenses.Use(middleware.PermissionMiddleware("license:read"))
 		{
 			licenses.POST("", middleware.PermissionMiddleware("license:create"), licenseHandler.Create)
 			licenses.GET("", licenseHandler.List)
@@ -354,6 +402,7 @@ func SetupRouter(r *gin.Engine) {
 		// 订阅管理
 		subscriptionHandler := NewSubscriptionHandler()
 		subscriptions := admin.Group("/subscriptions")
+		subscriptions.Use(middleware.PermissionMiddleware("subscription:read"))
 		{
 			subscriptions.POST("", middleware.PermissionMiddleware("subscription:create"), subscriptionHandler.Create)
 			subscriptions.GET("/accounts", subscriptionHandler.ListAccounts)
@@ -368,6 +417,7 @@ func SetupRouter(r *gin.Engine) {
 
 		// 设备管理
 		devices := admin.Group("/devices")
+		devices.Use(middleware.PermissionMiddleware("device:read"))
 		{
 			devices.GET("", deviceHandler.List)
 			devices.GET("/:id", deviceHandler.Get)
@@ -378,6 +428,7 @@ func SetupRouter(r *gin.Engine) {
 
 		// 黑名单管理
 		blacklist := admin.Group("/blacklist")
+		blacklist.Use(middleware.PermissionMiddleware("device:read"))
 		{
 			blacklist.GET("", deviceHandler.GetBlacklist)
 			blacklist.DELETE("/:machine_id", middleware.PermissionMiddleware("device:update"), deviceHandler.RemoveFromBlacklist)
@@ -394,11 +445,12 @@ func SetupRouter(r *gin.Engine) {
 
 		// 数据备份管理
 		backups := admin.Group("/backups")
+		backups.Use(middleware.PermissionMiddleware("backup:read"))
 		{
 			backups.GET("/users", clientSyncHandler.AdminListUsers)
 			backups.GET("/users/:user_id", clientSyncHandler.AdminGetUserBackups)
 			backups.GET("/:backup_id", clientSyncHandler.AdminGetBackupDetail)
-			backups.POST("/:backup_id/set-current", clientSyncHandler.AdminSetCurrentVersion)
+			backups.POST("/:backup_id/set-current", middleware.PermissionMiddleware("backup:update"), clientSyncHandler.AdminSetCurrentVersion)
 		}
 
 		// 数据导出
@@ -412,5 +464,47 @@ func SetupRouter(r *gin.Engine) {
 			export.GET("/users", exportHandler.ExportCustomers) // 兼容旧前端路径
 			export.GET("/audit-logs", exportHandler.ExportAuditLogs)
 		}
+
+		// AI Provider 凭证管理
+		proxyHandler := NewProxyHandler(asyncRunner)
+		credentials := admin.Group("/proxy/credentials")
+		credentials.Use(middleware.PermissionMiddleware("proxy_credential:read"))
+		{
+			credentials.GET("", proxyHandler.AdminListCredentials)
+			credentials.GET("/:id", proxyHandler.AdminGetCredential)
+			credentials.POST("", middleware.PermissionMiddleware("proxy_credential:create"), proxyHandler.AdminCreateCredential)
+			credentials.PUT("/:id", middleware.PermissionMiddleware("proxy_credential:update"), proxyHandler.AdminUpdateCredential)
+			credentials.DELETE("/:id", middleware.PermissionMiddleware("proxy_credential:delete"), proxyHandler.AdminDeleteCredential)
+			credentials.POST("/:id/test", middleware.PermissionMiddleware("proxy_credential:update"), proxyHandler.AdminTestCredential)
+		}
+
+		// 计价规则
+		pricingHandler := NewPricingHandler()
+		rules := admin.Group("/pricing/rules")
+		rules.Use(middleware.PermissionMiddleware("pricing:read"))
+		{
+			rules.GET("", pricingHandler.List)
+			rules.GET("/:id", pricingHandler.Get)
+			rules.POST("", middleware.PermissionMiddleware("pricing:create"), pricingHandler.Create)
+			rules.PUT("/:id", middleware.PermissionMiddleware("pricing:update"), pricingHandler.Update)
+			rules.DELETE("/:id", middleware.PermissionMiddleware("pricing:delete"), pricingHandler.Delete)
+		}
+		admin.POST("/pricing/preview", middleware.PermissionMiddleware("pricing:read"), pricingHandler.Preview)
+
+		// 用户额度（后台管理）
+		adminCreditHandler := NewCreditHandler()
+		credits := admin.Group("/credits")
+		credits.Use(middleware.PermissionMiddleware("credit:read"))
+		{
+			credits.GET("/users", adminCreditHandler.AdminListUsers)
+			credits.GET("/users/:id", adminCreditHandler.AdminGetUser)
+			credits.POST("/users/:id/adjust", middleware.PermissionMiddleware("credit:update"), adminCreditHandler.AdminAdjust)
+			credits.PUT("/users/:id/limits", middleware.PermissionMiddleware("credit:update"), adminCreditHandler.AdminSetLimits)
+			credits.GET("/users/:id/transactions", adminCreditHandler.AdminUserTransactions)
+		}
+
+		// 任务监控（后台总览）
+		adminTaskHandler := NewGenerationTaskHandler()
+		admin.GET("/proxy/tasks", middleware.PermissionMiddleware("credit:read"), adminTaskHandler.AdminList)
 	}
 }

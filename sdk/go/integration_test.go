@@ -45,9 +45,18 @@ func requireIntegrationServer(t *testing.T) {
 	}
 }
 
+func requireIntegrationLicenseKey(t *testing.T) {
+	t.Helper()
+
+	if strings.TrimSpace(os.Getenv("LS_TEST_LICENSE_KEY")) == "" {
+		t.Skip("集成测试跳过: 未设置 LS_TEST_LICENSE_KEY，授权码激活测试需要一个有效授权码。")
+	}
+}
+
 // TestIntegration_Activate 测试授权码激活功能
 func TestIntegration_Activate(t *testing.T) {
 	requireIntegrationServer(t)
+	requireIntegrationLicenseKey(t)
 	fmt.Println("\n========== 集成测试: 授权码激活 ==========")
 
 	client := NewClient(IntegrationServerURL, IntegrationAppKey,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type SubscriptionHandler struct{}
@@ -39,7 +40,7 @@ type CreateSubscriptionRequest struct {
 	AppID       string   `json:"app_id" binding:"required"`
 	PlanType    string   `json:"plan_type"` // 可选，默认 basic
 	MaxDevices  int      `json:"max_devices"`
-	UnbindLimit int      `json:"unbind_limit"`
+	UnbindLimit *int     `json:"unbind_limit"`
 	Features    []string `json:"features"`
 	Days        int      `json:"days"` // 有效天数，-1表示永久
 	Notes       string   `json:"notes"`
@@ -48,6 +49,8 @@ type CreateSubscriptionRequest struct {
 // Create 创建订阅
 func (h *SubscriptionHandler) Create(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
+	userID := middleware.GetUserID(c)
+	userRole := middleware.GetUserRole(c)
 
 	var req CreateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -57,7 +60,11 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 
 	// 验证客户（必须属于当前租户）
 	var customer model.Customer
-	if err := model.DB.Where("id = ? AND tenant_id = ?", req.CustomerID, tenantID).First(&customer).Error; err != nil {
+	customerQuery := model.DB.Where("id = ? AND tenant_id = ?", req.CustomerID, tenantID)
+	if !isTenantAdminRole(userRole) {
+		customerQuery = customerQuery.Where("owner_id = ?", userID)
+	}
+	if err := customerQuery.First(&customer).Error; err != nil {
 		response.NotFound(c, "客户不存在")
 		return
 	}
@@ -77,18 +84,31 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 	}
 
 	// 设置默认值
+	if req.MaxDevices < 0 {
+		response.BadRequest(c, "最大设备数不能小于0")
+		return
+	}
 	if req.MaxDevices == 0 {
 		req.MaxDevices = app.MaxDevicesDefault
 	}
 	if req.PlanType == "" {
 		req.PlanType = "basic"
 	}
-	if req.UnbindLimit < 0 {
+	if !isValidPlanType(req.PlanType) {
+		response.BadRequest(c, "套餐类型不支持")
+		return
+	}
+	unbindLimit := 5
+	if req.UnbindLimit != nil {
+		unbindLimit = *req.UnbindLimit
+	}
+	if unbindLimit < 0 {
 		response.BadRequest(c, "解绑次数上限不能小于0")
 		return
 	}
-	if req.UnbindLimit == 0 {
-		req.UnbindLimit = 5
+	if req.Days < -1 {
+		response.BadRequest(c, "有效天数不能小于 -1")
+		return
 	}
 
 	// 序列化 features
@@ -105,7 +125,7 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		AppID:       req.AppID,
 		PlanType:    model.PlanType(req.PlanType),
 		MaxDevices:  req.MaxDevices,
-		UnbindLimit: req.UnbindLimit,
+		UnbindLimit: unbindLimit,
 		Features:    featuresJSON,
 		Status:      model.SubscriptionStatusActive,
 		StartAt:     &now,
@@ -118,9 +138,29 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		subscription.ExpireAt = &expireAt
 	}
 
-	if err := model.DB.Create(&subscription).Error; err != nil {
+	if err := model.DB.Select(
+		"id",
+		"tenant_id",
+		"customer_id",
+		"app_id",
+		"plan_type",
+		"max_devices",
+		"unbind_limit",
+		"features",
+		"status",
+		"start_at",
+		"expire_at",
+		"notes",
+	).Create(&subscription).Error; err != nil {
 		response.ServerError(c, "创建订阅失败: "+err.Error())
 		return
+	}
+	if req.UnbindLimit != nil {
+		subscription.UnbindLimit = unbindLimit
+		if err := model.DB.Model(&subscription).Update("unbind_limit", unbindLimit).Error; err != nil {
+			response.ServerError(c, "设置解绑次数上限失败: "+err.Error())
+			return
+		}
 	}
 
 	response.Success(c, gin.H{
@@ -138,10 +178,18 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 	})
 }
 
+func scopedSubscriptionQuery(c *gin.Context) *gorm.DB {
+	query := model.DB.Model(&model.Subscription{}).
+		Joins("JOIN customers ON customers.id = subscriptions.customer_id").
+		Where("subscriptions.tenant_id = ?", middleware.GetTenantID(c))
+	if !isTenantAdminRole(middleware.GetUserRole(c)) {
+		query = query.Where("customers.owner_id = ?", middleware.GetUserID(c))
+	}
+	return query
+}
+
 // List 获取订阅列表
 func (h *SubscriptionHandler) List(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
-
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	customerID := c.Query("customer_id")
@@ -155,26 +203,31 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	query := model.DB.Model(&model.Subscription{}).
+	query := scopedSubscriptionQuery(c).
 		Preload("Customer").
-		Preload("Application").
-		Where("tenant_id = ?", tenantID)
+		Preload("Application")
 
 	if customerID != "" {
-		query = query.Where("customer_id = ?", customerID)
+		query = query.Where("subscriptions.customer_id = ?", customerID)
 	}
 	if appID != "" {
-		query = query.Where("app_id = ?", appID)
+		query = query.Where("subscriptions.app_id = ?", appID)
 	}
 	if status != "" {
-		query = query.Where("status = ?", status)
+		query = query.Where("subscriptions.status = ?", status)
 	}
 
 	var total int64
-	query.Count(&total)
+	if err := query.Count(&total).Error; err != nil {
+		response.ServerError(c, "获取订阅数量失败")
+		return
+	}
 
 	var subscriptions []model.Subscription
-	query.Offset((page - 1) * pageSize).Limit(pageSize).Order("created_at DESC").Find(&subscriptions)
+	if err := query.Offset((page - 1) * pageSize).Limit(pageSize).Order("subscriptions.created_at DESC").Find(&subscriptions).Error; err != nil {
+		response.ServerError(c, "获取订阅列表失败")
+		return
+	}
 
 	var result []gin.H
 	for _, sub := range subscriptions {
@@ -199,6 +252,7 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 		}
 		if sub.Application != nil {
 			item["app_name"] = sub.Application.Name
+			item["app_key"] = sub.Application.AppKey
 		}
 		result = append(result, item)
 	}
@@ -209,6 +263,8 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 // ListAccounts 获取账号聚合订阅列表
 func (h *SubscriptionHandler) ListAccounts(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
+	userID := middleware.GetUserID(c)
+	userRole := middleware.GetUserRole(c)
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
@@ -228,6 +284,9 @@ func (h *SubscriptionHandler) ListAccounts(c *gin.Context) {
 		Joins("LEFT JOIN applications ON applications.id = subscriptions.app_id").
 		Where("subscriptions.tenant_id = ?", tenantID)
 
+	if !isTenantAdminRole(userRole) {
+		baseQuery = baseQuery.Where("customers.owner_id = ?", userID)
+	}
 	if appID != "" {
 		baseQuery = baseQuery.Where("subscriptions.app_id = ?", appID)
 	}
@@ -308,7 +367,10 @@ func (h *SubscriptionHandler) Get(c *gin.Context) {
 
 	var subscription model.Subscription
 	if err := model.DB.Preload("Customer").Preload("Application").Preload("Devices").
-		Where("id = ? AND tenant_id = ?", id, tenantID).First(&subscription).Error; err != nil {
+		Joins("JOIN customers ON customers.id = subscriptions.customer_id").
+		Where("subscriptions.id = ? AND subscriptions.tenant_id = ?", id, tenantID).
+		Scopes(scopedSubscriptionOwnerScope(c)).
+		First(&subscription).Error; err != nil {
 		response.NotFound(c, "订阅不存在")
 		return
 	}
@@ -354,7 +416,6 @@ type UpdateSubscriptionRequest struct {
 
 // Update 更新订阅
 func (h *SubscriptionHandler) Update(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var req UpdateSubscriptionRequest
@@ -364,14 +425,22 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	}
 
 	var subscription model.Subscription
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&subscription).Error; err != nil {
+	if err := scopedSubscriptionQuery(c).Where("subscriptions.id = ?", id).First(&subscription).Error; err != nil {
 		response.NotFound(c, "订阅不存在")
 		return
 	}
 
 	updates := map[string]interface{}{}
 	if req.PlanType != "" {
+		if !isValidPlanType(req.PlanType) {
+			response.BadRequest(c, "套餐类型不支持")
+			return
+		}
 		updates["plan_type"] = req.PlanType
+	}
+	if req.MaxDevices < 0 {
+		response.BadRequest(c, "最大设备数不能小于0")
+		return
 	}
 	if req.MaxDevices > 0 {
 		updates["max_devices"] = req.MaxDevices
@@ -388,6 +457,10 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		updates["features"] = string(featuresJSON)
 	}
 	if req.Status != "" {
+		if !isValidSubscriptionStatus(req.Status) {
+			response.BadRequest(c, "订阅状态不支持")
+			return
+		}
 		updates["status"] = req.Status
 	}
 	if req.Notes != nil {
@@ -404,11 +477,10 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 
 // ResetUnbindCount 重置客户端解绑计数
 func (h *SubscriptionHandler) ResetUnbindCount(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var subscription model.Subscription
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&subscription).Error; err != nil {
+	if err := scopedSubscriptionQuery(c).Where("subscriptions.id = ?", id).First(&subscription).Error; err != nil {
 		response.NotFound(c, "订阅不存在")
 		return
 	}
@@ -427,7 +499,6 @@ func (h *SubscriptionHandler) ResetUnbindCount(c *gin.Context) {
 
 // Renew 续费订阅
 func (h *SubscriptionHandler) Renew(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var req struct {
@@ -439,7 +510,7 @@ func (h *SubscriptionHandler) Renew(c *gin.Context) {
 	}
 
 	var subscription model.Subscription
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&subscription).Error; err != nil {
+	if err := scopedSubscriptionQuery(c).Where("subscriptions.id = ?", id).First(&subscription).Error; err != nil {
 		response.NotFound(c, "订阅不存在")
 		return
 	}
@@ -454,7 +525,10 @@ func (h *SubscriptionHandler) Renew(c *gin.Context) {
 
 	subscription.ExpireAt = &newExpireAt
 	subscription.Status = model.SubscriptionStatusActive
-	model.DB.Save(&subscription)
+	if err := model.DB.Save(&subscription).Error; err != nil {
+		response.ServerError(c, "续费订阅失败: "+err.Error())
+		return
+	}
 
 	response.Success(c, gin.H{
 		"expire_at":      subscription.ExpireAt,
@@ -464,11 +538,10 @@ func (h *SubscriptionHandler) Renew(c *gin.Context) {
 
 // Cancel 取消订阅
 func (h *SubscriptionHandler) Cancel(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var subscription model.Subscription
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&subscription).Error; err != nil {
+	if err := scopedSubscriptionQuery(c).Where("subscriptions.id = ?", id).First(&subscription).Error; err != nil {
 		response.NotFound(c, "订阅不存在")
 		return
 	}
@@ -476,9 +549,21 @@ func (h *SubscriptionHandler) Cancel(c *gin.Context) {
 	now := time.Now()
 	subscription.Status = model.SubscriptionStatusCancelled
 	subscription.CancelledAt = &now
-	model.DB.Save(&subscription)
+	if err := model.DB.Save(&subscription).Error; err != nil {
+		response.ServerError(c, "取消订阅失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "订阅已取消", nil)
+}
+
+func scopedSubscriptionOwnerScope(c *gin.Context) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		if isTenantAdminRole(middleware.GetUserRole(c)) {
+			return db
+		}
+		return db.Where("customers.owner_id = ?", middleware.GetUserID(c))
+	}
 }
 
 // Delete 删除订阅
@@ -487,18 +572,48 @@ func (h *SubscriptionHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var subscription model.Subscription
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&subscription).Error; err != nil {
+	if err := scopedSubscriptionQuery(c).Where("subscriptions.id = ?", id).First(&subscription).Error; err != nil {
 		response.NotFound(c, "订阅不存在")
 		return
 	}
 
-	// 删除关联的设备
-	model.DB.Where("subscription_id = ? AND tenant_id = ?", id, tenantID).Delete(&model.Device{})
+	var deviceIDs []string
+	if err := model.DB.Model(&model.Device{}).Where("subscription_id = ? AND tenant_id = ?", id, tenantID).Pluck("id", &deviceIDs).Error; err != nil {
+		response.ServerError(c, "查询订阅设备失败: "+err.Error())
+		return
+	}
 
-	if err := model.DB.Delete(&subscription).Error; err != nil {
-		response.ServerError(c, "删除订阅失败")
+	now := time.Now()
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := revokeActiveClientSessionsForDevices(tx, deviceIDs, now); err != nil {
+			return err
+		}
+		if err := tx.Where("subscription_id = ? AND tenant_id = ?", id, tenantID).Delete(&model.Device{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&subscription).Error
+	}); err != nil {
+		response.ServerError(c, "删除订阅失败: "+err.Error())
 		return
 	}
 
 	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+func isValidPlanType(planType string) bool {
+	switch model.PlanType(planType) {
+	case model.PlanTypeFree, model.PlanTypeBasic, model.PlanTypePro, model.PlanTypeEnterprise:
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidSubscriptionStatus(status string) bool {
+	switch model.SubscriptionStatus(status) {
+	case model.SubscriptionStatusActive, model.SubscriptionStatusExpired, model.SubscriptionStatusCancelled, model.SubscriptionStatusSuspended:
+		return true
+	default:
+		return false
+	}
 }

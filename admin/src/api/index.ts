@@ -1,4 +1,5 @@
 import request, { buildUploadConfig } from './request';
+import type { AxiosResponse } from 'axios';
 
 // 认证
 export const authApi = {
@@ -29,7 +30,7 @@ export const teamApi = {
 
 // 客户管理
 export const customerApi = {
-  list: (params?: { page?: number; page_size?: number; status?: string; keyword?: string }) => request.get('/admin/customers', { params }),
+  list: (params?: { page?: number; page_size?: number; status?: string; keyword?: string; owner_id?: string }) => request.get('/admin/customers', { params }),
   get: (id: string) => request.get(`/admin/customers/${id}`),
   create: (data: { email: string; password?: string; name?: string; phone?: string; company?: string; remark?: string; metadata?: string }) => request.post('/admin/customers', data),
   update: (id: string, data: { name?: string; phone?: string; company?: string; remark?: string; metadata?: string; status?: string }) => request.put(`/admin/customers/${id}`, data),
@@ -99,7 +100,7 @@ export const deviceApi = {
   blacklist: (id: string, data?: { reason?: string }) => request.post(`/admin/devices/${id}/blacklist`, data),
   unblacklist: (id: string) => request.post(`/admin/devices/${id}/unblacklist`),
   getBlacklist: (params?: any) => request.get('/admin/blacklist', { params }),
-  removeFromBlacklist: (machineId: string) => request.delete(`/admin/blacklist/${machineId}`),
+  removeFromBlacklist: (machineId: string, params?: any) => request.delete(`/admin/blacklist/${machineId}`, { params }),
 };
 
 // 脚本管理
@@ -137,13 +138,17 @@ export const auditApi = {
 };
 
 // 数据导出
+type ExportParams = Record<string, string | number | boolean | null | undefined>;
+const downloadExport = (resource: string, params?: ExportParams) =>
+  request.get(`/admin/export/${resource}`, { params, responseType: 'blob' }) as unknown as Promise<AxiosResponse<Blob>>;
+
 export const exportApi = {
   getFormats: () => request.get('/admin/export/formats'),
-  licenses: (params?: any) => `/api/admin/export/licenses?${new URLSearchParams(params).toString()}`,
-  devices: (params?: any) => `/api/admin/export/devices?${new URLSearchParams(params).toString()}`,
-  customers: (params?: any) => `/api/admin/export/customers?${new URLSearchParams(params).toString()}`,
-  users: (params?: any) => `/api/admin/export/customers?${new URLSearchParams(params).toString()}`,
-  auditLogs: (params?: any) => `/api/admin/export/audit-logs?${new URLSearchParams(params).toString()}`,
+  licenses: (params?: ExportParams) => downloadExport('licenses', params),
+  devices: (params?: ExportParams) => downloadExport('devices', params),
+  customers: (params?: ExportParams) => downloadExport('customers', params),
+  users: (params?: ExportParams) => downloadExport('customers', params),
+  auditLogs: (params?: ExportParams) => downloadExport('audit-logs', params),
 };
 
 // 热更新管理
@@ -173,10 +178,12 @@ export const publishTaskApi = {
 export const secureScriptApi = {
   list: (appId: string, params?: any) => request.get(`/admin/apps/${appId}/secure-scripts`, { params }),
   get: (id: string) => request.get(`/admin/secure-scripts/${id}`),
-  create: (appId: string, data: any) => request.post(`/admin/apps/${appId}/secure-scripts`, data),
+  create: (appId: string, data: FormData, onProgress?: (percent: number) => void) =>
+    request.post(`/admin/apps/${appId}/secure-scripts`, data, buildUploadConfig(onProgress)),
   update: (id: string, data: any) => request.put(`/admin/secure-scripts/${id}`, data),
   delete: (id: string) => request.delete(`/admin/secure-scripts/${id}`),
-  updateContent: (id: string, data: any) => request.post(`/admin/secure-scripts/${id}/content`, data),
+  updateContent: (id: string, data: FormData, onProgress?: (percent: number) => void) =>
+    request.post(`/admin/secure-scripts/${id}/content`, data, buildUploadConfig(onProgress)),
   publish: (id: string) => request.post(`/admin/secure-scripts/${id}/publish`),
   deprecate: (id: string) => request.post(`/admin/secure-scripts/${id}/deprecate`),
   getDeliveries: (id: string, params?: any) => request.get(`/admin/secure-scripts/${id}/deliveries`, { params }),
@@ -193,5 +200,76 @@ export const instructionApi = {
 // 黑名单管理
 export const blacklistApi = {
   list: (params?: any) => request.get('/admin/blacklist', { params }),
-  remove: (machineId: string) => request.delete(`/admin/blacklist/${machineId}`),
+  remove: (machineId: string, params?: any) => request.delete(`/admin/blacklist/${machineId}`, { params }),
+};
+
+// 计价规则
+export const pricingRuleApi = {
+  list: (params?: { provider?: string; scope?: string; page?: number; page_size?: number }) =>
+    request.get('/admin/pricing/rules', { params }),
+  get: (id: number) => request.get(`/admin/pricing/rules/${id}`),
+  create: (data: {
+    provider: string;
+    scope: string;
+    match_json?: string;
+    credits?: number;
+    formula?: string;
+    priority?: number;
+    enabled?: boolean;
+    note?: string;
+  }) => request.post('/admin/pricing/rules', data),
+  update: (id: number, data: any) => request.put(`/admin/pricing/rules/${id}`, data),
+  delete: (id: number) => request.delete(`/admin/pricing/rules/${id}`),
+  preview: (data: { provider: string; scope: string; params?: Record<string, any> }) =>
+    request.post('/admin/pricing/preview', data),
+};
+
+// 用户额度（admin）
+export const userCreditApi = {
+  list: (params?: { keyword?: string; page?: number; page_size?: number }) =>
+    request.get('/admin/credits/users', { params }),
+  get: (id: string) => request.get(`/admin/credits/users/${id}`),
+  adjust: (id: string, data: { amount: number; note?: string }) =>
+    request.post(`/admin/credits/users/${id}/adjust`, data),
+  setLimits: (id: string, data: { concurrent_limit: number }) =>
+    request.put(`/admin/credits/users/${id}/limits`, data),
+  transactions: (id: string, params?: { page?: number; page_size?: number }) =>
+    request.get(`/admin/credits/users/${id}/transactions`, { params }),
+};
+
+// AI Provider 凭证管理
+export const providerCredentialApi = {
+  list: (params?: { provider?: string; mode?: string; enabled?: boolean; page?: number; page_size?: number }) =>
+    request.get('/admin/proxy/credentials', { params }),
+  get: (id: string) => request.get(`/admin/proxy/credentials/${id}`),
+  create: (data: {
+    provider: string;
+    mode: string;
+    channel_name: string;
+    upstream_base: string;
+    api_key: string;
+    default_model?: string;
+    custom_headers?: string;
+    enabled?: boolean;
+    is_default?: boolean;
+    priority?: number;
+    note?: string;
+  }) => request.post('/admin/proxy/credentials', data),
+  update: (
+    id: string,
+    data: {
+      mode?: string;
+      channel_name?: string;
+      upstream_base?: string;
+      api_key?: string;
+      default_model?: string;
+      custom_headers?: string;
+      enabled?: boolean;
+      is_default?: boolean;
+      priority?: number;
+      note?: string;
+    }
+  ) => request.put(`/admin/proxy/credentials/${id}`, data),
+  delete: (id: string) => request.delete(`/admin/proxy/credentials/${id}`),
+  test: (id: string) => request.post(`/admin/proxy/credentials/${id}/test`),
 };

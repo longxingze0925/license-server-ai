@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,7 @@ type HotUpdateManager struct {
 	latestUpdate  *HotUpdateInfo
 	isUpdating    bool
 	stopAutoCheck chan struct{}
+	autoChecking  bool
 }
 
 // HotUpdateOption 热更新配置选项
@@ -121,10 +123,10 @@ func NewHotUpdateManager(client *Client, currentVersion string, opts ...HotUpdat
 
 // CheckUpdate 检查更新
 func (m *HotUpdateManager) CheckUpdate() (*HotUpdateInfo, error) {
-	url := fmt.Sprintf("%s/api/client/hotupdate/check?app_key=%s&version=%s&machine_id=%s",
-		m.client.GetServerURL(), m.client.GetAppKey(), m.currentVersion, m.client.GetMachineID())
-
-	resp, err := m.client.GetHTTPClient().Get(url)
+	params := url.Values{}
+	params.Set("version", m.currentVersion)
+	requestURL := fmt.Sprintf("%s/api/client/hotupdate/check?%s", m.client.GetServerURL(), params.Encode())
+	resp, err := m.client.requestRawWithClientSession(http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("检查更新失败: %w", err)
 	}
@@ -193,32 +195,32 @@ func (m *HotUpdateManager) DownloadUpdate(info *HotUpdateInfo) (string, error) {
 		downloadURL = m.client.GetServerURL() + info.DownloadURL
 	}
 
-	// 创建HTTP请求
-	resp, err := m.client.GetHTTPClient().Get(downloadURL)
+	resp, err := m.openUpdateDownload(info, downloadURL)
 	if err != nil {
-		m.reportStatus(info.ID, HotUpdateStatusFailed, err.Error())
-		m.notifyCallback(HotUpdateStatusFailed, 0, err)
-		return "", fmt.Errorf("下载失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		err := fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
 		m.reportStatus(info.ID, HotUpdateStatusFailed, err.Error())
 		m.notifyCallback(HotUpdateStatusFailed, 0, err)
 		return "", err
 	}
+	defer resp.Body.Close()
 
 	// 创建临时文件
 	filename := fmt.Sprintf("update_%s_to_%s.zip", info.FromVersion, info.ToVersion)
 	filePath := filepath.Join(m.updateDir, filename)
-	file, err := os.Create(filePath)
+	tmpPath := filePath + ".part"
+	_ = os.Remove(tmpPath)
+	file, err := os.Create(tmpPath)
 	if err != nil {
 		m.reportStatus(info.ID, HotUpdateStatusFailed, err.Error())
 		m.notifyCallback(HotUpdateStatusFailed, 0, err)
 		return "", fmt.Errorf("创建文件失败: %w", err)
 	}
-	defer file.Close()
+	cleanup := true
+	defer func() {
+		_ = file.Close()
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	// 下载并计算进度
 	var downloaded int64
@@ -228,8 +230,16 @@ func (m *HotUpdateManager) DownloadUpdate(info *HotUpdateInfo) (string, error) {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			file.Write(buf[:n])
-			hash.Write(buf[:n])
+			if _, writeErr := file.Write(buf[:n]); writeErr != nil {
+				m.reportStatus(info.ID, HotUpdateStatusFailed, writeErr.Error())
+				m.notifyCallback(HotUpdateStatusFailed, 0, writeErr)
+				return "", fmt.Errorf("写入文件失败: %w", writeErr)
+			}
+			if _, hashErr := hash.Write(buf[:n]); hashErr != nil {
+				m.reportStatus(info.ID, HotUpdateStatusFailed, hashErr.Error())
+				m.notifyCallback(HotUpdateStatusFailed, 0, hashErr)
+				return "", fmt.Errorf("计算文件哈希失败: %w", hashErr)
+			}
 			downloaded += int64(n)
 
 			if info.FileSize > 0 {
@@ -250,7 +260,6 @@ func (m *HotUpdateManager) DownloadUpdate(info *HotUpdateInfo) (string, error) {
 	// 验证哈希
 	fileHash := hex.EncodeToString(hash.Sum(nil))
 	if info.FileHash != "" && fileHash != info.FileHash {
-		os.Remove(filePath)
 		err := fmt.Errorf("文件校验失败")
 		m.reportStatus(info.ID, HotUpdateStatusFailed, err.Error())
 		m.notifyCallback(HotUpdateStatusFailed, 0, err)
@@ -258,14 +267,62 @@ func (m *HotUpdateManager) DownloadUpdate(info *HotUpdateInfo) (string, error) {
 	}
 
 	if err := m.client.verifyDownloadedFileSignature(fileHash, downloaded, info.FileSignature, info.SignatureAlg); err != nil {
-		_ = os.Remove(filePath)
 		m.reportStatus(info.ID, HotUpdateStatusFailed, err.Error())
 		m.notifyCallback(HotUpdateStatusFailed, 0, err)
 		return "", err
 	}
+	if err := file.Close(); err != nil {
+		m.reportStatus(info.ID, HotUpdateStatusFailed, err.Error())
+		m.notifyCallback(HotUpdateStatusFailed, 0, err)
+		return "", fmt.Errorf("关闭文件失败: %w", err)
+	}
+	if err := replaceFile(tmpPath, filePath); err != nil {
+		m.reportStatus(info.ID, HotUpdateStatusFailed, err.Error())
+		m.notifyCallback(HotUpdateStatusFailed, 0, err)
+		return "", fmt.Errorf("保存文件失败: %w", err)
+	}
 
+	cleanup = false
 	m.notifyCallback(HotUpdateStatusDownloading, 1, nil)
 	return filePath, nil
+}
+
+func (m *HotUpdateManager) openUpdateDownload(info *HotUpdateInfo, downloadURL string) (*http.Response, error) {
+	resp, err := m.client.GetHTTPClient().Get(downloadURL)
+	if err != nil {
+		return nil, fmt.Errorf("下载失败: %w", err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return resp, nil
+	}
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		defer resp.Body.Close()
+		return nil, fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	refreshed, err := m.CheckUpdate()
+	if err != nil {
+		return nil, fmt.Errorf("下载链接已过期，重新检查更新失败: %w", err)
+	}
+	if refreshed == nil || !refreshed.HasUpdate || refreshed.ID != info.ID || refreshed.DownloadURL == "" {
+		return nil, fmt.Errorf("下载链接已过期，未找到可用的新链接")
+	}
+	refreshedURL := refreshed.DownloadURL
+	if !strings.HasPrefix(refreshedURL, "http://") && !strings.HasPrefix(refreshedURL, "https://") {
+		refreshedURL = m.client.GetServerURL() + refreshed.DownloadURL
+	}
+	resp, err = m.client.GetHTTPClient().Get(refreshedURL)
+	if err != nil {
+		return nil, fmt.Errorf("下载失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return nil, fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
+	}
+
+	*info = *refreshed
+	return resp, nil
 }
 
 // ApplyUpdate 应用更新
@@ -289,10 +346,15 @@ func (m *HotUpdateManager) ApplyUpdate(info *HotUpdateInfo, updateFile string, t
 	// 解压更新包
 	if err := m.extractUpdate(updateFile, targetDir); err != nil {
 		// 回滚
-		m.rollback(backupPath, targetDir)
-		m.reportStatus(info.ID, HotUpdateStatusFailed, "解压失败: "+err.Error())
+		rollbackErr := m.rollback(backupPath, targetDir)
+		if rollbackErr != nil {
+			err = fmt.Errorf("解压失败: %w；回滚也失败: %v", err, rollbackErr)
+		} else {
+			err = fmt.Errorf("解压失败: %w", err)
+		}
+		m.reportStatus(info.ID, HotUpdateStatusFailed, err.Error())
 		m.notifyCallback(HotUpdateStatusFailed, 0, err)
-		return fmt.Errorf("解压失败: %w", err)
+		return err
 	}
 
 	// 更新成功
@@ -343,22 +405,38 @@ func (m *HotUpdateManager) Rollback(targetDir string) error {
 
 // StartAutoCheck 启动自动检查更新
 func (m *HotUpdateManager) StartAutoCheck() {
-	if !m.autoCheck {
+	m.mu.Lock()
+	if !m.autoCheck || m.autoChecking {
+		m.mu.Unlock()
 		return
 	}
+	stopCh := make(chan struct{})
+	m.stopAutoCheck = stopCh
+	m.autoChecking = true
+	interval := m.checkInterval
+	m.mu.Unlock()
 
 	go func() {
-		ticker := time.NewTicker(m.checkInterval)
+		defer func() {
+			m.mu.Lock()
+			if m.stopAutoCheck == stopCh {
+				m.autoChecking = false
+				m.stopAutoCheck = nil
+			}
+			m.mu.Unlock()
+		}()
+
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		// 立即检查一次
-		m.CheckUpdate()
+		_, _ = m.CheckUpdate()
 
 		for {
 			select {
 			case <-ticker.C:
-				m.CheckUpdate()
-			case <-m.stopAutoCheck:
+				_, _ = m.CheckUpdate()
+			case <-stopCh:
 				return
 			}
 		}
@@ -367,18 +445,20 @@ func (m *HotUpdateManager) StartAutoCheck() {
 
 // StopAutoCheck 停止自动检查更新
 func (m *HotUpdateManager) StopAutoCheck() {
-	select {
-	case m.stopAutoCheck <- struct{}{}:
-	default:
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.autoChecking || m.stopAutoCheck == nil {
+		return
 	}
+	close(m.stopAutoCheck)
+	m.autoChecking = false
+	m.stopAutoCheck = nil
 }
 
 // GetUpdateHistory 获取更新历史
 func (m *HotUpdateManager) GetUpdateHistory() ([]map[string]interface{}, error) {
-	url := fmt.Sprintf("%s/api/client/hotupdate/history?app_key=%s&machine_id=%s",
-		m.client.GetServerURL(), m.client.GetAppKey(), m.client.GetMachineID())
-
-	resp, err := m.client.GetHTTPClient().Get(url)
+	requestURL := fmt.Sprintf("%s/api/client/hotupdate/history", m.client.GetServerURL())
+	resp, err := m.client.requestRawWithClientSession(http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -426,9 +506,7 @@ func (m *HotUpdateManager) SetCurrentVersion(version string) {
 
 func (m *HotUpdateManager) reportStatus(hotUpdateID string, status HotUpdateStatus, errorMsg string) {
 	data := map[string]interface{}{
-		"app_key":       m.client.GetAppKey(),
 		"hot_update_id": hotUpdateID,
-		"machine_id":    m.client.GetMachineID(),
 		"from_version":  m.currentVersion,
 		"status":        string(status),
 	}
@@ -436,7 +514,7 @@ func (m *HotUpdateManager) reportStatus(hotUpdateID string, status HotUpdateStat
 		data["error_message"] = errorMsg
 	}
 
-	go m.client.request("POST", "/hotupdate/report", data)
+	go m.client.requestWithClientSession("POST", "/hotupdate/report", data)
 }
 
 func (m *HotUpdateManager) notifyCallback(status HotUpdateStatus, progress float64, err error) {
@@ -456,17 +534,46 @@ func (m *HotUpdateManager) extractUpdate(zipFile, targetDir string) error {
 }
 
 func (m *HotUpdateManager) rollback(backupPath, targetDir string) error {
-	// 删除当前目录内容
-	entries, err := os.ReadDir(targetDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		os.RemoveAll(filepath.Join(targetDir, entry.Name()))
+	if _, err := os.Stat(backupPath); err != nil {
+		return fmt.Errorf("备份不可用: %w", err)
 	}
 
-	// 从备份恢复
-	return copyDir(backupPath, targetDir)
+	parent := filepath.Dir(targetDir)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return fmt.Errorf("创建回滚目录失败: %w", err)
+	}
+
+	restorePath := targetDir + ".rollback"
+	_ = os.RemoveAll(restorePath)
+	if err := copyDir(backupPath, restorePath); err != nil {
+		_ = os.RemoveAll(restorePath)
+		return fmt.Errorf("复制备份失败: %w", err)
+	}
+
+	oldPath := targetDir + fmt.Sprintf(".failed_%d", time.Now().UnixNano())
+	targetExists := false
+	if _, err := os.Stat(targetDir); err == nil {
+		targetExists = true
+		if err := os.Rename(targetDir, oldPath); err != nil {
+			_ = os.RemoveAll(restorePath)
+			return fmt.Errorf("移走当前目录失败: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		_ = os.RemoveAll(restorePath)
+		return fmt.Errorf("检查当前目录失败: %w", err)
+	}
+
+	if err := os.Rename(restorePath, targetDir); err != nil {
+		if targetExists {
+			_ = os.Rename(oldPath, targetDir)
+		}
+		_ = os.RemoveAll(restorePath)
+		return fmt.Errorf("恢复备份失败: %w", err)
+	}
+	if targetExists {
+		_ = os.RemoveAll(oldPath)
+	}
+	return nil
 }
 
 func (m *HotUpdateManager) cleanOldBackups(keep int) {
@@ -542,14 +649,33 @@ func copyFile(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
-	destFile, err := os.Create(dst)
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	tmp := dst + fmt.Sprintf(".%d.part", time.Now().UnixNano())
+	destFile, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+	cleanup := true
+	defer func() {
+		_ = destFile.Close()
+		if cleanup {
+			_ = os.Remove(tmp)
+		}
+	}()
 
-	_, err = io.Copy(destFile, sourceFile)
-	return err
+	if _, err := io.Copy(destFile, sourceFile); err != nil {
+		return err
+	}
+	if err := destFile.Close(); err != nil {
+		return err
+	}
+	if err := replaceFile(tmp, dst); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 func unzip(src, dst string) error {
@@ -586,16 +712,28 @@ func unzipFile(src, dst string) error {
 	if err := os.MkdirAll(dst, 0755); err != nil {
 		return fmt.Errorf("创建目标目录失败: %w", err)
 	}
+	dstAbs, err := filepath.Abs(dst)
+	if err != nil {
+		return fmt.Errorf("解析目标目录失败: %w", err)
+	}
+	dstClean := filepath.Clean(dstAbs)
+	dstPrefix := dstClean + string(os.PathSeparator)
 
 	// 遍历 zip 文件中的所有文件
 	for _, f := range r.File {
 		// 构建目标路径
 		fpath := filepath.Join(dst, f.Name)
+		fpathAbs, err := filepath.Abs(fpath)
+		if err != nil {
+			return fmt.Errorf("解析目标路径失败: %w", err)
+		}
+		fpathClean := filepath.Clean(fpathAbs)
 
 		// 安全检查：防止 zip slip 攻击（路径遍历漏洞）
-		if !strings.HasPrefix(filepath.Clean(fpath), filepath.Clean(dst)+string(os.PathSeparator)) {
+		if fpathClean != dstClean && !strings.HasPrefix(fpathClean, dstPrefix) {
 			return fmt.Errorf("非法的文件路径: %s", f.Name)
 		}
+		fpath = fpathClean
 
 		if f.FileInfo().IsDir() {
 			// 创建目录

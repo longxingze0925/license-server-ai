@@ -54,8 +54,7 @@ func (s *EmailService) SendEmail(to, subject, body string) error {
 // sendEmailTLS 通过 TLS 发送邮件
 func (s *EmailService) sendEmailTLS(to, subject, body string) error {
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         s.host,
+		ServerName: s.host,
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)

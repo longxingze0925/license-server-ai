@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <PackageId>LicenseServer.Sdk</PackageId>
+    <Authors>License Server</Authors>
+    <Description>.NET HTTP SDK for license-server auth, proxy, credits, tasks, and files.</Description>
+  </PropertyGroup>
+
+</Project>

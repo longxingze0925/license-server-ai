@@ -24,7 +24,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 )
 
 // ==================== 运行时完整性校验 ====================
@@ -40,7 +39,7 @@ type RuntimeIntegrityChecker struct {
 	mu              sync.RWMutex
 	enabled         bool
 	lastCheckResult bool
-	stopOnce        sync.Once // 防止重复关闭 channel
+	running         bool
 }
 
 // NewRuntimeIntegrityChecker 创建运行时完整性校验器
@@ -49,7 +48,6 @@ func NewRuntimeIntegrityChecker() *RuntimeIntegrityChecker {
 		functionHashes:  make(map[string]uint64),
 		functionPtrs:    make(map[string]uintptr),
 		checkInterval:   30 * time.Second,
-		stopChan:        make(chan struct{}),
 		enabled:         true,
 		lastCheckResult: true,
 	}
@@ -73,20 +71,9 @@ func (ric *RuntimeIntegrityChecker) RegisterFunction(name string, fn interface{}
 	ric.functionHashes[name] = hash
 }
 
-// calculateFunctionHash 计算函数入口点哈希
+// calculateFunctionHash 计算函数指纹。
 func (ric *RuntimeIntegrityChecker) calculateFunctionHash(ptr uintptr) uint64 {
-	// 读取函数入口点的前64字节
-	// 注意：这在某些平台上可能需要特殊处理
-	size := 64
-	data := make([]byte, size)
-
-	for i := 0; i < size; i++ {
-		data[i] = *(*byte)(unsafe.Pointer(ptr + uintptr(i)))
-	}
-
-	// 计算哈希
-	h := sha256.Sum256(data)
-	return binary.LittleEndian.Uint64(h[:8])
+	return runtimeFunctionHash(ptr)
 }
 
 // CheckIntegrity 检查所有注册函数的完整性
@@ -131,35 +118,33 @@ func (ric *RuntimeIntegrityChecker) CheckIntegrity() bool {
 
 // DetectCommonHooks 检测常见的 Hook 特征
 func (ric *RuntimeIntegrityChecker) DetectCommonHooks(ptr uintptr) bool {
-	if ptr == 0 {
-		return false
-	}
-
-	// 读取函数入口的前几个字节
-	firstByte := *(*byte)(unsafe.Pointer(ptr))
-	secondByte := *(*byte)(unsafe.Pointer(ptr + 1))
-
-	// 检测常见的 Hook 指令模式
-	// x86/x64 JMP 指令: 0xE9 (near jump), 0xEB (short jump)
-	// x64 MOV RAX + JMP RAX: 0x48 0xB8
-	if firstByte == 0xE9 || firstByte == 0xEB {
-		return true // 检测到 JMP 指令
-	}
-	if firstByte == 0x48 && secondByte == 0xB8 {
-		return true // 检测到 MOV RAX 模式
-	}
-	// INT3 断点: 0xCC
-	if firstByte == 0xCC {
-		return true // 检测到断点
-	}
-
-	return false
+	return detectCommonHooks(ptr)
 }
 
 // StartPeriodicCheck 启动定期检查
 func (ric *RuntimeIntegrityChecker) StartPeriodicCheck() {
+	ric.mu.Lock()
+	if ric.running {
+		ric.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	interval := ric.checkInterval
+	ric.stopChan = stopCh
+	ric.running = true
+	ric.mu.Unlock()
+
 	go func() {
-		ticker := time.NewTicker(ric.checkInterval)
+		defer func() {
+			ric.mu.Lock()
+			if ric.stopChan == stopCh {
+				ric.running = false
+				ric.stopChan = nil
+			}
+			ric.mu.Unlock()
+		}()
+
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for {
@@ -170,7 +155,7 @@ func (ric *RuntimeIntegrityChecker) StartPeriodicCheck() {
 						ric.onViolation("runtime_integrity_violation")
 					}
 				}
-			case <-ric.stopChan:
+			case <-stopCh:
 				return
 			}
 		}
@@ -179,9 +164,14 @@ func (ric *RuntimeIntegrityChecker) StartPeriodicCheck() {
 
 // Stop 停止检查
 func (ric *RuntimeIntegrityChecker) Stop() {
-	ric.stopOnce.Do(func() {
-		close(ric.stopChan)
-	})
+	ric.mu.Lock()
+	defer ric.mu.Unlock()
+	if !ric.running || ric.stopChan == nil {
+		return
+	}
+	close(ric.stopChan)
+	ric.running = false
+	ric.stopChan = nil
 }
 
 // SetViolationHandler 设置违规处理函数
@@ -321,16 +311,16 @@ func (ov *ObfuscatedValidator) VerifyToken(token *ValidationToken, expectedValid
 
 // RandomVerificationScheduler 随机验证调度器
 type RandomVerificationScheduler struct {
-	minInterval   time.Duration
-	maxInterval   time.Duration
-	verifyFunc    func() bool
-	onFailure     func()
-	stopChan      chan struct{}
-	lastVerify    int64
-	verifyCount   int64
-	failureCount  int64
-	mu            sync.Mutex
-	stopOnce      sync.Once // 防止重复关闭 channel
+	minInterval  time.Duration
+	maxInterval  time.Duration
+	verifyFunc   func() bool
+	onFailure    func()
+	stopChan     chan struct{}
+	lastVerify   int64
+	verifyCount  int64
+	failureCount int64
+	mu           sync.Mutex
+	running      bool
 }
 
 // NewRandomVerificationScheduler 创建随机验证调度器
@@ -338,7 +328,6 @@ func NewRandomVerificationScheduler(minInterval, maxInterval time.Duration) *Ran
 	return &RandomVerificationScheduler{
 		minInterval: minInterval,
 		maxInterval: maxInterval,
-		stopChan:    make(chan struct{}),
 	}
 }
 
@@ -354,15 +343,43 @@ func (rvs *RandomVerificationScheduler) SetFailureHandler(fn func()) {
 
 // Start 启动随机验证
 func (rvs *RandomVerificationScheduler) Start() {
+	rvs.mu.Lock()
+	if rvs.running {
+		rvs.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	minInterval := rvs.minInterval
+	maxInterval := rvs.maxInterval
+	rvs.stopChan = stopCh
+	rvs.running = true
+	rvs.mu.Unlock()
+
 	go func() {
+		defer func() {
+			rvs.mu.Lock()
+			if rvs.stopChan == stopCh {
+				rvs.running = false
+				rvs.stopChan = nil
+			}
+			rvs.mu.Unlock()
+		}()
+
 		for {
 			// 使用安全随机数计算间隔
-			interval := secureRandom.Duration(rvs.minInterval, rvs.maxInterval)
+			interval := secureRandom.Duration(minInterval, maxInterval)
+			timer := time.NewTimer(interval)
 
 			select {
-			case <-time.After(interval):
+			case <-timer.C:
 				rvs.doVerify()
-			case <-rvs.stopChan:
+			case <-stopCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
 			}
 		}
@@ -386,9 +403,14 @@ func (rvs *RandomVerificationScheduler) doVerify() {
 
 // Stop 停止调度器
 func (rvs *RandomVerificationScheduler) Stop() {
-	rvs.stopOnce.Do(func() {
-		close(rvs.stopChan)
-	})
+	rvs.mu.Lock()
+	defer rvs.mu.Unlock()
+	if !rvs.running || rvs.stopChan == nil {
+		return
+	}
+	close(rvs.stopChan)
+	rvs.running = false
+	rvs.stopChan = nil
 }
 
 // GetStats 获取统计信息
@@ -402,7 +424,7 @@ func (rvs *RandomVerificationScheduler) GetStats() (verifyCount, failureCount in
 // 检测异常的调用模式，识别自动化破解尝试
 type HoneypotDetector struct {
 	// 调用计数器
-	callCounts    map[string]*callStats
+	callCounts map[string]*callStats
 	// 蜜罐函数被调用的标记
 	honeypotTriggered bool
 	// 异常模式检测
@@ -1130,4 +1152,3 @@ func GetSecureRandom() *SecureRandom {
 func GetCallStackChecker() *CallStackChecker {
 	return globalCallStackChecker
 }
-

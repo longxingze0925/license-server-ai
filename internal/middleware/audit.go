@@ -2,13 +2,17 @@ package middleware
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"license-server/internal/model"
+	"mime"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+const maxAuditRequestBodyBytes int64 = 64 << 10
 
 // AuditMiddleware 审计日志中间件
 func AuditMiddleware() gin.HandlerFunc {
@@ -31,19 +35,7 @@ func AuditMiddleware() gin.HandlerFunc {
 
 		startTime := time.Now()
 
-		// 读取请求体
-		var requestBody string
-		if c.Request.Body != nil {
-			bodyBytes, _ := io.ReadAll(c.Request.Body)
-			requestBody = string(bodyBytes)
-			// 重新设置请求体供后续使用
-			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-			// 脱敏处理密码字段
-			if strings.Contains(requestBody, "password") {
-				requestBody = maskSensitiveData(requestBody)
-			}
-		}
+		requestBody := captureAuditRequestBody(c)
 
 		// 处理请求
 		c.Next()
@@ -102,12 +94,22 @@ func parseActionFromPath(method, path string) (action, resource, resourceID stri
 			resource = model.ResourceTenant
 		case "scripts":
 			resource = model.ResourceScript
+		case "secure-scripts":
+			resource = model.ResourceScript
 		case "releases":
 			resource = model.ResourceRelease
 		case "hotupdate":
 			resource = model.ResourceHotUpdate
 		case "tasks":
 			resource = model.ResourcePublishTask
+		case "credentials":
+			resource = model.ResourceProviderCred
+		case "pricing", "rules":
+			resource = model.ResourcePricingRule
+		case "credits":
+			resource = model.ResourceCredit
+		case "instructions":
+			resource = model.ResourceInstruction
 		case "auth":
 			resource = model.ResourceUser
 		}
@@ -155,7 +157,7 @@ func parseActionFromPath(method, path string) (action, resource, resourceID stri
 }
 
 func isResourceType(s string) bool {
-	types := []string{"apps", "licenses", "subscriptions", "devices", "customers", "members", "scripts", "releases", "hotupdate", "tasks"}
+	types := []string{"apps", "licenses", "subscriptions", "devices", "customers", "members", "scripts", "secure-scripts", "releases", "hotupdate", "tasks", "credentials", "rules", "users", "instructions"}
 	for _, t := range types {
 		if s == t {
 			return true
@@ -189,6 +191,10 @@ func generateDescription(action, resource string) string {
 		model.ResourceRelease:      "版本",
 		model.ResourceHotUpdate:    "热更新",
 		model.ResourcePublishTask:  "发布任务",
+		model.ResourceProviderCred: "Provider 凭证",
+		model.ResourcePricingRule:  "计价规则",
+		model.ResourceCredit:       "额度",
+		model.ResourceInstruction:  "实时指令",
 	}
 
 	a := actionMap[action]
@@ -220,10 +226,125 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+func captureAuditRequestBody(c *gin.Context) string {
+	if c.Request.Body == nil || c.Request.ContentLength == 0 {
+		return ""
+	}
+
+	contentType := c.GetHeader("Content-Type")
+	if !isAuditableBodyContentType(contentType) {
+		return omittedAuditBody("content_type=" + firstNonEmpty(contentType, "unknown"))
+	}
+
+	if c.Request.ContentLength < 0 {
+		return omittedAuditBody("unknown_length")
+	}
+	if c.Request.ContentLength > maxAuditRequestBodyBytes {
+		return omittedAuditBody("too_large")
+	}
+
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return omittedAuditBody("read_error")
+	}
+	if len(bytes.TrimSpace(bodyBytes)) == 0 {
+		return ""
+	}
+	return maskSensitiveData(string(bodyBytes))
+}
+
+func isAuditableBodyContentType(contentType string) bool {
+	if strings.TrimSpace(contentType) == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = contentType
+	}
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+func omittedAuditBody(reason string) string {
+	return "[request body omitted: " + reason + "]"
+}
+
 func maskSensitiveData(data string) string {
-	// 简单的密码脱敏
-	data = strings.ReplaceAll(data, `"password"`, `"password":"***"`)
-	data = strings.ReplaceAll(data, `"old_password"`, `"old_password":"***"`)
-	data = strings.ReplaceAll(data, `"new_password"`, `"new_password":"***"`)
-	return data
+	var payload any
+	decoder := json.NewDecoder(strings.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return omittedAuditBody("invalid_json")
+	}
+
+	masked, err := json.Marshal(maskSensitiveValue(payload))
+	if err != nil {
+		return omittedAuditBody("mask_error")
+	}
+	return string(masked)
+}
+
+func maskSensitiveValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if isSensitiveAuditKey(key) {
+				out[key] = "***"
+				continue
+			}
+			out[key] = maskSensitiveValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = maskSensitiveValue(item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func isSensitiveAuditKey(key string) bool {
+	switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "-", "_")) {
+	case "password",
+		"oldpassword",
+		"old_password",
+		"newpassword",
+		"new_password",
+		"api_key",
+		"api_token",
+		"apikey",
+		"authorization",
+		"access_token",
+		"accesstoken",
+		"refresh_token",
+		"refreshtoken",
+		"token",
+		"app_secret",
+		"appsecret",
+		"license_key",
+		"licensekey",
+		"private_key",
+		"privatekey",
+		"secret",
+		"x_api_key",
+		"custom_header",
+		"custom_headers":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

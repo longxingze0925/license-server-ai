@@ -17,6 +17,15 @@ if %errorlevel% neq 0 (
 )
 
 echo Build success, starting server...
+echo Running database migration...
+server.exe -migrate
+if %errorlevel% neq 0 (
+    echo Migration failed
+    pause
+    exit /b 1
+)
+
+echo Starting API server...
 server.exe
 
 pause

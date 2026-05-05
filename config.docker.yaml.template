@@ -38,6 +38,11 @@ rsa:
 storage:
   scripts_dir: "/app/storage/scripts"
   releases_dir: "/app/storage/releases"
+  generations_root: "/app/storage/generations"
+  generation_keep_days: 15
+
+ai:
+  async_task_timeout_minutes: 120
 
 log:
   level: "info"
@@ -71,9 +76,9 @@ security:
   multipart_memory_mb: ${MULTIPART_MEMORY_MB}
   max_script_upload_mb: ${MAX_SCRIPT_UPLOAD_MB}
   max_secure_script_upload_mb: ${MAX_SECURE_SCRIPT_UPLOAD_MB}
-  download_token_secret: ""
+  download_token_secret: "${DOWNLOAD_TOKEN_SECRET}"
   download_token_expire_seconds: 300
-  client_access_token_secret: ""
+  client_access_token_secret: "${CLIENT_ACCESS_TOKEN_SECRET}"
   client_access_token_expire_seconds: 900
   client_refresh_token_expire_seconds: 2592000
   allowed_origins:
@@ -81,3 +86,13 @@ security:
     - "https://${SERVER_IP}:443"
     - "http://localhost:3000"
     - "http://127.0.0.1:3000"
+  trusted_proxies:
+    - "127.0.0.1"
+    - "172.16.0.0/12"
+    - "10.0.0.0/8"
+    - "192.168.0.0/16"
+  api_rate_limit: 300
+  auth_rate_limit: 20
+  client_rate_limit: 120
+  client_auth_rate_limit: 30
+  heartbeat_rate_limit: 300

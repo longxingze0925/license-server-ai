@@ -1,25 +1,25 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Table, Button, Space, Modal, Form, Input, Select, message, Tag, Descriptions, Tooltip, App } from 'antd';
 import { StopOutlined, CheckCircleOutlined, DeleteOutlined, DesktopOutlined, MobileOutlined, AppleOutlined, WindowsOutlined, AndroidOutlined } from '@ant-design/icons';
 import { deviceApi } from '../api';
+import { useAuthStore } from '../store';
 import dayjs from 'dayjs';
 
 const { Option } = Select;
 
 const Devices: React.FC = () => {
   const { modal } = App.useApp();
+  const { user } = useAuthStore();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<any[]>([]);
   const [detailVisible, setDetailVisible] = useState(false);
   const [currentDevice, setCurrentDevice] = useState<any>(null);
   const [pagination, setPagination] = useState({ current: 1, pageSize: 10, total: 0 });
   const [filters, setFilters] = useState<any>({});
+  const canUpdateDevice = ['owner', 'admin', 'developer'].includes(user?.role || '');
+  const canDeleteDevice = canUpdateDevice;
 
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  const fetchData = async (page = 1, pageSize = 10, filterParams = filters) => {
+  const fetchData = useCallback(async (page = 1, pageSize = 10, filterParams: any = {}) => {
     setLoading(true);
     try {
       const res: any = await deviceApi.list({ page, page_size: pageSize, ...filterParams });
@@ -33,7 +33,11 @@ const Devices: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   const handleView = (record: any) => {
     setCurrentDevice(record);
@@ -41,6 +45,10 @@ const Devices: React.FC = () => {
   };
 
   const handleBlacklist = (record: any) => {
+    if (!canUpdateDevice) {
+      return;
+    }
+
     modal.confirm({
       title: '加入黑名单',
       content: '确定要将此设备加入黑名单吗？加入后该设备将无法使用任何授权。',
@@ -48,7 +56,7 @@ const Devices: React.FC = () => {
         try {
           await deviceApi.blacklist(record.id);
           message.success('已加入黑名单');
-          fetchData(pagination.current, pagination.pageSize);
+          fetchData(pagination.current, pagination.pageSize, filters);
         } catch (error) {
           console.error(error);
         }
@@ -56,15 +64,19 @@ const Devices: React.FC = () => {
     });
   };
 
-  const handleRemoveFromBlacklist = (machineId: string) => {
+  const handleRemoveFromBlacklist = (record: any) => {
+    if (!canUpdateDevice) {
+      return;
+    }
+
     modal.confirm({
       title: '移出黑名单',
-      content: '确定要将此设备从黑名单移出吗？',
+      content: '确定要将此设备从当前应用黑名单移出吗？',
       onOk: async () => {
         try {
-          await deviceApi.removeFromBlacklist(machineId);
+          await deviceApi.unblacklist(record.id);
           message.success('已移出黑名单');
-          fetchData(pagination.current, pagination.pageSize);
+          fetchData(pagination.current, pagination.pageSize, filters);
         } catch (error) {
           console.error(error);
         }
@@ -73,6 +85,10 @@ const Devices: React.FC = () => {
   };
 
   const handleUnbind = (record: any) => {
+    if (!canDeleteDevice) {
+      return;
+    }
+
     modal.confirm({
       title: '解绑设备',
       content: '确定要解绑此设备吗？解绑后该设备需要重新激活。',
@@ -80,7 +96,7 @@ const Devices: React.FC = () => {
         try {
           await deviceApi.unbind(record.id);
           message.success('设备已解绑');
-          fetchData(pagination.current, pagination.pageSize);
+          fetchData(pagination.current, pagination.pageSize, filters);
         } catch (error) {
           console.error(error);
         }
@@ -89,7 +105,7 @@ const Devices: React.FC = () => {
   };
 
   const handleTableChange = (pag: any) => {
-    fetchData(pag.current, pag.pageSize);
+    fetchData(pag.current, pag.pageSize, filters);
   };
 
   const handleSearch = (values: any) => {
@@ -174,22 +190,26 @@ const Devices: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 200,
+      width: canUpdateDevice ? 200 : 80,
       render: (_: any, record: any) => (
         <Space>
           <Button type="link" size="small" onClick={() => handleView(record)}>详情</Button>
-          {record.status === 'blacklisted' ? (
-            <Button type="link" size="small" icon={<CheckCircleOutlined />} onClick={() => handleRemoveFromBlacklist(record.machine_id)}>
-              移出黑名单
-            </Button>
-          ) : (
-            <Button type="link" size="small" danger icon={<StopOutlined />} onClick={() => handleBlacklist(record)}>
-              加黑名单
+          {canUpdateDevice && (
+            record.status === 'blacklisted' ? (
+              <Button type="link" size="small" icon={<CheckCircleOutlined />} onClick={() => handleRemoveFromBlacklist(record)}>
+                移出黑名单
+              </Button>
+            ) : (
+              <Button type="link" size="small" danger icon={<StopOutlined />} onClick={() => handleBlacklist(record)}>
+                加黑名单
+              </Button>
+            )
+          )}
+          {canDeleteDevice && (
+            <Button type="link" size="small" danger icon={<DeleteOutlined />} onClick={() => handleUnbind(record)}>
+              解绑
             </Button>
           )}
-          <Button type="link" size="small" danger icon={<DeleteOutlined />} onClick={() => handleUnbind(record)}>
-            解绑
-          </Button>
         </Space>
       ),
     },

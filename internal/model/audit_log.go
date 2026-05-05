@@ -50,4 +50,8 @@ const (
 	ResourceRelease      = "release"
 	ResourceHotUpdate    = "hotupdate"
 	ResourcePublishTask  = "publish_task"
+	ResourceProviderCred = "provider_credential"
+	ResourcePricingRule  = "pricing_rule"
+	ResourceCredit       = "credit"
+	ResourceInstruction  = "instruction"
 )

@@ -7,16 +7,17 @@ import (
 	"license-server/internal/model"
 	"license-server/internal/pkg/crypto"
 	"license-server/internal/pkg/response"
+	"license-server/internal/pkg/utils"
 	"license-server/internal/service"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm/clause"
 )
 
 var upgrader = websocket.Upgrader{
@@ -117,6 +118,7 @@ func (h *WebSocketHub) Run() {
 			if old, ok := h.clients[client.appID][client.machineID]; ok {
 				close(old.send)
 				delete(h.sessions, old.sessionID)
+				go h.recordConnection(old, "disconnected")
 			}
 			h.clients[client.appID][client.machineID] = client
 			h.sessions[client.sessionID] = client
@@ -182,11 +184,15 @@ func (h *WebSocketHub) recordConnection(client *DeviceClient, status string) {
 			LastPingAt:  client.connectedAt,
 			Status:      status,
 		}
-		model.DB.Create(&conn)
+		if err := model.DB.Create(&conn).Error; err != nil {
+			log.Printf("记录设备连接失败: session=%s err=%v", client.sessionID, err)
+		}
 	} else {
-		model.DB.Model(&model.DeviceConnection{}).
+		if err := model.DB.Model(&model.DeviceConnection{}).
 			Where("session_id = ?", client.sessionID).
-			Update("status", status)
+			Update("status", status).Error; err != nil {
+			log.Printf("更新设备连接状态失败: session=%s status=%s err=%v", client.sessionID, status, err)
+		}
 	}
 }
 
@@ -209,11 +215,48 @@ func (h *WebSocketHub) SendToDevice(appID, machineID string, message []byte) boo
 }
 
 // BroadcastToApp 广播消息给应用下所有设备
-func (h *WebSocketHub) BroadcastToApp(appID string, message []byte) {
-	h.broadcast <- &BroadcastMessage{
-		AppID:   appID,
-		Message: message,
+func (h *WebSocketHub) BroadcastToApp(appID string, message []byte) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	sentCount := 0
+	if appClients, ok := h.clients[appID]; ok {
+		for _, client := range appClients {
+			select {
+			case client.send <- message:
+				sentCount++
+			default:
+			}
+		}
 	}
+	return sentCount
+}
+
+func (h *WebSocketHub) NotifyTaskStatus(task *model.GenerationTask) {
+	if h == nil || task == nil || task.AppID == "" {
+		return
+	}
+	eventType := "task_update"
+	switch task.Status {
+	case model.GenerationSucceeded:
+		eventType = "task_succeeded"
+	case model.GenerationFailed:
+		eventType = "task_failed"
+	}
+	payload, _ := json.Marshal(gin.H{
+		"task_id":      task.ID,
+		"status":       task.Status,
+		"progress":     task.Progress,
+		"result_json":  task.ResultJSON,
+		"error_json":   task.ErrorJSON,
+		"completed_at": task.CompletedAt,
+	})
+	message, _ := json.Marshal(WSMessage{
+		Type:    eventType,
+		ID:      task.ID,
+		Payload: payload,
+	})
+	h.BroadcastToApp(task.AppID, message)
 }
 
 // GetOnlineDevices 获取在线设备列表
@@ -264,7 +307,6 @@ type WSMessage struct {
 type WSAuthPayload struct {
 	AppKey    string `json:"app_key"`
 	MachineID string `json:"machine_id"`
-	Token     string `json:"token"` // 可选，用于额外验证
 }
 
 // HandleWebSocket 处理 WebSocket 连接
@@ -305,35 +347,28 @@ func (h *WebSocketHandler) HandleWebSocket(c *gin.Context) {
 
 	// 验证应用
 	var app model.Application
-	if err := model.DB.First(&app, "app_key = ? AND status = ?", authPayload.AppKey, model.AppStatusActive).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND app_key = ? AND status = ?",
+		middleware.GetClientAppID(c), authPayload.AppKey, model.AppStatusActive).Error; err != nil {
 		conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"无效的应用"}`)})
 		conn.Close()
 		return
 	}
-
-	// 可选 Token 验证（用于额外校验）
-	if authPayload.Token != "" {
-		claims, err := crypto.ParseToken(authPayload.Token, config.Get().JWT.Secret)
-		if err != nil || claims.TenantID != app.TenantID {
-			conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"Token 无效"}`)})
-			conn.Close()
-			return
-		}
-	}
-
-	// 验证设备
-	var device model.Device
-	if err := model.DB.Preload("License").Preload("Subscription").
-		Where("machine_id = ? AND tenant_id = ?", authPayload.MachineID, app.TenantID).
-		Order("created_at DESC").
-		First(&device).Error; err != nil {
-		conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"设备未授权"}`)})
+	if authPayload.MachineID != middleware.GetClientMachineID(c) || app.TenantID != middleware.GetClientTenantID(c) {
+		conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"客户端会话不匹配"}`)})
 		conn.Close()
 		return
 	}
-	if (device.License == nil || device.License.AppID != app.ID) &&
-		(device.Subscription == nil || device.Subscription.AppID != app.ID) {
-		conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"设备未绑定当前应用"}`)})
+
+	// 验证设备
+	device, err := loadActiveDeviceForApp(authPayload.MachineID, &app)
+	if err != nil {
+		payload, _ := json.Marshal(map[string]string{"message": err.Error()})
+		conn.WriteJSON(WSMessage{Type: "error", Payload: payload})
+		conn.Close()
+		return
+	}
+	if sessionDeviceID := middleware.GetClientDeviceID(c); sessionDeviceID != "" && device.ID != sessionDeviceID {
+		conn.WriteJSON(WSMessage{Type: "error", Payload: json.RawMessage(`{"message":"客户端会话与设备不匹配"}`)})
 		conn.Close()
 		return
 	}
@@ -393,7 +428,7 @@ func (c *DeviceClient) readPump(h *WebSocketHandler) {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("WebSocket read error: %v", err)
 			}
 			break
@@ -465,32 +500,157 @@ func (h *WebSocketHandler) handleMessage(client *DeviceClient, msg *WSMessage) {
 	}
 }
 
+func normalizeInstructionResultStatus(status string) (model.InstructionStatus, bool) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "success":
+		return model.InstructionStatusExecuted, true
+	case string(model.InstructionStatusAcked):
+		return model.InstructionStatusAcked, true
+	case string(model.InstructionStatusExecuted):
+		return model.InstructionStatusExecuted, true
+	case string(model.InstructionStatusFailed):
+		return model.InstructionStatusFailed, true
+	default:
+		return "", false
+	}
+}
+
+func isValidInstructionType(instructionType model.InstructionType) bool {
+	switch instructionType {
+	case model.InstructionTypeClick,
+		model.InstructionTypeDoubleClick,
+		model.InstructionTypeRightClick,
+		model.InstructionTypeInput,
+		model.InstructionTypeKeyPress,
+		model.InstructionTypeScroll,
+		model.InstructionTypeScreenshot,
+		model.InstructionTypeFindImage,
+		model.InstructionTypeOCR,
+		model.InstructionTypeWait,
+		model.InstructionTypeCondition,
+		model.InstructionTypeExecScript,
+		model.InstructionTypeGetStatus,
+		model.InstructionTypeRestart,
+		model.InstructionTypeShutdown,
+		model.InstructionTypeCustom:
+		return true
+	default:
+		return false
+	}
+}
+
 // handleInstructionResult 处理指令执行结果
 func (h *WebSocketHandler) handleInstructionResult(client *DeviceClient, msg *WSMessage) {
 	var result struct {
-		InstructionID string `json:"instruction_id"`
-		Status        string `json:"status"` // success/failed
-		Result        string `json:"result"`
-		Error         string `json:"error"`
+		InstructionID string          `json:"instruction_id"`
+		Status        string          `json:"status"` // success/failed
+		Result        json.RawMessage `json:"result"`
+		Error         string          `json:"error"`
 	}
 
 	if err := json.Unmarshal(msg.Payload, &result); err != nil {
 		return
 	}
-
-	// 更新指令状态
-	updates := map[string]interface{}{
-		"status": result.Status,
-		"result": result.Result,
+	if strings.TrimSpace(result.InstructionID) == "" {
+		log.Printf("WebSocket: instruction_result 缺少 instruction_id machine=%s", client.machineID)
+		return
 	}
-	if result.Status == "success" || result.Status == "failed" {
-		now := time.Now()
+
+	status, ok := normalizeInstructionResultStatus(result.Status)
+	if !ok {
+		log.Printf("WebSocket: instruction_result 状态非法 instruction=%s status=%s machine=%s", result.InstructionID, result.Status, client.machineID)
+		return
+	}
+
+	var instruction model.RealtimeInstruction
+	if err := model.DB.Where("id = ? AND app_id = ?", result.InstructionID, client.appID).
+		Where("(device_id = ? OR device_id = '')", client.deviceID).
+		First(&instruction).Error; err != nil {
+		log.Printf("WebSocket: 拒绝无归属指令回执 instruction=%s app=%s device=%s machine=%s", result.InstructionID, client.appID, client.deviceID, client.machineID)
+		return
+	}
+	if time.Now().After(instruction.ExpiresAt) {
+		model.DB.Model(&model.RealtimeInstruction{}).
+			Where("id = ? AND status IN ?", instruction.ID, []model.InstructionStatus{model.InstructionStatusPending, model.InstructionStatusSent}).
+			Update("status", model.InstructionStatusExpired)
+		log.Printf("WebSocket: 拒绝过期指令回执 instruction=%s app=%s device=%s machine=%s", result.InstructionID, client.appID, client.deviceID, client.machineID)
+		return
+	}
+
+	resultText := normalizeInstructionResultText(result.Result, result.Error)
+
+	now := time.Now()
+	instructionResult := model.RealtimeInstructionResult{
+		InstructionID: instruction.ID,
+		AppID:         client.appID,
+		DeviceID:      client.deviceID,
+		MachineID:     client.machineID,
+		Status:        status,
+		Result:        resultText,
+		AckedAt:       &now,
+	}
+	if err := model.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "instruction_id"},
+			{Name: "device_id"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"app_id",
+			"machine_id",
+			"status",
+			"result",
+			"acked_at",
+			"updated_at",
+		}),
+	}).Create(&instructionResult).Error; err != nil {
+		log.Printf("WebSocket: 保存指令设备结果失败 instruction=%s device=%s err=%v", instruction.ID, client.deviceID, err)
+		return
+	}
+
+	if instruction.DeviceID == "" {
+		return
+	}
+
+	// 指定设备指令保留主表状态，广播指令结果进入 realtime_instruction_results。
+	updates := map[string]interface{}{
+		"status": status,
+	}
+	if resultText != "" {
+		updates["result"] = resultText
+	}
+	if status == model.InstructionStatusAcked || status == model.InstructionStatusExecuted || status == model.InstructionStatusFailed {
 		updates["acked_at"] = &now
 	}
 
-	model.DB.Model(&model.RealtimeInstruction{}).
-		Where("id = ?", result.InstructionID).
+	tx := model.DB.Model(&model.RealtimeInstruction{}).
+		Where("id = ? AND app_id = ?", result.InstructionID, client.appID).
+		Where("device_id = ?", client.deviceID).
 		Updates(updates)
+	if tx.Error != nil {
+		log.Printf("WebSocket: 更新指令结果失败 instruction=%s machine=%s err=%v", result.InstructionID, client.machineID, tx.Error)
+		return
+	}
+	if tx.RowsAffected == 0 {
+		log.Printf("WebSocket: 拒绝无归属指令回执 instruction=%s app=%s device=%s machine=%s", result.InstructionID, client.appID, client.deviceID, client.machineID)
+	}
+}
+
+func normalizeInstructionResultText(result json.RawMessage, errorText string) string {
+	if len(result) == 0 || string(result) == "null" {
+		return errorText
+	}
+	var text string
+	if err := json.Unmarshal(result, &text); err == nil {
+		if text != "" {
+			return text
+		}
+		return errorText
+	}
+	var compacted json.RawMessage
+	if err := json.Unmarshal(result, &compacted); err == nil {
+		return string(compacted)
+	}
+	return string(result)
 }
 
 // handleScriptResult 处理脚本执行结果
@@ -507,10 +667,29 @@ func (h *WebSocketHandler) handleScriptResult(client *DeviceClient, msg *WSMessa
 	if err := json.Unmarshal(msg.Payload, &result); err != nil {
 		return
 	}
+	if strings.TrimSpace(result.DeliveryID) == "" {
+		log.Printf("WebSocket: script_result 缺少 delivery_id machine=%s", client.machineID)
+		return
+	}
 
 	// 更新下发状态
-	status := model.ScriptDeliveryStatus(result.Status)
-	h.scriptService.UpdateDeliveryStatus(result.DeliveryID, status, result.Result, result.Error, result.Duration)
+	status, ok := normalizeClientScriptDeliveryStatus(result.Status)
+	if !ok {
+		log.Printf("WebSocket: script_result 状态非法 delivery=%s status=%s machine=%s", result.DeliveryID, result.Status, client.machineID)
+		return
+	}
+	if err := h.scriptService.UpdateDeliveryStatusForDevice(
+		result.DeliveryID,
+		client.appID,
+		client.deviceID,
+		client.machineID,
+		status,
+		result.Result,
+		result.Error,
+		result.Duration,
+	); err != nil {
+		log.Printf("WebSocket: 更新脚本回执失败 delivery=%s app=%s device=%s machine=%s err=%v", result.DeliveryID, client.appID, client.deviceID, client.machineID, err)
+	}
 }
 
 // handleStatusReport 处理状态上报
@@ -537,6 +716,8 @@ func (h *WebSocketHandler) SendInstruction(c *gin.Context) {
 		response.BadRequest(c, "参数错误: "+err.Error())
 		return
 	}
+	req.MachineID = strings.TrimSpace(req.MachineID)
+	req.Payload = strings.TrimSpace(req.Payload)
 
 	// 验证应用
 	var app model.Application
@@ -545,15 +726,37 @@ func (h *WebSocketHandler) SendInstruction(c *gin.Context) {
 		return
 	}
 
+	instructionType := model.InstructionType(strings.TrimSpace(req.Type))
+	if !isValidInstructionType(instructionType) {
+		response.BadRequest(c, "不支持的指令类型")
+		return
+	}
+	if !json.Valid([]byte(req.Payload)) {
+		response.BadRequest(c, "指令内容必须是合法 JSON")
+		return
+	}
+
+	deviceID := ""
+	if req.MachineID != "" {
+		device, err := loadActiveDeviceForApp(req.MachineID, &app)
+		if err != nil {
+			response.Error(c, 403, err.Error())
+			return
+		}
+		deviceID = device.ID
+	}
+
 	// 生成指令
+	instructionID := utils.GenerateUUID()
 	nonce, _ := crypto.GenerateNonce(16)
 	timestamp := time.Now().Unix()
 	expiresAt := time.Now().Add(5 * time.Minute)
 
 	instruction := model.RealtimeInstruction{
+		BaseModel: model.BaseModel{ID: instructionID},
 		AppID:     req.AppID,
-		DeviceID:  "",
-		Type:      model.InstructionType(req.Type),
+		DeviceID:  deviceID,
+		Type:      instructionType,
 		Payload:   req.Payload,
 		Priority:  req.Priority,
 		Timestamp: timestamp,
@@ -563,7 +766,7 @@ func (h *WebSocketHandler) SendInstruction(c *gin.Context) {
 	}
 
 	// 签名
-	signData := []byte(instruction.ID + ":" + req.Type + ":" + req.Payload + ":" + nonce)
+	signData := []byte(instructionID + ":" + string(instructionType) + ":" + req.Payload + ":" + nonce)
 	signature, err := crypto.Sign(app.PrivateKey, signData)
 	if err != nil {
 		response.ServerError(c, "签名失败")
@@ -579,13 +782,14 @@ func (h *WebSocketHandler) SendInstruction(c *gin.Context) {
 
 	// 构建消息
 	msgPayload, _ := json.Marshal(map[string]interface{}{
-		"id":        instruction.ID,
-		"type":      req.Type,
-		"payload":   json.RawMessage(req.Payload),
-		"timestamp": timestamp,
-		"nonce":     nonce,
-		"signature": signature,
-		"expires":   expiresAt.Unix(),
+		"id":          instruction.ID,
+		"type":        instructionType,
+		"payload":     json.RawMessage(req.Payload),
+		"payload_raw": req.Payload,
+		"timestamp":   timestamp,
+		"nonce":       nonce,
+		"signature":   signature,
+		"expires":     expiresAt.Unix(),
 	})
 	wsMsg := WSMessage{
 		Type:    "instruction",
@@ -596,28 +800,41 @@ func (h *WebSocketHandler) SendInstruction(c *gin.Context) {
 
 	// 发送
 	var sent bool
+	sentCount := 0
 	if req.MachineID != "" {
 		// 发送给特定设备
 		sent = hub.SendToDevice(req.AppID, req.MachineID, msgData)
 		if sent {
+			sentCount = 1
+		}
+		if sent {
 			instruction.Status = model.InstructionStatusSent
 			now := time.Now()
 			instruction.SentAt = &now
-			model.DB.Save(&instruction)
+			if err := model.DB.Save(&instruction).Error; err != nil {
+				response.ServerError(c, "更新指令发送状态失败: "+err.Error())
+				return
+			}
 		}
 	} else {
 		// 广播
-		hub.BroadcastToApp(req.AppID, msgData)
-		sent = true
-		instruction.Status = model.InstructionStatusSent
-		now := time.Now()
-		instruction.SentAt = &now
-		model.DB.Save(&instruction)
+		sentCount = hub.BroadcastToApp(req.AppID, msgData)
+		sent = sentCount > 0
+		if sent {
+			instruction.Status = model.InstructionStatusSent
+			now := time.Now()
+			instruction.SentAt = &now
+			if err := model.DB.Save(&instruction).Error; err != nil {
+				response.ServerError(c, "更新指令发送状态失败: "+err.Error())
+				return
+			}
+		}
 	}
 
 	response.Success(c, gin.H{
 		"instruction_id": instruction.ID,
 		"sent":           sent,
+		"sent_count":     sentCount,
 		"expires_at":     expiresAt,
 	})
 }
@@ -638,8 +855,7 @@ func (h *WebSocketHandler) GetOnlineDevices(c *gin.Context) {
 	// 获取设备详情
 	var result []gin.H
 	for _, machineID := range devices {
-		var device model.Device
-		if err := model.DB.First(&device, "machine_id = ? AND tenant_id = ?", machineID, tenantID).Error; err == nil {
+		if device, err := loadActiveDeviceForApp(machineID, &app); err == nil {
 			var conn model.DeviceConnection
 			model.DB.Where("machine_id = ? AND app_id = ? AND status = ?", machineID, appID, "connected").
 				Order("connected_at DESC").First(&conn)
@@ -662,6 +878,18 @@ func (h *WebSocketHandler) GetOnlineDevices(c *gin.Context) {
 	})
 }
 
+func getInstructionResultSummary(instructionID string) (int64, int64, int64, int64) {
+	var resultCount int64
+	var ackedCount int64
+	var executedCount int64
+	var failedCount int64
+	model.DB.Model(&model.RealtimeInstructionResult{}).Where("instruction_id = ?", instructionID).Count(&resultCount)
+	model.DB.Model(&model.RealtimeInstructionResult{}).Where("instruction_id = ? AND status = ?", instructionID, model.InstructionStatusAcked).Count(&ackedCount)
+	model.DB.Model(&model.RealtimeInstructionResult{}).Where("instruction_id = ? AND status = ?", instructionID, model.InstructionStatusExecuted).Count(&executedCount)
+	model.DB.Model(&model.RealtimeInstructionResult{}).Where("instruction_id = ? AND status = ?", instructionID, model.InstructionStatusFailed).Count(&failedCount)
+	return resultCount, ackedCount, executedCount, failedCount
+}
+
 // GetInstructionStatus 获取指令状态
 func (h *WebSocketHandler) GetInstructionStatus(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
@@ -676,16 +904,38 @@ func (h *WebSocketHandler) GetInstructionStatus(c *gin.Context) {
 		return
 	}
 
+	var instructionResults []model.RealtimeInstructionResult
+	model.DB.Where("instruction_id = ?", instruction.ID).Order("created_at ASC").Find(&instructionResults)
+	results := make([]gin.H, 0, len(instructionResults))
+	for _, item := range instructionResults {
+		results = append(results, gin.H{
+			"id":         item.ID,
+			"device_id":  item.DeviceID,
+			"machine_id": item.MachineID,
+			"status":     item.Status,
+			"result":     item.Result,
+			"acked_at":   item.AckedAt,
+			"created_at": item.CreatedAt,
+			"updated_at": item.UpdatedAt,
+		})
+	}
+	resultCount, ackedCount, executedCount, failedCount := getInstructionResultSummary(instruction.ID)
+
 	response.Success(c, gin.H{
-		"id":         instruction.ID,
-		"type":       instruction.Type,
-		"payload":    instruction.Payload,
-		"status":     instruction.Status,
-		"sent_at":    instruction.SentAt,
-		"acked_at":   instruction.AckedAt,
-		"result":     instruction.Result,
-		"expires_at": instruction.ExpiresAt,
-		"created_at": instruction.CreatedAt,
+		"id":             instruction.ID,
+		"type":           instruction.Type,
+		"payload":        instruction.Payload,
+		"status":         instruction.Status,
+		"sent_at":        instruction.SentAt,
+		"acked_at":       instruction.AckedAt,
+		"result":         instruction.Result,
+		"results":        results,
+		"result_count":   resultCount,
+		"acked_count":    ackedCount,
+		"executed_count": executedCount,
+		"failed_count":   failedCount,
+		"expires_at":     instruction.ExpiresAt,
+		"created_at":     instruction.CreatedAt,
 	})
 }
 
@@ -705,14 +955,7 @@ func (h *WebSocketHandler) ListInstructions(c *gin.Context) {
 	}
 
 	// 分页
-	page := 1
-	pageSize := 20
-	if p := c.Query("page"); p != "" {
-		page, _ = strconv.Atoi(p)
-	}
-	if ps := c.Query("page_size"); ps != "" {
-		pageSize, _ = strconv.Atoi(ps)
-	}
+	page, pageSize := parsePageParams(c, 20, 100)
 	offset := (page - 1) * pageSize
 
 	var total int64
@@ -721,19 +964,24 @@ func (h *WebSocketHandler) ListInstructions(c *gin.Context) {
 
 	var result []gin.H
 	for _, inst := range instructions {
+		resultCount, ackedCount, executedCount, failedCount := getInstructionResultSummary(inst.ID)
 		result = append(result, gin.H{
-			"id":         inst.ID,
-			"app_id":     inst.AppID,
-			"device_id":  inst.DeviceID,
-			"type":       inst.Type,
-			"payload":    inst.Payload,
-			"priority":   inst.Priority,
-			"status":     inst.Status,
-			"sent_at":    inst.SentAt,
-			"acked_at":   inst.AckedAt,
-			"result":     inst.Result,
-			"expires_at": inst.ExpiresAt,
-			"created_at": inst.CreatedAt,
+			"id":             inst.ID,
+			"app_id":         inst.AppID,
+			"device_id":      inst.DeviceID,
+			"type":           inst.Type,
+			"payload":        inst.Payload,
+			"priority":       inst.Priority,
+			"status":         inst.Status,
+			"sent_at":        inst.SentAt,
+			"acked_at":       inst.AckedAt,
+			"result":         inst.Result,
+			"result_count":   resultCount,
+			"acked_count":    ackedCount,
+			"executed_count": executedCount,
+			"failed_count":   failedCount,
+			"expires_at":     inst.ExpiresAt,
+			"created_at":     inst.CreatedAt,
 		})
 	}
 

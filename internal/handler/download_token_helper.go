@@ -17,6 +17,7 @@ const (
 )
 
 type downloadTokenClaims struct {
+	TenantID  string `json:"tenant_id,omitempty"`
 	AppID     string `json:"app_id"`
 	MachineID string `json:"machine_id"`
 	Filename  string `json:"filename"`
@@ -24,13 +25,13 @@ type downloadTokenClaims struct {
 	jwt.RegisteredClaims
 }
 
-func buildClientDownloadURLWithToken(rawURL, appID, machineID, kind string) (string, error) {
+func buildClientDownloadURLWithToken(rawURL, tenantID, appID, machineID, kind string) (string, error) {
 	filename := getFilenameFromDownloadURL(rawURL)
 	if filename == "" {
 		return "", errors.New("invalid download url")
 	}
 
-	token, err := generateDownloadToken(appID, machineID, filename, kind)
+	token, err := generateDownloadToken(tenantID, appID, machineID, filename, kind)
 	if err != nil {
 		return "", err
 	}
@@ -58,8 +59,8 @@ func getFilenameFromDownloadURL(rawURL string) string {
 	return path.Base(rawURL)
 }
 
-func generateDownloadToken(appID, machineID, filename, kind string) (string, error) {
-	if appID == "" || machineID == "" || filename == "" || kind == "" {
+func generateDownloadToken(tenantID, appID, machineID, filename, kind string) (string, error) {
+	if tenantID == "" || appID == "" || machineID == "" || filename == "" || kind == "" {
 		return "", errors.New("missing token claims")
 	}
 
@@ -70,6 +71,7 @@ func generateDownloadToken(appID, machineID, filename, kind string) (string, err
 
 	now := time.Now()
 	claims := downloadTokenClaims{
+		TenantID:  tenantID,
 		AppID:     appID,
 		MachineID: machineID,
 		Filename:  filename,

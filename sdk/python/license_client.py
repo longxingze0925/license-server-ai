@@ -214,8 +214,7 @@ class CertificatePinningAdapter(HTTPAdapter):
         except CertificatePinningError:
             raise
         except Exception as e:
-            # 如果无法验证，记录警告但不阻止请求
-            pass
+            raise CertificatePinningError(f"证书指纹验证失败: {e}")
 
 
 def get_server_certificate_fingerprint(host: str, port: int = 443) -> str:
@@ -602,9 +601,17 @@ class LicenseClient:
                 resp = self._session.get(url, params=data, headers=headers, timeout=self.timeout)
             elif method_upper == 'DELETE':
                 resp = self._session.delete(url, json=data, headers=headers, timeout=self.timeout)
+            elif method_upper == 'PUT':
+                resp = self._session.put(url, json=data, headers=headers, timeout=self.timeout)
             else:
                 resp = self._session.post(url, json=data, headers=headers, timeout=self.timeout)
-            result = resp.json()
+            try:
+                result = resp.json()
+            except ValueError:
+                text = resp.text[:500] if resp.text else ''
+                if resp.status_code >= 400:
+                    raise LicenseError(f"HTTP {resp.status_code}: {text or '非 JSON 错误响应'}")
+                raise LicenseError(f"响应不是有效 JSON: {text or '空响应'}")
             if result.get('code') != 0:
                 raise LicenseError(result.get('message', '请求失败'))
             return result.get('data', {})
@@ -703,14 +710,11 @@ class LicenseClient:
         Returns:
             注册结果
         """
-        # 客户端预哈希密码
-        hashed_password = self._hash_password(password, email)
-
         data = {
             "app_key": self.app_key,
             "email": email,
-            "password": hashed_password,
-            "password_hashed": True,  # 标记密码已预哈希
+            "password": password,
+            "password_hashed": False,
             "name": name
         }
         return self._request('POST', '/auth/register', data)
@@ -732,13 +736,11 @@ class LicenseClient:
             raise LicenseError("需要提供邮箱")
 
         data = {
-            "app_key": self.app_key,
-            "old_password": self._hash_password(old_password, user_email),
-            "new_password": self._hash_password(new_password, user_email),
-            "password_hashed": True,
-            "machine_id": self.machine_id
+            "old_password": old_password,
+            "new_password": new_password,
+            "password_hashed": False
         }
-        return self._request('POST', '/auth/change-password', data)
+        return self._request_with_client_auth('PUT', '/auth/password', data)
 
     def verify(self) -> bool:
         """验证授权状态"""
@@ -759,12 +761,32 @@ class LicenseClient:
     def heartbeat(self) -> bool:
         """发送心跳"""
         try:
+            auth_mode = (self._license_info or {}).get('auth_mode', '')
+            if (auth_mode or '').strip().lower() == 'subscription':
+                return self.subscription_heartbeat()
+
             data = {
                 "app_key": self.app_key,
                 "machine_id": self.machine_id,
                 "app_version": self._get_device_info().get('app_version', '')
             }
             result = self._request_with_verification('POST', '/auth/heartbeat', data)
+            if self._license_info:
+                self._license_info['last_verified_at'] = time.time()
+                self._save_cache()
+            return result.get('valid', False)
+        except LicenseError:
+            return False
+
+    def subscription_heartbeat(self) -> bool:
+        """发送订阅模式心跳"""
+        try:
+            data = {
+                "app_key": self.app_key,
+                "machine_id": self.machine_id,
+                "app_version": self._get_device_info().get('app_version', '')
+            }
+            result = self._request_with_verification('POST', '/subscription/heartbeat', data)
             if self._license_info:
                 self._license_info['last_verified_at'] = time.time()
                 self._save_cache()
@@ -935,11 +957,7 @@ class LicenseClient:
     def check_update(self) -> Optional[Dict]:
         """检查版本更新"""
         try:
-            result = self._request('GET', '/releases/latest', {
-                "app_key": self.app_key,
-                "machine_id": self.machine_id
-            })
-            return result
+            return self._request_with_client_auth('GET', '/releases/latest')
         except LicenseError:
             return None
 

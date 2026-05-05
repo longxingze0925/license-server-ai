@@ -1,6 +1,7 @@
 package service
 
 import (
+	"license-server/internal/config"
 	"sync"
 	"time"
 )
@@ -29,7 +30,8 @@ var (
 // GetLoginLimiter 获取登录限制器单例
 func GetLoginLimiter() *LoginLimiter {
 	loginLimiterOnce.Do(func() {
-		defaultLoginLimiter = NewLoginLimiter(5, 15*time.Minute, 30*time.Minute)
+		maxAttempts, lockDuration := loginLimitConfig()
+		defaultLoginLimiter = NewLoginLimiter(maxAttempts, lockDuration, lockDuration*2)
 	})
 	return defaultLoginLimiter
 }
@@ -156,9 +158,32 @@ var (
 // GetIPLoginLimiter 获取 IP 登录限制器单例
 func GetIPLoginLimiter() *IPLoginLimiter {
 	ipLimiterOnce.Do(func() {
-		defaultIPLimiter = NewIPLoginLimiter(20, 30*time.Minute, time.Hour)
+		maxAttempts, lockDuration := ipLoginLimitConfig()
+		defaultIPLimiter = NewIPLoginLimiter(maxAttempts, lockDuration, lockDuration*2)
 	})
 	return defaultIPLimiter
+}
+
+func loginLimitConfig() (int, time.Duration) {
+	if cfg := config.Get(); cfg != nil {
+		maxAttempts := cfg.Security.MaxLoginAttempts
+		lockMinutes := cfg.Security.LoginLockMinutes
+		if maxAttempts > 0 && lockMinutes > 0 {
+			return maxAttempts, time.Duration(lockMinutes) * time.Minute
+		}
+	}
+	return 5, 15 * time.Minute
+}
+
+func ipLoginLimitConfig() (int, time.Duration) {
+	if cfg := config.Get(); cfg != nil {
+		maxAttempts := cfg.Security.IPMaxAttempts
+		lockMinutes := cfg.Security.IPLockMinutes
+		if maxAttempts > 0 && lockMinutes > 0 {
+			return maxAttempts, time.Duration(lockMinutes) * time.Minute
+		}
+	}
+	return 20, 30 * time.Minute
 }
 
 // NewIPLoginLimiter 创建 IP 登录限制器

@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -23,6 +25,7 @@ func (h *AuditHandler) List(c *gin.Context) {
 	resource := c.Query("resource")
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
+	tenantID := middleware.GetTenantID(c)
 
 	if page < 1 {
 		page = 1
@@ -31,7 +34,7 @@ func (h *AuditHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	query := model.DB.Model(&model.AuditLog{})
+	query := model.DB.Model(&model.AuditLog{}).Where("tenant_id = ?", tenantID)
 
 	if userID != "" {
 		query = query.Where("user_id = ?", userID)
@@ -42,11 +45,10 @@ func (h *AuditHandler) List(c *gin.Context) {
 	if resource != "" {
 		query = query.Where("resource = ?", resource)
 	}
-	if startDate != "" {
-		query = query.Where("created_at >= ?", startDate+" 00:00:00")
-	}
-	if endDate != "" {
-		query = query.Where("created_at <= ?", endDate+" 23:59:59")
+	var ok bool
+	query, ok = applyCreatedAtDateRange(c, query, startDate, endDate)
+	if !ok {
+		return
 	}
 
 	var total int64
@@ -61,9 +63,10 @@ func (h *AuditHandler) List(c *gin.Context) {
 // Get 获取审计日志详情
 func (h *AuditHandler) Get(c *gin.Context) {
 	id := c.Param("id")
+	tenantID := middleware.GetTenantID(c)
 
 	var log model.AuditLog
-	if err := model.DB.First(&log, "id = ?", id).Error; err != nil {
+	if err := model.DB.First(&log, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
 		response.NotFound(c, "日志不存在")
 		return
 	}
@@ -73,7 +76,12 @@ func (h *AuditHandler) Get(c *gin.Context) {
 
 // GetStats 获取审计统计
 func (h *AuditHandler) GetStats(c *gin.Context) {
-	days := c.DefaultQuery("days", "7")
+	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
+	if days < 1 || days > 365 {
+		days = 7
+	}
+	since := time.Now().AddDate(0, 0, -days)
+	tenantID := middleware.GetTenantID(c)
 
 	// 按操作类型统计
 	var actionStats []struct {
@@ -82,7 +90,7 @@ func (h *AuditHandler) GetStats(c *gin.Context) {
 	}
 	model.DB.Model(&model.AuditLog{}).
 		Select("action, count(*) as count").
-		Where("created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)", days).
+		Where("tenant_id = ? AND created_at >= ?", tenantID, since).
 		Group("action").
 		Find(&actionStats)
 
@@ -93,7 +101,7 @@ func (h *AuditHandler) GetStats(c *gin.Context) {
 	}
 	model.DB.Model(&model.AuditLog{}).
 		Select("resource, count(*) as count").
-		Where("created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)", days).
+		Where("tenant_id = ? AND created_at >= ?", tenantID, since).
 		Group("resource").
 		Find(&resourceStats)
 
@@ -104,7 +112,7 @@ func (h *AuditHandler) GetStats(c *gin.Context) {
 	}
 	model.DB.Model(&model.AuditLog{}).
 		Select("user_email, count(*) as count").
-		Where("created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)", days).
+		Where("tenant_id = ? AND created_at >= ?", tenantID, since).
 		Where("user_email != ''").
 		Group("user_email").
 		Order("count DESC").

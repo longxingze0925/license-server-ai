@@ -1,56 +1,61 @@
 import React, { useState } from 'react';
-import { Card, Button, Select, DatePicker, Form, message, Row, Col, Divider, Space, Tag } from 'antd';
+import { Card, Button, DatePicker, Form, message, Row, Col, Divider, Space, Tag } from 'antd';
 import { DownloadOutlined, FileExcelOutlined, FileTextOutlined } from '@ant-design/icons';
 import { exportApi } from '../api';
+import { useAuthStore } from '../store';
 import dayjs from 'dayjs';
+import type { AxiosResponse } from 'axios';
 
 const { RangePicker } = DatePicker;
 
+type ExportType = 'licenses' | 'devices' | 'users' | 'audit';
+type ExportParams = Record<string, string>;
+type ExportItem = {
+  key: ExportType;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  fields: string[];
+};
+
 const DataExport: React.FC = () => {
+  const { user } = useAuthStore();
   const [loading, setLoading] = useState<string | null>(null);
   const [form] = Form.useForm();
+  const canExportAuditLogs = user?.role === 'owner' || user?.role === 'admin';
 
-  const handleExport = async (type: string) => {
+  const handleExport = async (type: ExportType) => {
     try {
       const values = await form.validateFields();
       setLoading(type);
 
-      const params: any = {
-        format: values.format || 'csv',
-      };
+      const params: ExportParams = {};
 
       if (values.dateRange) {
         params.start_date = values.dateRange[0].format('YYYY-MM-DD');
         params.end_date = values.dateRange[1].format('YYYY-MM-DD');
       }
 
-      let url = '';
+      let response: AxiosResponse<Blob>;
       switch (type) {
         case 'licenses':
-          url = exportApi.licenses(params);
+          response = await exportApi.licenses(params);
           break;
         case 'devices':
-          url = exportApi.devices(params);
+          response = await exportApi.devices(params);
           break;
         case 'users':
-          url = exportApi.users(params);
+          response = await exportApi.users(params);
           break;
         case 'audit':
-          url = exportApi.auditLogs(params);
+          response = await exportApi.auditLogs(params);
           break;
         default:
           message.error('未知导出类型');
           return;
       }
 
-      // 创建下载链接
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${type}_export_${dayjs().format('YYYYMMDD_HHmmss')}.${params.format}`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-
+      saveBlob(response.data, getDownloadFilename(response, `${type}_export_${dayjs().format('YYYYMMDD_HHmmss')}.csv`));
       message.success('导出任务已开始，请等待下载');
     } catch (error) {
       console.error(error);
@@ -60,7 +65,7 @@ const DataExport: React.FC = () => {
     }
   };
 
-  const exportItems = [
+  const allExportItems: ExportItem[] = [
     {
       key: 'licenses',
       title: '授权数据',
@@ -77,10 +82,10 @@ const DataExport: React.FC = () => {
     },
     {
       key: 'users',
-      title: '用户数据',
-      description: '导出所有用户账户数据，包括邮箱、角色、状态、注册时间等信息',
+      title: '客户数据',
+      description: '导出客户账户数据，包括邮箱、姓名、公司、状态、注册时间等信息',
       icon: <FileExcelOutlined style={{ fontSize: 32, color: '#722ed1' }} />,
-      fields: ['用户ID', '邮箱', '姓名', '角色', '状态', '注册时间', '最后登录'],
+      fields: ['客户ID', '邮箱', '姓名', '公司', '状态', '注册时间'],
     },
     {
       key: 'audit',
@@ -90,6 +95,7 @@ const DataExport: React.FC = () => {
       fields: ['日志ID', '操作类型', '操作人', '目标', 'IP地址', '操作时间', '详情'],
     },
   ];
+  const exportItems = allExportItems.filter(item => item.key !== 'audit' || canExportAuditLogs);
 
   return (
     <div>
@@ -100,13 +106,6 @@ const DataExport: React.FC = () => {
 
       <Card title="导出设置" style={{ marginBottom: 24 }}>
         <Form form={form} layout="inline">
-          <Form.Item name="format" label="导出格式" initialValue="csv">
-            <Select style={{ width: 120 }} options={[
-              { label: 'CSV', value: 'csv' },
-              { label: 'Excel', value: 'xlsx' },
-              { label: 'JSON', value: 'json' },
-            ]} />
-          </Form.Item>
           <Form.Item name="dateRange" label="时间范围">
             <RangePicker
               placeholder={['开始日期', '结束日期']}
@@ -165,8 +164,6 @@ const DataExport: React.FC = () => {
       <Card title="导出说明" style={{ marginTop: 24 }}>
         <ul style={{ paddingLeft: 20, margin: 0 }}>
           <li>CSV 格式：通用格式，可用 Excel 或其他表格软件打开</li>
-          <li>Excel 格式：原生 Excel 格式，支持多工作表</li>
-          <li>JSON 格式：结构化数据格式，适合程序处理</li>
           <li>如不选择时间范围，将导出全部数据</li>
           <li>大数据量导出可能需要较长时间，请耐心等待</li>
           <li>导出的数据包含敏感信息，请妥善保管</li>
@@ -175,5 +172,30 @@ const DataExport: React.FC = () => {
     </div>
   );
 };
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function getDownloadFilename(response: AxiosResponse<Blob>, fallback: string) {
+  const disposition = response.headers['content-disposition'];
+  if (typeof disposition !== 'string') {
+    return fallback;
+  }
+
+  const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (utf8Name) {
+    return decodeURIComponent(utf8Name);
+  }
+
+  return disposition.match(/filename="?([^"]+)"?/i)?.[1] || fallback;
+}
 
 export default DataExport;

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
@@ -15,6 +16,34 @@ func NewStatisticsHandler() *StatisticsHandler {
 	return &StatisticsHandler{}
 }
 
+func localDayStart(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+func parseStatsDateRange(c *gin.Context, defaultStart time.Time) (time.Time, time.Time, error) {
+	start := defaultStart
+	end := time.Now()
+
+	if raw := c.Query("start_date"); raw != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("start_date 格式错误，应为 YYYY-MM-DD")
+		}
+		start = parsed
+	}
+	if raw := c.Query("end_date"); raw != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("end_date 格式错误，应为 YYYY-MM-DD")
+		}
+		end = parsed.AddDate(0, 0, 1)
+	}
+	if end.Before(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("end_date 不能早于 start_date")
+	}
+	return start, end, nil
+}
+
 // Dashboard 仪表盘数据
 func (h *StatisticsHandler) Dashboard(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
@@ -25,7 +54,7 @@ func (h *StatisticsHandler) Dashboard(c *gin.Context) {
 
 	// 客户统计
 	var totalCustomers int64
-	model.DB.Model(&model.Customer{}).Where("tenant_id = ?", tenantID).Count(&totalCustomers)
+	scopedCustomerQuery(c).Count(&totalCustomers)
 
 	// 应用统计
 	var totalApps int64
@@ -33,40 +62,40 @@ func (h *StatisticsHandler) Dashboard(c *gin.Context) {
 
 	// 授权统计
 	var totalLicenses int64
-	model.DB.Model(&model.License{}).Where("tenant_id = ?", tenantID).Count(&totalLicenses)
+	scopedLicenseQuery(c).Count(&totalLicenses)
 
 	var activeLicenses int64
-	model.DB.Model(&model.License{}).Where("tenant_id = ? AND status = ?", tenantID, model.LicenseStatusActive).Count(&activeLicenses)
+	scopedLicenseQuery(c).Where("licenses.status = ?", model.LicenseStatusActive).Count(&activeLicenses)
 
 	var pendingLicenses int64
-	model.DB.Model(&model.License{}).Where("tenant_id = ? AND status = ?", tenantID, model.LicenseStatusPending).Count(&pendingLicenses)
+	scopedLicenseQuery(c).Where("licenses.status = ?", model.LicenseStatusPending).Count(&pendingLicenses)
 
 	var expiredLicenses int64
-	model.DB.Model(&model.License{}).Where("tenant_id = ? AND status = ?", tenantID, model.LicenseStatusExpired).Count(&expiredLicenses)
+	scopedLicenseQuery(c).Where("licenses.status = ?", model.LicenseStatusExpired).Count(&expiredLicenses)
 
 	// 订阅统计
 	var totalSubscriptions int64
-	model.DB.Model(&model.Subscription{}).Where("tenant_id = ?", tenantID).Count(&totalSubscriptions)
+	scopedSubscriptionQuery(c).Count(&totalSubscriptions)
 
 	var activeSubscriptions int64
-	model.DB.Model(&model.Subscription{}).Where("tenant_id = ? AND status = ?", tenantID, model.SubscriptionStatusActive).Count(&activeSubscriptions)
+	scopedSubscriptionQuery(c).Where("subscriptions.status = ?", model.SubscriptionStatusActive).Count(&activeSubscriptions)
 
 	// 设备统计
 	var totalDevices int64
-	model.DB.Model(&model.Device{}).Where("tenant_id = ?", tenantID).Count(&totalDevices)
+	scopedDeviceQuery(c).Count(&totalDevices)
 
 	var activeDevices int64
 	oneDayAgo := time.Now().Add(-24 * time.Hour)
-	model.DB.Model(&model.Device{}).Where("tenant_id = ? AND last_active_at > ?", tenantID, oneDayAgo).Count(&activeDevices)
+	scopedDeviceQuery(c).Where("devices.last_active_at > ?", oneDayAgo).Count(&activeDevices)
 
 	// 今日新增
-	today := time.Now().Truncate(24 * time.Hour)
+	today := localDayStart(time.Now())
 
 	var todayCustomers int64
-	model.DB.Model(&model.Customer{}).Where("tenant_id = ? AND created_at >= ?", tenantID, today).Count(&todayCustomers)
+	scopedCustomerQuery(c).Where("customers.created_at >= ?", today).Count(&todayCustomers)
 
 	var todayLicenses int64
-	model.DB.Model(&model.License{}).Where("tenant_id = ? AND created_at >= ?", tenantID, today).Count(&todayLicenses)
+	scopedLicenseQuery(c).Where("licenses.created_at >= ?", today).Count(&todayLicenses)
 
 	result := gin.H{
 		"licenses": gin.H{
@@ -102,38 +131,72 @@ func (h *StatisticsHandler) Dashboard(c *gin.Context) {
 
 // AppStatistics 应用统计
 func (h *StatisticsHandler) AppStatistics(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
 	appID := c.Param("app_id")
 
 	var app model.Application
-	if err := model.DB.First(&app, "id = ?", appID).Error; err != nil {
+	if err := model.DB.First(&app, "id = ? AND tenant_id = ?", appID, tenantID).Error; err != nil {
 		response.NotFound(c, "应用不存在")
 		return
 	}
 
 	// 授权统计
 	var totalLicenses int64
-	model.DB.Model(&model.License{}).Where("app_id = ?", appID).Count(&totalLicenses)
+	scopedLicenseQuery(c).Where("licenses.app_id = ?", appID).Count(&totalLicenses)
 
 	var activeLicenses int64
-	model.DB.Model(&model.License{}).Where("app_id = ? AND status = ?", appID, model.LicenseStatusActive).Count(&activeLicenses)
+	scopedLicenseQuery(c).Where("licenses.app_id = ? AND licenses.status = ?", appID, model.LicenseStatusActive).Count(&activeLicenses)
 
 	var pendingLicenses int64
-	model.DB.Model(&model.License{}).Where("app_id = ? AND status = ?", appID, model.LicenseStatusPending).Count(&pendingLicenses)
+	scopedLicenseQuery(c).Where("licenses.app_id = ? AND licenses.status = ?", appID, model.LicenseStatusPending).Count(&pendingLicenses)
 
 	var expiredLicenses int64
-	model.DB.Model(&model.License{}).Where("app_id = ? AND status = ?", appID, model.LicenseStatusExpired).Count(&expiredLicenses)
+	scopedLicenseQuery(c).Where("licenses.app_id = ? AND licenses.status = ?", appID, model.LicenseStatusExpired).Count(&expiredLicenses)
+
+	// 客户统计：一个客户只要在该应用下有授权或订阅，就算作该应用客户。
+	customerIDs := make(map[string]struct{})
+	var licenseCustomerIDs []string
+	scopedLicenseQuery(c).
+		Where("licenses.app_id = ? AND licenses.customer_id IS NOT NULL AND licenses.customer_id != ''", appID).
+		Pluck("customer_id", &licenseCustomerIDs)
+	for _, id := range licenseCustomerIDs {
+		customerIDs[id] = struct{}{}
+	}
+	var subscriptionCustomerIDs []string
+	scopedSubscriptionQuery(c).
+		Where("subscriptions.app_id = ?", appID).
+		Pluck("customer_id", &subscriptionCustomerIDs)
+	for _, id := range subscriptionCustomerIDs {
+		customerIDs[id] = struct{}{}
+	}
+
+	customerIDList := make([]string, 0, len(customerIDs))
+	for id := range customerIDs {
+		customerIDList = append(customerIDList, id)
+	}
+
+	var todayCustomers int64
+	if len(customerIDList) > 0 {
+		model.DB.Model(&model.Customer{}).
+			Where("tenant_id = ? AND id IN ? AND created_at >= ?", tenantID, customerIDList, localDayStart(time.Now())).
+			Count(&todayCustomers)
+	}
 
 	// 设备统计
 	var totalDevices int64
-	model.DB.Model(&model.Device{}).
-		Joins("JOIN licenses ON devices.license_id = licenses.id").
-		Where("licenses.app_id = ?", appID).Count(&totalDevices)
+	scopedDeviceQuery(c).
+		Joins("LEFT JOIN licenses ON devices.license_id = licenses.id").
+		Joins("LEFT JOIN subscriptions ON devices.subscription_id = subscriptions.id").
+		Where("licenses.app_id = ? OR subscriptions.app_id = ?", appID, appID).
+		Count(&totalDevices)
 
 	var activeDevices int64
 	oneDayAgo := time.Now().Add(-24 * time.Hour)
-	model.DB.Model(&model.Device{}).
-		Joins("JOIN licenses ON devices.license_id = licenses.id").
-		Where("licenses.app_id = ? AND devices.last_active_at > ?", appID, oneDayAgo).Count(&activeDevices)
+	scopedDeviceQuery(c).
+		Joins("LEFT JOIN licenses ON devices.license_id = licenses.id").
+		Joins("LEFT JOIN subscriptions ON devices.subscription_id = subscriptions.id").
+		Where("(licenses.app_id = ? OR subscriptions.app_id = ?) AND devices.last_active_at > ?", appID, appID, oneDayAgo).
+		Count(&activeDevices)
 
 	// 脚本统计
 	var totalScripts int64
@@ -162,6 +225,13 @@ func (h *StatisticsHandler) AppStatistics(c *gin.Context) {
 			"total":  totalDevices,
 			"active": activeDevices,
 		},
+		"customers": gin.H{
+			"total":     len(customerIDs),
+			"today_new": todayCustomers,
+		},
+		"applications": gin.H{
+			"total": 1,
+		},
 		"scripts": gin.H{
 			"total": totalScripts,
 		},
@@ -175,6 +245,11 @@ func (h *StatisticsHandler) AppStatistics(c *gin.Context) {
 // LicenseTrend 授权趋势（最近30天）
 func (h *StatisticsHandler) LicenseTrend(c *gin.Context) {
 	appID := c.Query("app_id")
+	start, end, err := parseStatsDateRange(c, time.Now().AddDate(0, 0, -30))
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	type DayCount struct {
 		Date  string `json:"date"`
@@ -183,14 +258,14 @@ func (h *StatisticsHandler) LicenseTrend(c *gin.Context) {
 
 	var results []DayCount
 
-	query := model.DB.Model(&model.License{}).
-		Select("DATE(created_at) as date, COUNT(*) as count").
-		Where("created_at >= ?", time.Now().AddDate(0, 0, -30)).
-		Group("DATE(created_at)").
+	query := scopedLicenseQuery(c).
+		Select("DATE(licenses.created_at) as date, COUNT(*) as count").
+		Where("licenses.created_at >= ? AND licenses.created_at < ?", start, end).
+		Group("DATE(licenses.created_at)").
 		Order("date ASC")
 
 	if appID != "" {
-		query = query.Where("app_id = ?", appID)
+		query = query.Where("licenses.app_id = ?", appID)
 	}
 
 	query.Scan(&results)
@@ -201,6 +276,11 @@ func (h *StatisticsHandler) LicenseTrend(c *gin.Context) {
 // DeviceTrend 设备趋势（最近30天）
 func (h *StatisticsHandler) DeviceTrend(c *gin.Context) {
 	appID := c.Query("app_id")
+	start, end, err := parseStatsDateRange(c, time.Now().AddDate(0, 0, -30))
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	type DayCount struct {
 		Date  string `json:"date"`
@@ -209,15 +289,17 @@ func (h *StatisticsHandler) DeviceTrend(c *gin.Context) {
 
 	var results []DayCount
 
-	query := model.DB.Model(&model.Device{}).
-		Select("DATE(created_at) as date, COUNT(*) as count").
-		Where("created_at >= ?", time.Now().AddDate(0, 0, -30)).
-		Group("DATE(created_at)").
+	query := scopedDeviceQuery(c).
+		Select("DATE(devices.created_at) as date, COUNT(*) as count").
+		Where("devices.created_at >= ? AND devices.created_at < ?", start, end).
+		Group("DATE(devices.created_at)").
 		Order("date ASC")
 
 	if appID != "" {
-		query = query.Joins("JOIN licenses ON devices.license_id = licenses.id").
-			Where("licenses.app_id = ?", appID)
+		query = query.
+			Joins("LEFT JOIN licenses ON devices.license_id = licenses.id").
+			Joins("LEFT JOIN subscriptions ON devices.subscription_id = subscriptions.id").
+			Where("licenses.app_id = ? OR subscriptions.app_id = ?", appID, appID)
 	}
 
 	query.Scan(&results)
@@ -236,15 +318,17 @@ func (h *StatisticsHandler) HeartbeatTrend(c *gin.Context) {
 
 	var results []HourCount
 
-	query := model.DB.Model(&model.Heartbeat{}).
-		Select("DATE_FORMAT(created_at, '%Y-%m-%d %H:00') as hour, COUNT(*) as count").
-		Where("created_at >= ?", time.Now().Add(-24*time.Hour)).
+	query := scopedHeartbeatQuery(c).
+		Select("DATE_FORMAT(heartbeats.created_at, '%Y-%m-%d %H:00') as hour, COUNT(*) as count").
+		Where("heartbeats.created_at >= ?", time.Now().Add(-24*time.Hour)).
 		Group("hour").
 		Order("hour ASC")
 
 	if appID != "" {
-		query = query.Joins("JOIN licenses ON heartbeats.license_id = licenses.id").
-			Where("licenses.app_id = ?", appID)
+		query = query.
+			Joins("LEFT JOIN licenses ON heartbeats.license_id = licenses.id").
+			Joins("LEFT JOIN subscriptions ON heartbeats.subscription_id = subscriptions.id").
+			Where("licenses.app_id = ? OR subscriptions.app_id = ?", appID, appID)
 	}
 
 	query.Scan(&results)
@@ -255,6 +339,11 @@ func (h *StatisticsHandler) HeartbeatTrend(c *gin.Context) {
 // LicenseTypeDistribution 授权类型分布
 func (h *StatisticsHandler) LicenseTypeDistribution(c *gin.Context) {
 	appID := c.Query("app_id")
+	start, end, err := parseStatsDateRange(c, time.Time{})
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	type TypeCount struct {
 		Type  string `json:"type"`
@@ -263,12 +352,15 @@ func (h *StatisticsHandler) LicenseTypeDistribution(c *gin.Context) {
 
 	var results []TypeCount
 
-	query := model.DB.Model(&model.License{}).
-		Select("type, COUNT(*) as count").
-		Group("type")
+	query := scopedLicenseQuery(c).
+		Select("licenses.type, COUNT(*) as count").
+		Group("licenses.type")
 
+	if !start.IsZero() {
+		query = query.Where("licenses.created_at >= ? AND licenses.created_at < ?", start, end)
+	}
 	if appID != "" {
-		query = query.Where("app_id = ?", appID)
+		query = query.Where("licenses.app_id = ?", appID)
 	}
 
 	query.Scan(&results)
@@ -279,6 +371,11 @@ func (h *StatisticsHandler) LicenseTypeDistribution(c *gin.Context) {
 // DeviceOSDistribution 设备系统分布
 func (h *StatisticsHandler) DeviceOSDistribution(c *gin.Context) {
 	appID := c.Query("app_id")
+	start, end, err := parseStatsDateRange(c, time.Time{})
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	type OSCount struct {
 		OSType string `json:"os_type"`
@@ -287,14 +384,19 @@ func (h *StatisticsHandler) DeviceOSDistribution(c *gin.Context) {
 
 	var results []OSCount
 
-	query := model.DB.Model(&model.Device{}).
-		Select("os_type, COUNT(*) as count").
-		Where("os_type IS NOT NULL AND os_type != ''").
-		Group("os_type")
+	query := scopedDeviceQuery(c).
+		Select("devices.os_type, COUNT(*) as count").
+		Where("devices.os_type IS NOT NULL AND devices.os_type != ''").
+		Group("devices.os_type")
 
+	if !start.IsZero() {
+		query = query.Where("devices.created_at >= ? AND devices.created_at < ?", start, end)
+	}
 	if appID != "" {
-		query = query.Joins("JOIN licenses ON devices.license_id = licenses.id").
-			Where("licenses.app_id = ?", appID)
+		query = query.
+			Joins("LEFT JOIN licenses ON devices.license_id = licenses.id").
+			Joins("LEFT JOIN subscriptions ON devices.subscription_id = subscriptions.id").
+			Where("licenses.app_id = ? OR subscriptions.app_id = ?", appID, appID)
 	}
 
 	query.Scan(&results)

@@ -7,7 +7,7 @@ type Subscription struct {
 	BaseModel
 	TenantID     string             `gorm:"type:char(36);index;not null" json:"tenant_id"`   // 所属租户
 	CustomerID   string             `gorm:"type:char(36);index;not null" json:"customer_id"` // 关联客户
-	ClientUserID *string            `gorm:"type:char(36);index" json:"client_user_id"`       // 关联客户端用户（可选）
+	ClientUserID *string            `gorm:"type:char(36);index" json:"client_user_id"`       // 历史字段，当前使用 CustomerID
 	AppID        string             `gorm:"type:varchar(36);not null;index" json:"app_id"`
 	PlanType     PlanType           `gorm:"type:varchar(20);default:free" json:"plan_type"`
 	MaxDevices   int                `gorm:"default:1" json:"max_devices"`

@@ -5,9 +5,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"regexp"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
@@ -16,6 +21,7 @@ type Config struct {
 	JWT      JWTConfig      `yaml:"jwt"`
 	RSA      RSAConfig      `yaml:"rsa"`
 	Storage  StorageConfig  `yaml:"storage"`
+	AI       AIConfig       `yaml:"ai"`
 	Log      LogConfig      `yaml:"log"`
 	Email    EmailConfig    `yaml:"email"`
 	Security SecurityConfig `yaml:"security"`
@@ -72,8 +78,14 @@ type RSAConfig struct {
 }
 
 type StorageConfig struct {
-	ScriptsDir  string `yaml:"scripts_dir"`
-	ReleasesDir string `yaml:"releases_dir"`
+	ScriptsDir         string `yaml:"scripts_dir"`
+	ReleasesDir        string `yaml:"releases_dir"`
+	GenerationsRoot    string `yaml:"generations_root"`     // AI 生成结果根目录（视频/图片）；默认 ./storage/generations
+	GenerationKeepDays int    `yaml:"generation_keep_days"` // 文件保留天数，默认 15
+}
+
+type AIConfig struct {
+	AsyncTaskTimeoutMinutes int `yaml:"async_task_timeout_minutes"` // 异步生成任务超时分钟数，默认 120
 }
 
 type LogConfig struct {
@@ -116,6 +128,9 @@ type SecurityConfig struct {
 	// 允许的来源（CORS）
 	AllowedOrigins []string `yaml:"allowed_origins"`
 
+	// 可信反向代理。为空时不信任 X-Forwarded-For / X-Real-IP。
+	TrustedProxies []string `yaml:"trusted_proxies"`
+
 	// 上传与请求限制
 	MaxReleaseUploadMB      int `yaml:"max_release_upload_mb"`       // 发布版本上传大小上限（MB）
 	MaxRequestBodyMB        int `yaml:"max_request_body_mb"`         // 全局请求体大小上限（MB）
@@ -131,6 +146,13 @@ type SecurityConfig struct {
 	ClientAccessTokenSecret         string `yaml:"client_access_token_secret"`          // 客户端 access token 密钥（留空复用 JWT Secret）
 	ClientAccessTokenExpireSeconds  int    `yaml:"client_access_token_expire_seconds"`  // 客户端 access token 过期时间（秒）
 	ClientRefreshTokenExpireSeconds int    `yaml:"client_refresh_token_expire_seconds"` // 客户端 refresh token 过期时间（秒）
+
+	// API 速率限制（每分钟）
+	APIRateLimit        int `yaml:"api_rate_limit"`
+	AuthRateLimit       int `yaml:"auth_rate_limit"`
+	ClientRateLimit     int `yaml:"client_rate_limit"`
+	ClientAuthRateLimit int `yaml:"client_auth_rate_limit"`
+	HeartbeatRateLimit  int `yaml:"heartbeat_rate_limit"`
 }
 
 var globalConfig *Config
@@ -139,6 +161,10 @@ func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+	data, err = expandEnvPlaceholders(data)
+	if err != nil {
+		return nil, err
 	}
 
 	var cfg Config
@@ -156,6 +182,28 @@ func Load(path string) (*Config, error) {
 
 	globalConfig = &cfg
 	return &cfg, nil
+}
+
+func expandEnvPlaceholders(data []byte) ([]byte, error) {
+	missing := map[string]bool{}
+	expanded := envPlaceholderPattern.ReplaceAllStringFunc(string(data), func(match string) string {
+		name := match[2 : len(match)-1]
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			missing[name] = true
+			return match
+		}
+		return value
+	})
+	if len(missing) > 0 {
+		names := make([]string, 0, len(missing))
+		for name := range missing {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("配置引用了未设置的环境变量: %s", strings.Join(names, ", "))
+	}
+	return []byte(expanded), nil
 }
 
 func Get() *Config {
@@ -210,6 +258,30 @@ func setDefaults(cfg *Config) {
 	if cfg.Security.ClientRefreshTokenExpireSeconds == 0 {
 		cfg.Security.ClientRefreshTokenExpireSeconds = 2592000
 	}
+	if cfg.Security.APIRateLimit == 0 {
+		cfg.Security.APIRateLimit = 100
+	}
+	if cfg.Security.AuthRateLimit == 0 {
+		cfg.Security.AuthRateLimit = 10
+	}
+	if cfg.Security.ClientRateLimit == 0 {
+		cfg.Security.ClientRateLimit = 30
+	}
+	if cfg.Security.ClientAuthRateLimit == 0 {
+		cfg.Security.ClientAuthRateLimit = 5
+	}
+	if cfg.Security.HeartbeatRateLimit == 0 {
+		cfg.Security.HeartbeatRateLimit = 120
+	}
+	if cfg.Storage.GenerationsRoot == "" {
+		cfg.Storage.GenerationsRoot = "./storage/generations"
+	}
+	if cfg.Storage.GenerationKeepDays == 0 {
+		cfg.Storage.GenerationKeepDays = 15
+	}
+	if cfg.AI.AsyncTaskTimeoutMinutes == 0 {
+		cfg.AI.AsyncTaskTimeoutMinutes = 120
+	}
 }
 
 // validateSecurity 验证安全配置
@@ -230,6 +302,9 @@ func validateSecurity(cfg *Config) error {
 			return fmt.Errorf("JWT Secret 长度至少需要 32 个字符")
 		}
 		fmt.Println("[WARNING] JWT Secret 长度建议至少 32 个字符")
+	}
+	if cfg.Server.Mode == "release" && len(cfg.Security.AllowedOrigins) == 0 {
+		return fmt.Errorf("生产环境必须配置 security.allowed_origins，避免 CORS 放行全部来源")
 	}
 
 	return nil

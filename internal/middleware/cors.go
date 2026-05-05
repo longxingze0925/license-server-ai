@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"license-server/internal/config"
+	"log"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -16,7 +17,7 @@ func CORSMiddleware() gin.HandlerFunc {
 			allowedOrigins = cfg.Security.AllowedOrigins
 		}
 
-		allowOrigin, allowCredentials := resolveCORSOrigin(origin, allowedOrigins)
+		allowOrigin, allowCredentials := resolveCORSOrigin(origin, allowedOrigins, isReleaseMode())
 		if allowOrigin != "" {
 			c.Header("Access-Control-Allow-Origin", allowOrigin)
 			c.Header("Vary", "Origin")
@@ -26,8 +27,8 @@ func CORSMiddleware() gin.HandlerFunc {
 		}
 
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, X-Requested-With")
-		c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Type")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, X-Requested-With, X-CSRF-Token")
+		c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Disposition, X-Task-Id, X-Cost, X-File-Id, X-File-Hash, X-File-Signature, X-File-Signature-Alg, X-Script-Version, X-Script-Hash")
 
 		if c.Request.Method == "OPTIONS" {
 			if origin != "" && allowOrigin == "" {
@@ -42,11 +43,17 @@ func CORSMiddleware() gin.HandlerFunc {
 	}
 }
 
-func resolveCORSOrigin(origin string, allowed []string) (string, bool) {
+func resolveCORSOrigin(origin string, allowed []string, releaseMode bool) (string, bool) {
 	normalizedOrigin := normalizeOrigin(origin)
 
 	// 未配置时，默认放行，兼容旧行为。
 	if len(allowed) == 0 {
+		if releaseMode {
+			if normalizedOrigin != "" {
+				log.Printf("[WARN] release 模式未配置 security.allowed_origins，拒绝跨域来源: %s", origin)
+			}
+			return "", false
+		}
 		if normalizedOrigin == "" {
 			return "*", false
 		}
@@ -73,6 +80,11 @@ func resolveCORSOrigin(origin string, allowed []string) (string, bool) {
 	}
 
 	return "", false
+}
+
+func isReleaseMode() bool {
+	cfg := config.Get()
+	return cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Server.Mode), "release")
 }
 
 func normalizeOrigin(origin string) string {

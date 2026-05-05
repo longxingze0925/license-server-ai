@@ -27,9 +27,9 @@ func (UserConfig) TableName() string {
 // UserWorkflow 用户工作流
 type UserWorkflow struct {
 	BaseModel
-	UserID       string     `gorm:"type:varchar(36);not null;index"`
-	AppID        string     `gorm:"type:varchar(36);not null;index"`
-	WorkflowID   string     `gorm:"type:varchar(50);not null;uniqueIndex"`
+	UserID       string     `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_user_workflow_key"`
+	AppID        string     `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_user_workflow_key"`
+	WorkflowID   string     `gorm:"type:varchar(50);not null;uniqueIndex:idx_user_workflow_key"`
 	WorkflowName string     `gorm:"type:varchar(100)"`
 	Description  string     `gorm:"type:text"`
 	Steps        string     `gorm:"type:json"`                        // 步骤配置 JSON
@@ -51,9 +51,9 @@ func (UserWorkflow) TableName() string {
 // UserBatchTask 用户批量任务
 type UserBatchTask struct {
 	BaseModel
-	UserID          string     `gorm:"type:varchar(36);not null;index"`
-	AppID           string     `gorm:"type:varchar(36);not null;index"`
-	TaskID          string     `gorm:"type:varchar(50);not null;uniqueIndex"`
+	UserID          string     `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_user_batch_task_key"`
+	AppID           string     `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_user_batch_task_key"`
+	TaskID          string     `gorm:"type:varchar(50);not null;uniqueIndex:idx_user_batch_task_key"`
 	TaskName        string     `gorm:"type:varchar(100)"`
 	Description     string     `gorm:"type:text"`
 	ScriptPath      string     `gorm:"type:varchar(255)"`
@@ -84,16 +84,16 @@ func (UserBatchTask) TableName() string {
 // UserMaterial 用户素材
 type UserMaterial struct {
 	BaseModel
-	UserID      string     `gorm:"type:varchar(36);not null;index"`
-	AppID       string     `gorm:"type:varchar(36);not null;index"`
-	MaterialID  int64      `gorm:"not null;uniqueIndex"`
+	UserID      string     `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_user_material_key"`
+	AppID       string     `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_user_material_key"`
+	MaterialID  int64      `gorm:"not null;uniqueIndex:idx_user_material_key"`
 	FileName    string     `gorm:"type:varchar(255)"`
 	FileType    string     `gorm:"type:varchar(20)"` // 图片/视频
 	Caption     string     `gorm:"type:text"`
 	GroupName   string     `gorm:"type:varchar(50);index"`
 	Status      string     `gorm:"type:varchar(20);default:未使用"` // 未使用/处理中/已使用
-	LocalPath   string     `gorm:"type:varchar(500)"`             // 本地路径
-	CloudFileID string     `gorm:"type:varchar(36)"`              // 云端文件ID (可选)
+	LocalPath   string     `gorm:"type:varchar(500)"`            // 本地路径
+	CloudFileID string     `gorm:"type:varchar(36)"`             // 云端文件ID (可选)
 	FileSize    int64      `gorm:"default:0"`
 	FileHash    string     `gorm:"type:varchar(64)"`
 	CreatedAt   time.Time  `json:"created_at"`
@@ -141,16 +141,16 @@ func (UserPost) TableName() string {
 // UserComment 用户采集的评论数据
 type UserComment struct {
 	BaseModel
-	UserID      string    `gorm:"type:varchar(36);not null;index"`
-	AppID       string    `gorm:"type:varchar(36);not null;index"`
-	GroupName   string    `gorm:"type:varchar(50);not null;index"`
-	PostLink    string    `gorm:"type:varchar(500)"`
-	PostID      string    `gorm:"type:varchar(100);index"`
-	CommentID   string    `gorm:"type:varchar(100);index"`
-	Username    string    `gorm:"type:varchar(100);index"`
-	FullName    string    `gorm:"type:varchar(200)"`
-	Content     string    `gorm:"type:text"`
-	LikeCount   int       `gorm:"default:0"`
+	UserID      string `gorm:"type:varchar(36);not null;index"`
+	AppID       string `gorm:"type:varchar(36);not null;index"`
+	GroupName   string `gorm:"type:varchar(50);not null;index"`
+	PostLink    string `gorm:"type:varchar(500)"`
+	PostID      string `gorm:"type:varchar(100);index"`
+	CommentID   string `gorm:"type:varchar(100);index"`
+	Username    string `gorm:"type:varchar(100);index"`
+	FullName    string `gorm:"type:varchar(200)"`
+	Content     string `gorm:"type:text"`
+	LikeCount   int    `gorm:"default:0"`
 	Timestamp   *time.Time
 	CollectedAt time.Time `json:"collected_at"`
 	Version     int64     `gorm:"default:1"`
@@ -267,18 +267,18 @@ func (SyncLog) TableName() string {
 // UserVoiceConfig 用户声音配置（TTS配置）
 type UserVoiceConfig struct {
 	BaseModel
-	UserID       string  `gorm:"type:varchar(36);not null;index"`
-	AppID        string  `gorm:"type:varchar(36);not null;index"`
-	VoiceID      int64   `gorm:"not null;uniqueIndex"` // 客户端的voice_configs.id
-	Role         string  `gorm:"type:varchar(50)"`     // 角色标识
-	Name         string  `gorm:"type:varchar(100)"`    // 配置名称
-	GPTPath      string  `gorm:"type:varchar(500)"`    // GPT模型路径
-	SoVITSPath   string  `gorm:"type:varchar(500)"`    // SoVITS模型路径
-	RefAudioPath string  `gorm:"type:varchar(500)"`    // 参考音频路径
-	RefText      string  `gorm:"type:text"`            // 参考文本
+	UserID       string  `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_user_voice_config_key"`
+	AppID        string  `gorm:"type:varchar(36);not null;index;uniqueIndex:idx_user_voice_config_key"`
+	VoiceID      int64   `gorm:"not null;uniqueIndex:idx_user_voice_config_key"` // 客户端的voice_configs.id
+	Role         string  `gorm:"type:varchar(50)"`                               // 角色标识
+	Name         string  `gorm:"type:varchar(100)"`                              // 配置名称
+	GPTPath      string  `gorm:"type:varchar(500)"`                              // GPT模型路径
+	SoVITSPath   string  `gorm:"type:varchar(500)"`                              // SoVITS模型路径
+	RefAudioPath string  `gorm:"type:varchar(500)"`                              // 参考音频路径
+	RefText      string  `gorm:"type:text"`                                      // 参考文本
 	Language     string  `gorm:"type:varchar(20);default:zh"`
 	SpeedFactor  float64 `gorm:"default:1.0"`
-	TTSVersion   int     `gorm:"default:2"`            // TTS版本: 1=v1, 2=v2, 3=v3, 4=v4, 5=v2Pro, 6=v2ProPlus
+	TTSVersion   int     `gorm:"default:2"` // TTS版本: 1=v1, 2=v2, 3=v3, 4=v4, 5=v2Pro, 6=v2ProPlus
 	Enabled      bool    `gorm:"default:true"`
 	Version      int64   `gorm:"default:1"`
 	IsDeleted    bool    `gorm:"default:false;index"`
@@ -322,13 +322,13 @@ const (
 // UserTableData 通用表数据存储（用于存储任意表结构的数据）
 type UserTableData struct {
 	BaseModel
-	UserID     string `gorm:"type:varchar(36);not null;index:idx_user_table_data"`
-	AppID      string `gorm:"type:varchar(36);not null;index:idx_user_table_data"`
-	SourceTable string `gorm:"type:varchar(100);not null;index:idx_user_table_data;column:table_name"` // 表名，如 voice_configs, scripts
-	RecordID   string `gorm:"type:varchar(100);not null;index:idx_user_table_data"` // 记录ID（原表的主键）
-	Data       string `gorm:"type:longtext"`                                        // JSON 格式的完整记录数据
-	Version    int64  `gorm:"default:1"`
-	IsDeleted  bool   `gorm:"default:false;index"`
+	UserID      string `gorm:"type:varchar(36);not null;index:idx_user_table_data;uniqueIndex:idx_user_table_data_unique_record"`
+	AppID       string `gorm:"type:varchar(36);not null;index:idx_user_table_data;uniqueIndex:idx_user_table_data_unique_record"`
+	SourceTable string `gorm:"type:varchar(100);not null;index:idx_user_table_data;uniqueIndex:idx_user_table_data_unique_record;column:table_name"` // 表名，如 voice_configs, scripts
+	RecordID    string `gorm:"type:varchar(100);not null;index:idx_user_table_data;uniqueIndex:idx_user_table_data_unique_record"`                   // 记录ID（原表的主键）
+	Data        string `gorm:"type:longtext"`                                                                                                        // JSON 格式的完整记录数据
+	Version     int64  `gorm:"default:1"`
+	IsDeleted   bool   `gorm:"default:false;index"`
 }
 
 func (UserTableData) TableName() string {

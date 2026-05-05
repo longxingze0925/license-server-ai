@@ -27,11 +27,14 @@
 """
 
 import json
+import re
 import time
 import threading
+import hashlib
 from typing import Optional, Dict, List, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime, timezone
 
 
 class ConflictResolution(Enum):
@@ -58,6 +61,10 @@ class SyncResult:
     status: str  # success, conflict, error
     version: int = 0
     server_version: int = 0
+    data_key: str = ""
+    conflict_id: str = ""
+    error: str = ""
+    conflict_data: Any = None
 
 
 @dataclass
@@ -78,6 +85,11 @@ class SyncChange:
     data: Dict[str, Any]
     version: int = 0
     change_time: int = 0
+    data_type: str = ""
+    data_key: str = ""
+    action: str = ""  # create, update, delete
+    local_version: int = 0
+    updated_at: int = 0
 
 
 @dataclass
@@ -90,10 +102,22 @@ class SyncStatus:
 
 
 @dataclass
+class SyncChangesPage:
+    """一页同步变更"""
+    changes: List[SyncChange] = field(default_factory=list)
+    server_time: int = 0
+    has_more: bool = False
+    next_offset: int = 0
+    limit: int = 0
+    offset: int = 0
+
+
+@dataclass
 class ConfigData:
     """配置数据"""
     key: str
     value: Any
+    version: int = 0
     updated_at: int = 0
 
 
@@ -104,6 +128,7 @@ class WorkflowData:
     name: str
     config: Dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
+    version: int = 0
     updated_at: int = 0
 
 
@@ -114,10 +139,20 @@ class MaterialData:
     type: str
     content: str
     tags: str = ""
+    material_id: int = 0
+    version: int = 0
     updated_at: int = 0
 
 
 # 数据类型常量
+DATA_TYPE_CONFIG = "config"
+DATA_TYPE_WORKFLOW = "workflow"
+DATA_TYPE_BATCH_TASK = "batch_task"
+DATA_TYPE_MATERIAL = "material"
+DATA_TYPE_POST = "post"
+DATA_TYPE_COMMENT = "comment"
+DATA_TYPE_COMMENT_SCRIPT = "comment_script"
+DATA_TYPE_VOICE_CONFIG = "voice_config"
 DATA_TYPE_SCRIPTS = "scripts"  # 话术管理
 DATA_TYPE_DANMAKU_GROUPS = "danmaku_groups"  # 互动规则
 DATA_TYPE_AI_CONFIG = "ai_config"  # AI配置
@@ -127,9 +162,9 @@ DATA_TYPE_RANDOM_WORD_AI_CONFIG = "random_word_ai_config"  # 随机词AI配置
 @dataclass
 class BackupData:
     """备份数据"""
-    id: str
-    data_type: str
-    data_json: str
+    id: str = ""
+    data_type: str = ""
+    data_json: str = ""
     version: int = 0
     device_name: str = ""
     machine_id: str = ""
@@ -148,6 +183,10 @@ class PostData:
     content: str
     status: str = "draft"
     group_id: str = ""
+    group_name: str = ""
+    post_type: str = ""
+    post_link: str = ""
+    version: int = 0
     updated_at: int = 0
 
 
@@ -157,6 +196,7 @@ class CommentScriptData:
     id: str
     content: str
     category: str = ""
+    version: int = 0
     updated_at: int = 0
 
 
@@ -171,6 +211,8 @@ class PostGroup:
 class DataSyncClient:
     """数据同步客户端"""
 
+    _sync_identifier_pattern = re.compile(r'^[A-Za-z0-9_.-]+$')
+
     def __init__(self, license_client):
         """
         初始化数据同步客户端
@@ -181,42 +223,24 @@ class DataSyncClient:
         self.client = license_client
         self.last_sync_time: Dict[str, int] = {}
 
+    @classmethod
+    def _validate_sync_identifier(cls, field: str, value: str) -> str:
+        normalized = str(value or '').strip()
+        if not normalized:
+            raise ValueError(f"{field}不能为空")
+        if len(normalized) > 100:
+            raise ValueError(f"{field}长度不能超过100字符")
+        if not cls._sync_identifier_pattern.match(normalized):
+            raise ValueError(f"{field}只能包含字母、数字、下划线、点和横线")
+        return normalized
+
     def _request(self, method: str, endpoint: str, data: Optional[Dict] = None, params: Optional[Dict] = None) -> Dict:
-        """发送 HTTP 请求"""
-        url = f"{self.client.server_url}/api/client{endpoint}"
-
-        # 添加基础参数
-        base_params = {
-            "app_key": self.client.app_key,
-            "machine_id": self.client.machine_id
-        }
+        """发送需要客户端会话令牌的 HTTP 请求"""
+        payload = dict(data or {})
         if params:
-            base_params.update(params)
-
+            payload.update(params)
         try:
-            if method == 'GET':
-                resp = self.client._session.get(url, params=base_params, timeout=self.client.timeout)
-            elif method == 'POST':
-                if data:
-                    data.update(base_params)
-                else:
-                    data = base_params
-                resp = self.client._session.post(url, json=data, timeout=self.client.timeout)
-            elif method == 'DELETE':
-                resp = self.client._session.delete(url, params=base_params, json=data, timeout=self.client.timeout)
-            elif method == 'PUT':
-                if data:
-                    data.update(base_params)
-                else:
-                    data = base_params
-                resp = self.client._session.put(url, json=data, timeout=self.client.timeout)
-            else:
-                raise ValueError(f"不支持的请求方法: {method}")
-
-            result = resp.json()
-            if result.get('code') != 0:
-                raise Exception(result.get('message', '请求失败'))
-            return result.get('data', {})
+            return self.client._request_with_client_auth(method, endpoint, payload or None)
         except Exception as e:
             raise Exception(f"请求失败: {e}")
 
@@ -242,6 +266,7 @@ class DataSyncClient:
         Returns:
             (记录列表, 服务器时间)
         """
+        table_name = self._validate_sync_identifier("table_name", table_name)
         params = {"table": table_name}
         if since > 0:
             params["since"] = str(since)
@@ -300,6 +325,8 @@ class DataSyncClient:
         Returns:
             同步结果
         """
+        table_name = self._validate_sync_identifier("table_name", table_name)
+        record_id = self._validate_sync_identifier("record_id", record_id)
         req_data = {
             "table": table_name,
             "record_id": record_id,
@@ -325,9 +352,15 @@ class DataSyncClient:
         Returns:
             同步结果列表
         """
+        table_name = self._validate_sync_identifier("table_name", table_name)
+        normalized_records = []
+        for record in records:
+            item = dict(record)
+            item['record_id'] = self._validate_sync_identifier("record_id", item.get('record_id', ''))
+            normalized_records.append(item)
         req_data = {
             "table": table_name,
-            "records": records
+            "records": normalized_records
         }
         result = self._request('POST', '/sync/table/batch', req_data)
         return [SyncResult(
@@ -339,6 +372,8 @@ class DataSyncClient:
 
     def delete_record(self, table_name: str, record_id: str) -> bool:
         """删除服务器上的记录"""
+        table_name = self._validate_sync_identifier("table_name", table_name)
+        record_id = self._validate_sync_identifier("record_id", record_id)
         req_data = {
             "table": table_name,
             "record_id": record_id
@@ -347,6 +382,40 @@ class DataSyncClient:
         return True
 
     # ==================== 高级同步功能 ====================
+
+    @staticmethod
+    def _normalize_sync_result(item: Dict[str, Any], fallback_key: str = "") -> SyncResult:
+        data_key = item.get('data_key') or item.get('record_id') or fallback_key
+        return SyncResult(
+            record_id=item.get('record_id') or data_key,
+            data_key=data_key,
+            status=item.get('status', 'error'),
+            version=item.get('version') or item.get('server_version', 0),
+            server_version=item.get('server_version', 0),
+            conflict_id=item.get('conflict_id', ''),
+            error=item.get('error', ''),
+            conflict_data=item.get('conflict_data')
+        )
+
+    @staticmethod
+    def _change_to_push_item(change: SyncChange) -> Dict[str, Any]:
+        data_type = change.data_type or change.table
+        data_key = change.data_key or change.record_id or change.id
+        action = change.action
+        if not action:
+            if change.operation in ('insert', 'create'):
+                action = 'create'
+            elif change.operation == 'delete':
+                action = 'delete'
+            else:
+                action = 'update'
+        return {
+            "data_type": data_type,
+            "data_key": data_key,
+            "action": action,
+            "data": change.data,
+            "local_version": change.local_version or change.version
+        }
 
     def push_changes(self, changes: List[SyncChange]) -> List[SyncResult]:
         """
@@ -359,23 +428,10 @@ class DataSyncClient:
             同步结果列表
         """
         req_data = {
-            "changes": [{
-                "id": c.id,
-                "table": c.table,
-                "record_id": c.record_id,
-                "operation": c.operation,
-                "data": c.data,
-                "version": c.version,
-                "change_time": c.change_time
-            } for c in changes]
+            "items": [self._change_to_push_item(c) for c in changes]
         }
         result = self._request('POST', '/sync/push', req_data)
-        return [SyncResult(
-            record_id=r.get('record_id', ''),
-            status=r.get('status', 'error'),
-            version=r.get('version', 0),
-            server_version=r.get('server_version', 0)
-        ) for r in result.get('results', [])]
+        return [self._normalize_sync_result(r) for r in result.get('results', [])]
 
     def get_changes(self, since: int = 0, tables: Optional[List[str]] = None) -> Tuple[List[SyncChange], int]:
         """
@@ -383,29 +439,93 @@ class DataSyncClient:
 
         Args:
             since: 从指定时间戳开始获取变更
-            tables: 指定要获取的表（为空则获取所有表）
+            tables: 兼容旧参数名，实际表示服务端 data_type 列表；为空则获取所有支持的数据类型
 
         Returns:
             (变更列表, 服务器时间)
         """
+        if tables and len(tables) > 1:
+            all_changes: List[SyncChange] = []
+            latest_server_time = 0
+            for data_type in tables:
+                changes, server_time = self.get_changes(since, [data_type])
+                all_changes.extend(changes)
+                latest_server_time = max(latest_server_time, server_time)
+            return all_changes, latest_server_time
+
         params = {}
         if since > 0:
             params["since"] = str(since)
         if tables:
-            params["tables"] = ",".join(tables)
+            params["data_type"] = tables[0]
 
-        data = self._request('GET', '/sync/changes', params=params)
-        changes = [SyncChange(
-            id=c.get('id', ''),
-            table=c.get('table', ''),
-            record_id=c.get('record_id', ''),
-            operation=c.get('operation', ''),
-            data=c.get('data', {}),
-            version=c.get('version', 0),
-            change_time=c.get('change_time', 0)
-        ) for c in data.get('changes', [])]
+        all_changes: List[SyncChange] = []
+        latest_server_time = 0
+        offset = 0
+        while True:
+            if offset > 0:
+                params["offset"] = str(offset)
+            page = self.get_changes_page(since=since, data_type=tables[0] if tables else "", offset=offset, params=params)
+            all_changes.extend(page.changes)
+            latest_server_time = max(latest_server_time, page.server_time)
+            if not page.has_more:
+                break
+            if page.next_offset <= offset:
+                raise Exception(f"服务端返回了无效的 next_offset: {page.next_offset}")
+            offset = page.next_offset
 
-        return changes, data.get('server_time', 0)
+        return all_changes, latest_server_time
+
+    def get_changes_page(
+        self,
+        since: int = 0,
+        data_type: str = "",
+        limit: int = 0,
+        offset: int = 0,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> SyncChangesPage:
+        """获取一页服务端变更；需要手动分页时使用。"""
+        req_params = dict(params or {})
+        if since > 0:
+            req_params["since"] = str(since)
+        if data_type:
+            req_params["data_type"] = data_type
+        if limit > 0:
+            req_params["limit"] = str(limit)
+        if offset > 0:
+            req_params["offset"] = str(offset)
+
+        data = self._request('GET', '/sync/changes', params=req_params)
+        changes = []
+        for c in data.get('changes', []):
+            data_type = c.get('data_type') or c.get('table', '')
+            data_key = c.get('data_key') or c.get('record_id') or c.get('id', '')
+            action = c.get('action') or c.get('operation', '')
+            item_data = c.get('data', {})
+            if not isinstance(item_data, dict):
+                item_data = {"value": item_data}
+            changes.append(SyncChange(
+                id=data_key,
+                table=data_type,
+                record_id=data_key,
+                operation=action,
+                data=item_data,
+                version=c.get('version', 0),
+                change_time=c.get('updated_at') or c.get('change_time', 0),
+                data_type=data_type,
+                data_key=data_key,
+                action=action,
+                updated_at=c.get('updated_at', 0)
+            ))
+
+        return SyncChangesPage(
+            changes=changes,
+            server_time=data.get('server_time', 0),
+            has_more=bool(data.get('has_more', False)),
+            next_offset=int(data.get('next_offset', 0) or 0),
+            limit=int(data.get('limit', 0) or 0),
+            offset=int(data.get('offset', 0) or 0)
+        )
 
     def get_sync_status(self) -> SyncStatus:
         """获取同步状态"""
@@ -417,14 +537,13 @@ class DataSyncClient:
             server_time=data.get('server_time', 0)
         )
 
-    def resolve_conflict(self, table_name: str, record_id: str, resolution: ConflictResolution,
+    def resolve_conflict(self, conflict_id: str, resolution: ConflictResolution,
                          merged_data: Optional[Dict[str, Any]] = None) -> SyncResult:
         """
         解决数据冲突
 
         Args:
-            table_name: 表名
-            record_id: 记录ID
+            conflict_id: push_changes 返回的 conflict_id
             resolution: 解决策略
             merged_data: 当策略为 merge 时，提供合并后的数据
 
@@ -432,18 +551,17 @@ class DataSyncClient:
             同步结果
         """
         req_data = {
-            "table": table_name,
-            "record_id": record_id,
+            "conflict_id": conflict_id,
             "resolution": resolution.value
         }
         if merged_data:
             req_data["merged_data"] = merged_data
 
-        result = self._request('POST', '/sync/conflict/resolve', req_data)
+        self._request('POST', '/sync/conflict/resolve', req_data)
         return SyncResult(
-            record_id=record_id,
-            status=result.get('status', 'error'),
-            version=result.get('version', 0)
+            record_id="",
+            status="resolved",
+            conflict_id=conflict_id
         )
 
     # ==================== 分类数据同步功能 ====================
@@ -455,21 +573,173 @@ class DataSyncClient:
             params["since"] = str(since)
 
         data = self._request('GET', '/sync/configs', params=params)
-        configs = [ConfigData(
-            key=c.get('key', ''),
-            value=c.get('value'),
-            updated_at=c.get('updated_at', 0)
-        ) for c in data.get('configs', [])]
+        if isinstance(data.get('configs'), list):
+            configs = [ConfigData(
+                key=c.get('key', ''),
+                value=c.get('value'),
+                version=c.get('version', 0),
+                updated_at=c.get('updated_at', 0)
+            ) for c in data.get('configs', [])]
+            return configs, data.get('server_time', 0)
 
-        return configs, data.get('server_time', 0)
+        configs = []
+        server_time = 0
+        for key, cfg in data.items():
+            if key == 'server_time':
+                continue
+            if isinstance(cfg, dict):
+                updated_at = cfg.get('updated_at', 0)
+                configs.append(ConfigData(
+                    key=key,
+                    value=cfg.get('value'),
+                    version=cfg.get('version', 0),
+                    updated_at=updated_at
+                ))
+                server_time = max(server_time, updated_at)
+            else:
+                configs.append(ConfigData(key=key, value=cfg))
+
+        return configs, server_time
 
     def save_configs(self, configs: List[ConfigData]) -> bool:
         """保存配置数据"""
-        req_data = {
-            "configs": [{"key": c.key, "value": c.value, "updated_at": c.updated_at} for c in configs]
-        }
-        self._request('POST', '/sync/configs', req_data)
+        for c in configs:
+            req_data = {
+                "config_key": c.key,
+                "value": c.value,
+                "version": c.version
+            }
+            result = self._request('POST', '/sync/configs', req_data)
+            status = result.get('status')
+            if status and status != 'success':
+                if result.get('error'):
+                    raise Exception(f"保存配置 {c.key} 失败: {result.get('error')}")
+                if result.get('conflict_id'):
+                    raise Exception(f"保存配置 {c.key} 冲突: {result.get('conflict_id')}")
+                raise Exception(f"保存配置 {c.key} 失败: {status}")
         return True
+
+    @staticmethod
+    def _to_unix(value: Any) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value:
+            try:
+                return int(datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp())
+            except ValueError:
+                return 0
+        return 0
+
+    @staticmethod
+    def _rfc3339(ts: int = 0) -> str:
+        if ts <= 0:
+            ts = int(time.time())
+        return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    @staticmethod
+    def _check_sync_results(action: str, data: Any) -> None:
+        if isinstance(data, dict) and isinstance(data.get('results'), list):
+            results = data.get('results', [])
+        elif isinstance(data, dict) and (data.get('status') or data.get('data_key') or data.get('record_id')):
+            results = [data]
+        else:
+            results = []
+
+        if not results:
+            raise Exception(f"{action}失败: 服务端没有返回同步结果")
+        for result in results:
+            status = result.get('status', '')
+            if not status or status == 'success':
+                continue
+            if status == 'conflict':
+                conflict_id = result.get('conflict_id', '')
+                raise Exception(f"{action}冲突: {conflict_id}" if conflict_id else f"{action}冲突")
+            raise Exception(f"{action}失败: {result.get('error') or status}")
+
+    @staticmethod
+    def _list_payload(data: Any, key: str) -> Tuple[List[Dict[str, Any]], int]:
+        if isinstance(data, list):
+            return data, 0
+        if isinstance(data, dict):
+            items = data.get(key)
+            if items is None and key != 'list':
+                items = data.get('list')
+            return items or [], data.get('server_time', 0)
+        return [], 0
+
+    @staticmethod
+    def _workflow_config(steps: Any) -> Dict[str, Any]:
+        if isinstance(steps, dict):
+            return steps
+        if isinstance(steps, str) and steps:
+            try:
+                value = json.loads(steps)
+                return value if isinstance(value, dict) else {"steps": value}
+            except json.JSONDecodeError:
+                return {"steps": steps}
+        return {}
+
+    @staticmethod
+    def _material_numeric_id(material: MaterialData) -> int:
+        if material.material_id:
+            return material.material_id
+        try:
+            value = int(material.id)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+        seed = material.id or str(time.time_ns())
+        return int(hashlib.sha256(seed.encode('utf-8')).hexdigest()[:15], 16)
+
+    @staticmethod
+    def _workflow_to_server(workflow: WorkflowData) -> Dict[str, Any]:
+        return {
+            "WorkflowID": workflow.id,
+            "WorkflowName": workflow.name,
+            "Steps": json.dumps(workflow.config or {}, ensure_ascii=False),
+            "Status": "active" if workflow.enabled else "disabled",
+            "Version": workflow.version,
+            "create_time": DataSyncClient._rfc3339(workflow.updated_at)
+        }
+
+    @staticmethod
+    def _material_to_server(material: MaterialData) -> Dict[str, Any]:
+        return {
+            "MaterialID": DataSyncClient._material_numeric_id(material),
+            "FileName": material.content,
+            "FileType": material.type,
+            "Caption": material.content,
+            "GroupName": material.tags,
+            "Status": "未使用",
+            "Version": material.version
+        }
+
+    @staticmethod
+    def _post_to_server(post: PostData) -> Dict[str, Any]:
+        group_name = post.group_name or post.group_id or "default"
+        post_type = post.post_type or "user_posts"
+        post_link = post.post_link or post.id or f"local://{time.time_ns()}"
+        return {
+            "id": post.id,
+            "PostType": post_type,
+            "GroupName": group_name,
+            "PostLink": post_link,
+            "Caption": post.content,
+            "Status": post.status or "unused",
+            "Version": post.version,
+            "collected_at": DataSyncClient._rfc3339(post.updated_at)
+        }
+
+    @staticmethod
+    def _comment_script_to_server(script: CommentScriptData) -> Dict[str, Any]:
+        return {
+            "id": script.id,
+            "GroupName": script.category,
+            "Content": script.content,
+            "Status": "active",
+            "Version": script.version
+        }
 
     def get_workflows(self, since: int = 0) -> Tuple[List[WorkflowData], int]:
         """获取工作流数据"""
@@ -478,33 +748,36 @@ class DataSyncClient:
             params["since"] = str(since)
 
         data = self._request('GET', '/sync/workflows', params=params)
-        workflows = [WorkflowData(
-            id=w.get('id', ''),
-            name=w.get('name', ''),
-            config=w.get('config', {}),
-            enabled=w.get('enabled', True),
-            updated_at=w.get('updated_at', 0)
-        ) for w in data.get('workflows', [])]
+        items, server_time = self._list_payload(data, 'workflows')
+        workflows = []
+        for w in items:
+            updated_at = self._to_unix(w.get('updated_at', 0))
+            server_time = max(server_time, updated_at)
+            workflows.append(WorkflowData(
+                id=w.get('WorkflowID') or w.get('workflow_id') or w.get('id', ''),
+                name=w.get('WorkflowName') or w.get('workflow_name') or w.get('name', ''),
+                config=self._workflow_config(w.get('Steps') or w.get('steps') or w.get('config')),
+                enabled=(w.get('Status') or w.get('status') or 'active') != 'disabled',
+                version=w.get('Version') or w.get('version', 0),
+                updated_at=updated_at
+            ))
 
-        return workflows, data.get('server_time', 0)
+        return workflows, server_time
 
     def save_workflows(self, workflows: List[WorkflowData]) -> bool:
         """保存工作流数据"""
-        req_data = {
-            "workflows": [{
-                "id": w.id,
-                "name": w.name,
-                "config": w.config,
-                "enabled": w.enabled,
-                "updated_at": w.updated_at
-            } for w in workflows]
-        }
-        self._request('POST', '/sync/workflows', req_data)
+        for workflow in workflows:
+            result = self._request('POST', '/sync/workflows', {
+                "workflow": self._workflow_to_server(workflow),
+                "version": workflow.version
+            })
+            self._check_sync_results(f"保存工作流 {workflow.id}", result)
         return True
 
     def delete_workflow(self, workflow_id: str) -> bool:
         """删除工作流"""
-        self._request('DELETE', f'/sync/workflows/{workflow_id}')
+        result = self._request('DELETE', f'/sync/workflows/{workflow_id}')
+        self._check_sync_results(f"删除工作流 {workflow_id}", result)
         return True
 
     def get_materials(self, since: int = 0) -> Tuple[List[MaterialData], int]:
@@ -514,28 +787,32 @@ class DataSyncClient:
             params["since"] = str(since)
 
         data = self._request('GET', '/sync/materials', params=params)
-        materials = [MaterialData(
-            id=m.get('id', ''),
-            type=m.get('type', ''),
-            content=m.get('content', ''),
-            tags=m.get('tags', ''),
-            updated_at=m.get('updated_at', 0)
-        ) for m in data.get('materials', [])]
+        items, server_time = self._list_payload(data, 'materials')
+        materials = []
+        for m in items:
+            material_id = m.get('MaterialID') or m.get('material_id') or 0
+            updated_at = self._to_unix(m.get('updated_at', 0))
+            server_time = max(server_time, updated_at)
+            materials.append(MaterialData(
+                id=str(material_id or m.get('id', '')),
+                material_id=int(material_id or 0),
+                type=m.get('FileType') or m.get('file_type') or m.get('type', ''),
+                content=m.get('Caption') or m.get('caption') or m.get('FileName') or m.get('file_name') or m.get('content', ''),
+                tags=m.get('GroupName') or m.get('group_name') or m.get('tags', ''),
+                version=m.get('Version') or m.get('version', 0),
+                updated_at=updated_at
+            ))
 
-        return materials, data.get('server_time', 0)
+        return materials, server_time
 
     def save_materials(self, materials: List[MaterialData]) -> bool:
         """保存素材数据"""
-        req_data = {
-            "materials": [{
-                "id": m.id,
-                "type": m.type,
-                "content": m.content,
-                "tags": m.tags,
-                "updated_at": m.updated_at
-            } for m in materials]
-        }
-        self._request('POST', '/sync/materials/batch', req_data)
+        if not materials:
+            return True
+        result = self._request('POST', '/sync/materials/batch', {
+            "materials": [self._material_to_server(m) for m in materials]
+        })
+        self._check_sync_results("保存素材", result)
         return True
 
     def get_posts(self, since: int = 0, group_id: str = "") -> Tuple[List[PostData], int]:
@@ -544,31 +821,37 @@ class DataSyncClient:
         if since > 0:
             params["since"] = str(since)
         if group_id:
-            params["group_id"] = group_id
+            params["group"] = group_id
 
         data = self._request('GET', '/sync/posts', params=params)
-        posts = [PostData(
-            id=p.get('id', ''),
-            content=p.get('content', ''),
-            status=p.get('status', 'draft'),
-            group_id=p.get('group_id', ''),
-            updated_at=p.get('updated_at', 0)
-        ) for p in data.get('posts', [])]
+        items, server_time = self._list_payload(data, 'posts')
+        posts = []
+        for p in items:
+            updated_at = self._to_unix(p.get('updated_at', 0))
+            server_time = max(server_time, updated_at)
+            group_name = p.get('GroupName') or p.get('group_name') or p.get('group_id', '')
+            posts.append(PostData(
+                id=p.get('id', ''),
+                content=p.get('Caption') or p.get('caption') or p.get('content', ''),
+                status=p.get('Status') or p.get('status', 'draft'),
+                group_id=group_name,
+                group_name=group_name,
+                post_type=p.get('PostType') or p.get('post_type', ''),
+                post_link=p.get('PostLink') or p.get('post_link', ''),
+                version=p.get('Version') or p.get('version', 0),
+                updated_at=updated_at
+            ))
 
-        return posts, data.get('server_time', 0)
+        return posts, server_time
 
     def save_posts(self, posts: List[PostData]) -> bool:
         """批量保存帖子数据"""
-        req_data = {
-            "posts": [{
-                "id": p.id,
-                "content": p.content,
-                "status": p.status,
-                "group_id": p.group_id,
-                "updated_at": p.updated_at
-            } for p in posts]
-        }
-        self._request('POST', '/sync/posts/batch', req_data)
+        if not posts:
+            return True
+        result = self._request('POST', '/sync/posts/batch', {
+            "posts": [self._post_to_server(p) for p in posts]
+        })
+        self._check_sync_results("保存帖子", result)
         return True
 
     def update_post_status(self, post_id: str, status: str) -> bool:
@@ -580,6 +863,12 @@ class DataSyncClient:
     def get_post_groups(self) -> List[PostGroup]:
         """获取帖子分组"""
         data = self._request('GET', '/sync/posts/groups')
+        if isinstance(data, list):
+            return [PostGroup(
+                id=g.get('group_name', ''),
+                name=g.get('group_name', ''),
+                count=g.get('total_count', 0)
+            ) for g in data]
         return [PostGroup(
             id=g.get('id', ''),
             name=g.get('name', ''),
@@ -592,29 +881,32 @@ class DataSyncClient:
         if since > 0:
             params["since"] = str(since)
         if category:
-            params["category"] = category
+            params["group"] = category
 
         data = self._request('GET', '/sync/comment-scripts', params=params)
-        scripts = [CommentScriptData(
-            id=s.get('id', ''),
-            content=s.get('content', ''),
-            category=s.get('category', ''),
-            updated_at=s.get('updated_at', 0)
-        ) for s in data.get('scripts', [])]
+        items, server_time = self._list_payload(data, 'scripts')
+        scripts = []
+        for s in items:
+            updated_at = self._to_unix(s.get('updated_at', 0))
+            server_time = max(server_time, updated_at)
+            scripts.append(CommentScriptData(
+                id=s.get('id', ''),
+                content=s.get('Content') or s.get('content', ''),
+                category=s.get('GroupName') or s.get('group_name') or s.get('category', ''),
+                version=s.get('Version') or s.get('version', 0),
+                updated_at=updated_at
+            ))
 
-        return scripts, data.get('server_time', 0)
+        return scripts, server_time
 
     def save_comment_scripts(self, scripts: List[CommentScriptData]) -> bool:
         """批量保存评论话术"""
-        req_data = {
-            "scripts": [{
-                "id": s.id,
-                "content": s.content,
-                "category": s.category,
-                "updated_at": s.updated_at
-            } for s in scripts]
-        }
-        self._request('POST', '/sync/comment-scripts/batch', req_data)
+        if not scripts:
+            return True
+        result = self._request('POST', '/sync/comment-scripts/batch', {
+            "scripts": [self._comment_script_to_server(s) for s in scripts]
+        })
+        self._check_sync_results("保存评论话术", result)
         return True
 
     # ==================== 便捷方法 ====================
@@ -679,6 +971,60 @@ class DataSyncClient:
     def set_last_sync_time(self, table_name: str, t: int):
         """设置指定表的最后同步时间"""
         self.last_sync_time[table_name] = t
+
+    # ==================== 数据备份和同步功能 ====================
+
+    def push_backup(self, data_type: str, data_json: str, device_name: str = "", item_count: int = 0) -> None:
+        """
+        推送备份数据到服务器
+
+        Args:
+            data_type: 数据类型（scripts/danmaku_groups/ai_config/random_word_ai_config）
+            data_json: JSON格式的数据
+            device_name: 设备名称（可选）
+            item_count: 条目数量（可选）
+        """
+        self._request('POST', '/backup/push', {
+            "data_type": data_type,
+            "data_json": data_json,
+            "device_name": device_name,
+            "item_count": item_count
+        })
+
+    def pull_backup(self, data_type: str) -> List[BackupData]:
+        """
+        从服务器拉取指定类型的备份数据
+
+        Args:
+            data_type: 数据类型（scripts/danmaku_groups/ai_config/random_word_ai_config）
+
+        Returns:
+            备份数据列表（按版本降序排列，第一个为当前版本）
+        """
+        data = self._request('GET', '/backup/pull', params={"data_type": data_type})
+        if isinstance(data, dict):
+            data = data.get('data', [])
+        return [BackupData(**item) for item in data] if isinstance(data, list) else []
+
+    def pull_all_backups(self) -> Dict[str, List[BackupData]]:
+        """
+        从服务器拉取所有类型的备份数据
+
+        Returns:
+            按数据类型分组的备份数据映射
+        """
+        data = self._request('GET', '/backup/pull')
+        backup_map: Dict[str, List[BackupData]] = {}
+        if isinstance(data, dict):
+            data = data.get('data', [])
+        if not isinstance(data, list):
+            return backup_map
+
+        for item in data:
+            backup = BackupData(**item)
+            backup_map.setdefault(backup.data_type, []).append(backup)
+
+        return backup_map
 
 
 class AutoSyncManager:
@@ -775,23 +1121,7 @@ class AutoSyncManager:
         Raises:
             Exception: 推送失败时抛出异常
         """
-        req_body = {
-            "app_key": self.client.app_key,
-            "machine_id": self.client.machine_id,
-            "data_type": data_type,
-            "data_json": data_json,
-            "device_name": device_name,
-            "item_count": item_count
-        }
-
-        resp = self.client.session.post(
-            f"{self.client.server_url}/api/client/backup/push",
-            json=req_body
-        )
-        result = resp.json()
-
-        if result.get("code") != 0:
-            raise Exception(f"API error: {result.get('message')}")
+        self.sync_client.push_backup(data_type, data_json, device_name, item_count)
 
     def pull_backup(self, data_type: str) -> List[BackupData]:
         """
@@ -806,23 +1136,7 @@ class AutoSyncManager:
         Raises:
             Exception: 拉取失败时抛出异常
         """
-        params = {
-            "app_key": self.client.app_key,
-            "machine_id": self.client.machine_id,
-            "data_type": data_type
-        }
-
-        resp = self.client.session.get(
-            f"{self.client.server_url}/api/client/backup/pull",
-            params=params
-        )
-        result = resp.json()
-
-        if result.get("code") != 0:
-            raise Exception(f"API error: {result.get('message')}")
-
-        data_list = result.get("data", [])
-        return [BackupData(**item) for item in data_list]
+        return self.sync_client.pull_backup(data_type)
 
     def pull_all_backups(self) -> Dict[str, List[BackupData]]:
         """
@@ -834,28 +1148,4 @@ class AutoSyncManager:
         Raises:
             Exception: 拉取失败时抛出异常
         """
-        params = {
-            "app_key": self.client.app_key,
-            "machine_id": self.client.machine_id
-        }
-
-        resp = self.client.session.get(
-            f"{self.client.server_url}/api/client/backup/pull",
-            params=params
-        )
-        result = resp.json()
-
-        if result.get("code") != 0:
-            raise Exception(f"API error: {result.get('message')}")
-
-        data_list = result.get("data", [])
-
-        # 按数据类型分组
-        backup_map: Dict[str, List[BackupData]] = {}
-        for item in data_list:
-            backup = BackupData(**item)
-            if backup.data_type not in backup_map:
-                backup_map[backup.data_type] = []
-            backup_map[backup.data_type].append(backup)
-
-        return backup_map
+        return self.sync_client.pull_all_backups()

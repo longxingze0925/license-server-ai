@@ -45,6 +45,16 @@ func (h *ReleaseHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "参数错误: "+err.Error())
 		return
 	}
+	normalizedVersion, err := normalizePackageVersion(req.Version)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	req.Version = normalizedVersion
+	if req.VersionCode <= 0 {
+		response.BadRequest(c, "版本代码必须大于 0")
+		return
+	}
 
 	// 检查版本号是否已存在
 	var existingRelease model.AppRelease
@@ -93,12 +103,30 @@ func (h *ReleaseHandler) Upload(c *gin.Context) {
 	changelog := c.PostForm("changelog")
 	forceUpdate := c.PostForm("force_update") == "true"
 
-	if version == "" || versionCodeStr == "" {
+	if version == "" {
 		response.BadRequest(c, "请提供版本号")
 		return
 	}
+	normalizedVersion, err := normalizePackageVersion(version)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	version = normalizedVersion
 
-	versionCode, _ := strconv.Atoi(versionCodeStr)
+	versionCode := scriptVersionCode(version)
+	if versionCodeStr != "" {
+		parsedVersionCode, err := strconv.Atoi(versionCodeStr)
+		if err != nil || parsedVersionCode < 0 {
+			response.BadRequest(c, "版本代码必须是非负整数")
+			return
+		}
+		versionCode = parsedVersionCode
+	}
+	if versionCode <= 0 {
+		response.BadRequest(c, "版本代码必须大于 0，或使用可解析的版本号")
+		return
+	}
 
 	// 获取上传的文件
 	file, header, err := c.Request.FormFile("file")
@@ -118,22 +146,23 @@ func (h *ReleaseHandler) Upload(c *gin.Context) {
 		response.BadRequest(c, fmt.Sprintf("版本文件过大，最大支持 %dMB", maxReleaseUploadBytes>>20))
 		return
 	}
-	filename := fmt.Sprintf("%s_%s%s", app.AppKey, version, filepath.Ext(header.Filename))
+	filename := fmt.Sprintf("%s_%s_%d%s", app.AppKey, version, time.Now().UnixNano(), filepath.Ext(header.Filename))
 	filePath := filepath.Join(cfg.Storage.ReleasesDir, filename)
-	fileSize, fileHash, err := saveUploadedFile(&io.LimitedReader{R: file, N: maxReleaseUploadBytes + 1}, filePath)
+	stagedFile, err := stageUploadedFile(&io.LimitedReader{R: file, N: maxReleaseUploadBytes + 1}, filePath)
 	if err != nil {
 		response.ServerError(c, "保存文件失败: "+err.Error())
 		return
 	}
+	defer stagedFile.Cleanup()
+	fileSize := stagedFile.Size
+	fileHash := stagedFile.Hash
 	if fileSize > maxReleaseUploadBytes {
-		os.Remove(filePath)
 		response.BadRequest(c, fmt.Sprintf("版本文件过大，最大支持 %dMB", maxReleaseUploadBytes>>20))
 		return
 	}
 
 	fileSignature, err := signFileSignature(app.PrivateKey, fileHash, fileSize)
 	if err != nil {
-		_ = os.Remove(filePath)
 		response.ServerError(c, err.Error())
 		return
 	}
@@ -144,13 +173,23 @@ func (h *ReleaseHandler) Upload(c *gin.Context) {
 	var existingRelease model.AppRelease
 	if err := model.DB.Where("app_id = ? AND version = ?", appID, version).First(&existingRelease).Error; err == nil {
 		// 更新现有版本
+		oldDownloadURL := existingRelease.DownloadURL
 		existingRelease.DownloadURL = downloadURL
 		existingRelease.FileSize = fileSize
 		existingRelease.FileHash = fileHash
 		existingRelease.FileSignature = fileSignature
 		existingRelease.Changelog = changelog
 		existingRelease.ForceUpdate = forceUpdate
-		model.DB.Save(&existingRelease)
+		if err := stagedFile.Commit(); err != nil {
+			response.ServerError(c, "保存文件失败: "+err.Error())
+			return
+		}
+		if err := model.DB.Save(&existingRelease).Error; err != nil {
+			_ = os.Remove(filePath)
+			response.ServerError(c, "更新版本失败: "+err.Error())
+			return
+		}
+		removeReplacedReleaseFile(cfg.Storage.ReleasesDir, oldDownloadURL, downloadURL)
 
 		response.Success(c, gin.H{
 			"id":             existingRelease.ID,
@@ -179,8 +218,13 @@ func (h *ReleaseHandler) Upload(c *gin.Context) {
 		Status:        model.ReleaseStatusDraft,
 	}
 
+	if err := stagedFile.Commit(); err != nil {
+		response.ServerError(c, "保存文件失败: "+err.Error())
+		return
+	}
 	if err := model.DB.Create(&release).Error; err != nil {
-		response.ServerError(c, "创建版本失败")
+		_ = os.Remove(filePath)
+		response.ServerError(c, "创建版本失败: "+err.Error())
 		return
 	}
 
@@ -194,6 +238,14 @@ func (h *ReleaseHandler) Upload(c *gin.Context) {
 		"signature_alg":  fileSignatureAlgorithm,
 		"created":        true,
 	})
+}
+
+func removeReplacedReleaseFile(root, oldURL, newURL string) {
+	oldName := filepath.Base(oldURL)
+	if oldName == "" || oldName == "." || oldName == filepath.Base(newURL) {
+		return
+	}
+	_ = os.Remove(filepath.Join(root, oldName))
 }
 
 // List 获取版本列表
@@ -277,7 +329,7 @@ func (h *ReleaseHandler) Update(c *gin.Context) {
 	var req struct {
 		Changelog         string `json:"changelog"`
 		ForceUpdate       *bool  `json:"force_update"`
-		RolloutPercentage int    `json:"rollout_percentage"`
+		RolloutPercentage *int   `json:"rollout_percentage"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误")
@@ -291,11 +343,18 @@ func (h *ReleaseHandler) Update(c *gin.Context) {
 	if req.ForceUpdate != nil {
 		updates["force_update"] = *req.ForceUpdate
 	}
-	if req.RolloutPercentage > 0 && req.RolloutPercentage <= 100 {
-		updates["rollout_percentage"] = req.RolloutPercentage
+	if req.RolloutPercentage != nil {
+		if *req.RolloutPercentage < 0 || *req.RolloutPercentage > 100 {
+			response.BadRequest(c, "灰度比例必须在 0 到 100 之间")
+			return
+		}
+		updates["rollout_percentage"] = *req.RolloutPercentage
 	}
 
-	model.DB.Model(&release).Updates(updates)
+	if err := model.DB.Model(&release).Updates(updates).Error; err != nil {
+		response.ServerError(c, "更新版本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "更新成功", nil)
 }
@@ -321,7 +380,10 @@ func (h *ReleaseHandler) Publish(c *gin.Context) {
 	now := time.Now()
 	release.Status = model.ReleaseStatusPublished
 	release.PublishedAt = &now
-	model.DB.Save(&release)
+	if err := model.DB.Save(&release).Error; err != nil {
+		response.ServerError(c, "发布版本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "发布成功", nil)
 }
@@ -340,7 +402,10 @@ func (h *ReleaseHandler) Deprecate(c *gin.Context) {
 	}
 
 	release.Status = model.ReleaseStatusDeprecated
-	model.DB.Save(&release)
+	if err := model.DB.Save(&release).Error; err != nil {
+		response.ServerError(c, "废弃版本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "已废弃", nil)
 }
@@ -366,7 +431,10 @@ func (h *ReleaseHandler) Delete(c *gin.Context) {
 		os.Remove(filePath)
 	}
 
-	model.DB.Delete(&release)
+	if err := model.DB.Delete(&release).Error; err != nil {
+		response.ServerError(c, "删除版本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "删除成功", nil)
 }
@@ -378,7 +446,7 @@ func (h *ReleaseHandler) DownloadRelease(c *gin.Context) {
 		return
 	}
 
-	app, _, ok := validateClientDownloadContext(c, filename, downloadTokenKindRelease)
+	app, machineID, ok := validateClientDownloadContext(c, filename, downloadTokenKindRelease)
 	if !ok {
 		return
 	}
@@ -388,6 +456,10 @@ func (h *ReleaseHandler) DownloadRelease(c *gin.Context) {
 		"app_id = ? AND status = ? AND download_url LIKE ?",
 		app.ID, model.ReleaseStatusPublished, "%/"+filename,
 	).Order("version_code DESC").First(&release).Error; err != nil {
+		response.NotFound(c, "文件不存在")
+		return
+	}
+	if !isMachineInRollout(machineID, release.RolloutPercentage) {
 		response.NotFound(c, "文件不存在")
 		return
 	}

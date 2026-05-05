@@ -164,9 +164,22 @@ var RolePermissions = map[TeamMemberRole]map[string]bool{
 		"device:update": true,
 		"device:delete": true,
 		// 统计与导出
-		"stats:read":  true,
-		"export:read": true,
-		"audit:read":  true,
+		"stats:read":    true,
+		"export:read":   true,
+		"audit:read":    true,
+		"backup:read":   true,
+		"backup:update": true,
+		// AI 平台能力
+		"proxy_credential:read":   true,
+		"proxy_credential:create": true,
+		"proxy_credential:update": true,
+		"proxy_credential:delete": true,
+		"pricing:read":            true,
+		"pricing:create":          true,
+		"pricing:update":          true,
+		"pricing:delete":          true,
+		"credit:read":             true,
+		"credit:update":           true,
 	},
 	RoleAdmin: {
 		// 租户管理
@@ -203,9 +216,22 @@ var RolePermissions = map[TeamMemberRole]map[string]bool{
 		"device:update": true,
 		"device:delete": true,
 		// 统计与导出
-		"stats:read":  true,
-		"export:read": true,
-		"audit:read":  true,
+		"stats:read":    true,
+		"export:read":   true,
+		"audit:read":    true,
+		"backup:read":   true,
+		"backup:update": true,
+		// AI 平台能力
+		"proxy_credential:read":   true,
+		"proxy_credential:create": true,
+		"proxy_credential:update": true,
+		"proxy_credential:delete": true,
+		"pricing:read":            true,
+		"pricing:create":          true,
+		"pricing:update":          true,
+		"pricing:delete":          true,
+		"credit:read":             true,
+		"credit:update":           true,
 	},
 	RoleDeveloper: {
 		// 租户管理
@@ -242,9 +268,22 @@ var RolePermissions = map[TeamMemberRole]map[string]bool{
 		"device:update": true,
 		"device:delete": true,
 		// 统计与导出
-		"stats:read":  true,
-		"export:read": true,
-		"audit:read":  false,
+		"stats:read":    true,
+		"export:read":   true,
+		"audit:read":    false,
+		"backup:read":   false,
+		"backup:update": false,
+		// AI 平台能力
+		"proxy_credential:read":   false,
+		"proxy_credential:create": false,
+		"proxy_credential:update": false,
+		"proxy_credential:delete": false,
+		"pricing:read":            false,
+		"pricing:create":          false,
+		"pricing:update":          false,
+		"pricing:delete":          false,
+		"credit:read":             false,
+		"credit:update":           false,
 	},
 	RoleViewer: {
 		// 租户管理
@@ -281,9 +320,22 @@ var RolePermissions = map[TeamMemberRole]map[string]bool{
 		"device:update": false,
 		"device:delete": false,
 		// 统计与导出
-		"stats:read":  true,
-		"export:read": false,
-		"audit:read":  false,
+		"stats:read":    true,
+		"export:read":   false,
+		"audit:read":    false,
+		"backup:read":   false,
+		"backup:update": false,
+		// AI 平台能力
+		"proxy_credential:read":   false,
+		"proxy_credential:create": false,
+		"proxy_credential:update": false,
+		"proxy_credential:delete": false,
+		"pricing:read":            false,
+		"pricing:create":          false,
+		"pricing:update":          false,
+		"pricing:delete":          false,
+		"credit:read":             false,
+		"credit:update":           false,
 	},
 }
 

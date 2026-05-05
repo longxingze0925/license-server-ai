@@ -1,12 +1,16 @@
 package handler
 
 import (
+	"errors"
+	"io"
 	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type DeviceHandler struct{}
@@ -32,8 +36,7 @@ func (h *DeviceHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	query := model.DB.Model(&model.Device{}).
-		Where("devices.tenant_id = ?", tenantID).
+	query := scopedDeviceQuery(c).
 		Preload("License").
 		Preload("License.Application").
 		Preload("Subscription").
@@ -41,10 +44,10 @@ func (h *DeviceHandler) List(c *gin.Context) {
 		Preload("Customer")
 
 	if licenseID != "" {
-		query = query.Where("license_id = ?", licenseID)
+		query = query.Where("devices.license_id = ?", licenseID)
 	}
 	if subscriptionID != "" {
-		query = query.Where("subscription_id = ?", subscriptionID)
+		query = query.Where("devices.subscription_id = ?", subscriptionID)
 	}
 	if appID != "" {
 		// 同时支持授权码模式和订阅模式的设备
@@ -58,10 +61,16 @@ func (h *DeviceHandler) List(c *gin.Context) {
 	}
 
 	var total int64
-	query.Count(&total)
+	if err := query.Count(&total).Error; err != nil {
+		response.ServerError(c, "获取设备数量失败")
+		return
+	}
 
 	var devices []model.Device
-	query.Offset((page - 1) * pageSize).Limit(pageSize).Order("devices.last_active_at DESC").Find(&devices)
+	if err := query.Offset((page - 1) * pageSize).Limit(pageSize).Order("devices.last_active_at DESC").Find(&devices).Error; err != nil {
+		response.ServerError(c, "获取设备列表失败")
+		return
+	}
 
 	var result []gin.H
 	for _, device := range devices {
@@ -118,8 +127,10 @@ func (h *DeviceHandler) Get(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 
 	var device model.Device
-	if err := model.DB.Preload("License").Preload("License.Application").Preload("Customer").
-		First(&device, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
+	if err := scopedDeviceQuery(c).Preload("License").Preload("License.Application").
+		Preload("Subscription").Preload("Subscription.Application").
+		Preload("Customer").
+		Where("devices.id = ?", id).First(&device).Error; err != nil {
 		response.NotFound(c, "设备不存在")
 		return
 	}
@@ -146,6 +157,7 @@ func (h *DeviceHandler) Get(c *gin.Context) {
 		"last_active_at":    device.LastActiveAt,
 		"created_at":        device.CreatedAt,
 		"license":           device.License,
+		"subscription":      device.Subscription,
 		"customer":          device.Customer,
 		"recent_heartbeats": heartbeats,
 	})
@@ -154,15 +166,23 @@ func (h *DeviceHandler) Get(c *gin.Context) {
 // Unbind 解绑设备
 func (h *DeviceHandler) Unbind(c *gin.Context) {
 	id := c.Param("id")
-	tenantID := middleware.GetTenantID(c)
 
 	var device model.Device
-	if err := model.DB.First(&device, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
+	if err := scopedDeviceQuery(c).Where("devices.id = ?", id).First(&device).Error; err != nil {
 		response.NotFound(c, "设备不存在")
 		return
 	}
 
-	model.DB.Delete(&device)
+	now := time.Now()
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&device).Error; err != nil {
+			return err
+		}
+		return revokeActiveClientSessionsForDevice(tx, device.ID, now)
+	}); err != nil {
+		response.ServerError(c, "解绑失败")
+		return
+	}
 
 	response.SuccessWithMessage(c, "解绑成功", nil)
 }
@@ -173,7 +193,7 @@ func (h *DeviceHandler) Blacklist(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 
 	var device model.Device
-	if err := model.DB.Preload("License").First(&device, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
+	if err := scopedDeviceQuery(c).Preload("License").Preload("Subscription").Where("devices.id = ?", id).First(&device).Error; err != nil {
 		response.NotFound(c, "设备不存在")
 		return
 	}
@@ -181,23 +201,37 @@ func (h *DeviceHandler) Blacklist(c *gin.Context) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
 
 	// 添加到黑名单
 	blacklist := model.DeviceBlacklist{
 		TenantID:  tenantID,
 		MachineID: device.MachineID,
 		Reason:    req.Reason,
+		CreatedBy: middleware.GetUserID(c),
 	}
 	if device.License != nil {
 		blacklist.AppID = device.License.AppID
+	} else if device.Subscription != nil {
+		blacklist.AppID = device.Subscription.AppID
 	}
 
-	model.DB.Create(&blacklist)
-
-	// 更新设备状态
-	device.Status = model.DeviceStatusBlacklisted
-	model.DB.Save(&device)
+	now := time.Now()
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&blacklist).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&device).Update("status", model.DeviceStatusBlacklisted).Error; err != nil {
+			return err
+		}
+		return revokeActiveClientSessionsForDevice(tx, device.ID, now)
+	}); err != nil {
+		response.ServerError(c, "加入黑名单失败")
+		return
+	}
 
 	response.SuccessWithMessage(c, "已加入黑名单", nil)
 }
@@ -208,19 +242,34 @@ func (h *DeviceHandler) Unblacklist(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 
 	var device model.Device
-	if err := model.DB.First(&device, "id = ? AND tenant_id = ?", id, tenantID).Error; err != nil {
+	if err := scopedDeviceQuery(c).Preload("License").Preload("Subscription").
+		Where("devices.id = ?", id).First(&device).Error; err != nil {
 		response.NotFound(c, "设备不存在")
 		return
 	}
 
-	result := model.DB.Where("machine_id = ? AND tenant_id = ?", device.MachineID, tenantID).Delete(&model.DeviceBlacklist{})
+	appID := deviceAppID(device)
+	query := model.DB.Where("machine_id = ? AND tenant_id = ?", device.MachineID, tenantID)
+	if appID != "" {
+		query = query.Where("(app_id = ? OR app_id IS NULL OR app_id = '')", appID)
+	} else {
+		query = query.Where("(app_id IS NULL OR app_id = '')")
+	}
+	result := query.Delete(&model.DeviceBlacklist{})
+	if result.Error != nil {
+		response.ServerError(c, "移除黑名单失败: "+result.Error.Error())
+		return
+	}
 	if result.RowsAffected == 0 {
 		response.NotFound(c, "黑名单记录不存在")
 		return
 	}
 
 	if device.Status == model.DeviceStatusBlacklisted {
-		model.DB.Model(&device).Update("status", model.DeviceStatusActive)
+		if err := model.DB.Model(&device).Update("status", model.DeviceStatusActive).Error; err != nil {
+			response.ServerError(c, "恢复设备状态失败: "+err.Error())
+			return
+		}
 	}
 
 	response.SuccessWithMessage(c, "已从黑名单移除", nil)
@@ -230,37 +279,129 @@ func (h *DeviceHandler) Unblacklist(c *gin.Context) {
 func (h *DeviceHandler) RemoveFromBlacklist(c *gin.Context) {
 	machineID := c.Param("machine_id")
 	tenantID := middleware.GetTenantID(c)
+	appID := c.Query("app_id")
+	scope := c.Query("scope")
 
-	result := model.DB.Where("machine_id = ? AND tenant_id = ?", machineID, tenantID).Delete(&model.DeviceBlacklist{})
-	if result.RowsAffected == 0 {
+	deviceAccessQuery := scopedDeviceQuery(c).Where("devices.machine_id = ?", machineID)
+	if appID != "" {
+		deviceAccessQuery = deviceAccessQuery.Where(
+			"(license_id IN (SELECT id FROM licenses WHERE app_id = ? AND tenant_id = ?)) OR (subscription_id IN (SELECT id FROM subscriptions WHERE app_id = ? AND tenant_id = ?))",
+			appID, tenantID, appID, tenantID,
+		)
+	}
+	var accessibleDeviceCount int64
+	if err := deviceAccessQuery.Count(&accessibleDeviceCount).Error; err != nil {
+		response.ServerError(c, "校验设备权限失败")
+		return
+	}
+	if accessibleDeviceCount == 0 {
 		response.NotFound(c, "黑名单记录不存在")
 		return
 	}
 
-	// 更新相关设备状态
-	model.DB.Model(&model.Device{}).Where("machine_id = ? AND tenant_id = ? AND status = ?", machineID, tenantID, model.DeviceStatusBlacklisted).
-		Update("status", model.DeviceStatusActive)
+	var deleted int64
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		query := tx.Where("machine_id = ? AND tenant_id = ?", machineID, tenantID)
+		if appID != "" {
+			query = query.Where("app_id = ?", appID)
+		} else if scope == "global" {
+			query = query.Where("(app_id IS NULL OR app_id = '')")
+		}
+		result := query.Delete(&model.DeviceBlacklist{})
+		if result.Error != nil {
+			return result.Error
+		}
+		deleted = result.RowsAffected
+		if deleted == 0 {
+			return nil
+		}
+
+		deviceQuery := tx.Preload("License").Preload("Subscription").
+			Where("machine_id = ? AND tenant_id = ? AND status = ?", machineID, tenantID, model.DeviceStatusBlacklisted)
+		if appID != "" {
+			deviceQuery = deviceQuery.Where(
+				"(license_id IN (SELECT id FROM licenses WHERE app_id = ? AND tenant_id = ?)) OR (subscription_id IN (SELECT id FROM subscriptions WHERE app_id = ? AND tenant_id = ?))",
+				appID, tenantID, appID, tenantID,
+			)
+		}
+
+		var devices []model.Device
+		if err := deviceQuery.Find(&devices).Error; err != nil {
+			return err
+		}
+		for i := range devices {
+			device := &devices[i]
+			stillBlacklisted, err := deviceStillBlacklisted(tx, device, tenantID)
+			if err != nil {
+				return err
+			}
+			if stillBlacklisted {
+				continue
+			}
+			if err := tx.Model(device).Update("status", model.DeviceStatusActive).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		response.ServerError(c, "移出黑名单失败")
+		return
+	}
+	if deleted == 0 {
+		response.NotFound(c, "黑名单记录不存在")
+		return
+	}
 
 	response.SuccessWithMessage(c, "已从黑名单移除", nil)
 }
 
+func deviceStillBlacklisted(tx *gorm.DB, device *model.Device, tenantID string) (bool, error) {
+	appID := deviceAppID(*device)
+	query := tx.Model(&model.DeviceBlacklist{}).
+		Where("tenant_id = ? AND machine_id = ?", tenantID, device.MachineID)
+	if appID != "" {
+		query = query.Where("(app_id = ? OR app_id IS NULL OR app_id = '')", appID)
+	} else {
+		query = query.Where("(app_id IS NULL OR app_id = '')")
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func deviceAppID(device model.Device) string {
+	if device.License != nil {
+		return device.License.AppID
+	}
+	if device.Subscription != nil {
+		return device.Subscription.AppID
+	}
+	return ""
+}
+
 // GetBlacklist 获取黑名单列表
 func (h *DeviceHandler) GetBlacklist(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	page, pageSize := parsePageParams(c, 20, 100)
 	appID := c.Query("app_id")
 
-	query := model.DB.Model(&model.DeviceBlacklist{}).Where("tenant_id = ?", tenantID)
+	query := scopedDeviceBlacklistQuery(c)
 	if appID != "" {
-		query = query.Where("app_id = ?", appID)
+		query = query.Where("device_blacklist.app_id = ?", appID)
 	}
 
 	var total int64
-	query.Count(&total)
+	if err := query.Count(&total).Error; err != nil {
+		response.ServerError(c, "获取黑名单数量失败")
+		return
+	}
 
 	var blacklist []model.DeviceBlacklist
-	query.Offset((page - 1) * pageSize).Limit(pageSize).Order("created_at DESC").Find(&blacklist)
+	if err := query.Offset((page - 1) * pageSize).Limit(pageSize).Order("device_blacklist.created_at DESC").Find(&blacklist).Error; err != nil {
+		response.ServerError(c, "获取黑名单列表失败")
+		return
+	}
 
 	response.SuccessPage(c, blacklist, total, page, pageSize)
 }

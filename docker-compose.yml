@@ -2,8 +2,9 @@
 # License Server Docker Compose 配置
 # ============================================
 # 使用方法：
-#   1. 复制 .env.example 为 .env 并修改配置
-#   2. 运行: docker compose up -d
+#   1. 推荐运行 ./deploy.sh，由脚本首次生成 .env 和密钥
+#   2. 手动运行 docker compose 前，必须先准备 .env
+#   3. 后续更新复用已有 .env，不要重新生成 LICENSE_MASTER_KEY
 # ============================================
 
 services:
@@ -57,8 +58,32 @@ services:
       retries: 5
 
   # ===== 后端 API 服务 =====
+  migrate:
+    image: ghcr.io/longxingze0925/license-server-ai-backend:${IMAGE_TAG:-main}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    container_name: license-migrate
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      LICENSE_MASTER_KEY: ${LICENSE_MASTER_KEY}
+    volumes:
+      - ./config.docker.yaml:/app/config.yaml:ro
+      - ./storage:/app/storage
+      - ./logs:/app/logs
+      - ./certs:/app/certs:ro
+    networks:
+      - license-network
+    command: ["-config", "/app/config.yaml", "-migrate"]
+
   backend:
-    image: ghcr.io/longxingze0925/license-server01-backend:${IMAGE_TAG:-main}
+    image: ghcr.io/longxingze0925/license-server-ai-backend:${IMAGE_TAG:-main}
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
@@ -69,8 +94,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       TZ: Asia/Shanghai
+      LICENSE_MASTER_KEY: ${LICENSE_MASTER_KEY}
     volumes:
       - ./config.docker.yaml:/app/config.yaml:ro
       - ./storage:/app/storage
@@ -89,7 +117,7 @@ services:
 
   # ===== 前端服务 =====
   frontend:
-    image: ghcr.io/longxingze0925/license-server01-frontend:${IMAGE_TAG:-main}
+    image: ghcr.io/longxingze0925/license-server-ai-frontend:${IMAGE_TAG:-main}
     build:
       context: .
       dockerfile: deploy/Dockerfile.frontend

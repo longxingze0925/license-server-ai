@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -18,14 +19,16 @@ import (
 
 // WSClient WebSocket 客户端
 type WSClient struct {
-	client       *Client
-	conn         *websocket.Conn
-	serverURL    string
-	sessionID    string
-	connected    bool
-	reconnect    bool
+	client            *Client
+	conn              *websocket.Conn
+	serverURL         string
+	sessionID         string
+	connected         bool
+	reconnect         bool
+	manualClose       bool
+	reconnecting      bool
 	reconnectInterval time.Duration
-	publicKey    *rsa.PublicKey
+	publicKey         *rsa.PublicKey
 
 	// 消息处理
 	handlers     map[string]InstructionHandler
@@ -34,9 +37,9 @@ type WSClient struct {
 	onError      func(error)
 
 	// 内部
-	send         chan []byte
-	done         chan struct{}
-	mu           sync.RWMutex
+	send chan []byte
+	done chan struct{}
+	mu   sync.RWMutex
 }
 
 // WSMessage WebSocket 消息
@@ -137,8 +140,16 @@ func (c *WSClient) Connect() error {
 	}
 	c.mu.Unlock()
 
+	accessToken, err := c.client.getValidAccessToken()
+	if err != nil {
+		return err
+	}
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+accessToken)
+
 	// 建立连接
-	conn, _, err := websocket.DefaultDialer.Dial(c.serverURL, nil)
+	conn, _, err := websocket.DefaultDialer.Dial(c.serverURL, headers)
 	if err != nil {
 		return fmt.Errorf("连接失败: %w", err)
 	}
@@ -192,6 +203,8 @@ func (c *WSClient) Connect() error {
 	c.mu.Lock()
 	c.conn = conn
 	c.connected = true
+	c.manualClose = false
+	c.reconnecting = false
 	c.done = make(chan struct{})
 	c.mu.Unlock()
 
@@ -211,12 +224,12 @@ func (c *WSClient) Connect() error {
 // Disconnect 断开连接
 func (c *WSClient) Disconnect() {
 	c.mu.Lock()
-	if !c.connected {
+	if c.manualClose {
 		c.mu.Unlock()
 		return
 	}
+	c.manualClose = true
 	c.connected = false
-	c.reconnect = false // 禁止重连
 	close(c.done)
 	if c.conn != nil {
 		c.conn.Close()
@@ -358,7 +371,7 @@ func (c *WSClient) handleInstruction(msg *WSMessage) {
 	}
 
 	// 验证过期时间
-	if time.Now().Unix() > inst.ExpiresAt {
+	if inst.ExpiresAt > 0 && time.Now().Unix() > inst.ExpiresAt {
 		log.Printf("WebSocket: 指令已过期 id=%s", inst.ID)
 		c.sendInstructionResult(inst.ID, "failed", nil, "指令已过期")
 		return
@@ -443,7 +456,10 @@ func (c *WSClient) handleDisconnect(err error) {
 	c.mu.Lock()
 	wasConnected := c.connected
 	c.connected = false
-	shouldReconnect := c.reconnect
+	shouldReconnect := c.reconnect && !c.manualClose && !c.reconnecting
+	if shouldReconnect {
+		c.reconnecting = true
+	}
 	c.mu.Unlock()
 
 	if wasConnected {
@@ -455,13 +471,29 @@ func (c *WSClient) handleDisconnect(err error) {
 
 	// 自动重连
 	if shouldReconnect {
-		go func() {
-			time.Sleep(c.reconnectInterval)
-			log.Printf("WebSocket: 尝试重连...")
-			if err := c.Connect(); err != nil {
-				log.Printf("WebSocket: 重连失败: %v", err)
-			}
-		}()
+		go c.reconnectLoop()
+	}
+}
+
+func (c *WSClient) reconnectLoop() {
+	for {
+		time.Sleep(c.reconnectInterval)
+		c.mu.RLock()
+		shouldContinue := c.reconnect && !c.manualClose && !c.connected
+		c.mu.RUnlock()
+		if !shouldContinue {
+			c.mu.Lock()
+			c.reconnecting = false
+			c.mu.Unlock()
+			return
+		}
+
+		log.Printf("WebSocket: 尝试重连...")
+		if err := c.Connect(); err != nil {
+			log.Printf("WebSocket: 重连失败: %v", err)
+			continue
+		}
+		return
 	}
 }
 

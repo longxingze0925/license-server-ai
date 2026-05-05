@@ -17,7 +17,7 @@ const Login: React.FC = () => {
       setAuth(data.token, data.user, data.tenant);
       message.success('登录成功');
       navigate('/');
-    } catch (error) {
+    } catch {
       // 错误已在拦截器处理
     } finally {
       setLoading(false);

@@ -146,15 +146,11 @@ class WSClient:
         with self._lock:
             if self._connected:
                 return True
-            self._should_reconnect = self.reconnect
+            if self._thread and self._thread.is_alive():
+                return False
+            self._should_reconnect = True
 
-        self._ws = websocket.WebSocketApp(
-            self._ws_url,
-            on_open=self._on_open,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close
-        )
+        self._get_access_token()
 
         # 在后台线程运行
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -233,8 +229,14 @@ class WSClient:
 
     def _run(self):
         """运行 WebSocket"""
-        while self._should_reconnect:
+        while True:
+            with self._lock:
+                should_run = self._should_reconnect
+            if not should_run:
+                break
+
             try:
+                self._ws = self._create_websocket_app()
                 # 使用 SSL 选项运行
                 self._ws.run_forever(
                     ping_interval=30,
@@ -243,13 +245,55 @@ class WSClient:
                 )
             except Exception as e:
                 print(f"WebSocket error: {e}")
+                if self.on_error:
+                    self.on_error(e)
 
             with self._lock:
                 self._connected = False
+                self._ws = None
 
-            if self._should_reconnect:
+            if not self.reconnect:
+                break
+
+            with self._lock:
+                should_reconnect = self._should_reconnect
+            if should_reconnect:
                 print(f"WebSocket: 将在 {self.reconnect_interval} 秒后重连...")
                 time.sleep(self.reconnect_interval)
+
+        with self._lock:
+            self._should_reconnect = False
+
+    def _create_websocket_app(self) -> websocket.WebSocketApp:
+        access_token = self._get_access_token()
+        return websocket.WebSocketApp(
+            self._ws_url,
+            header=[f"Authorization: Bearer {access_token}"],
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close
+        )
+
+    def _get_access_token(self) -> str:
+        if self._access_token_expired_soon() and hasattr(self.client, '_refresh_client_session'):
+            self.client._refresh_client_session()
+
+        access_token = (getattr(self.client, '_license_info', {}) or {}).get('access_token', '')
+        if not access_token:
+            raise WSClientError("缺少客户端访问令牌，请先激活或登录")
+        return access_token
+
+    def _access_token_expired_soon(self, skew_seconds: int = 60) -> bool:
+        info = getattr(self.client, '_license_info', {}) or {}
+        access_token = info.get('access_token', '')
+        if not access_token:
+            return True
+        expires_at = info.get('access_expires_at') or 0
+        try:
+            return bool(expires_at) and time.time() + skew_seconds >= float(expires_at)
+        except (TypeError, ValueError):
+            return False
 
     def _on_open(self, ws):
         """连接打开回调"""
@@ -329,10 +373,18 @@ class WSClient:
             if isinstance(payload, str):
                 payload = json.loads(payload)
 
+            payload_body = payload.get("payload", {})
+            payload_raw = payload.get("payload_raw")
+            if payload_raw is None:
+                if isinstance(payload_body, str):
+                    payload_raw = payload_body
+                else:
+                    payload_raw = json.dumps(payload_body, ensure_ascii=False, separators=(',', ':'))
+
             inst = Instruction(
                 id=payload.get("id"),
                 type=payload.get("type"),
-                payload=json.loads(payload.get("payload", "{}")) if isinstance(payload.get("payload"), str) else payload.get("payload", {}),
+                payload=json.loads(payload_body) if isinstance(payload_body, str) else payload_body,
                 timestamp=payload.get("timestamp", 0),
                 nonce=payload.get("nonce", ""),
                 signature=payload.get("signature", ""),
@@ -340,13 +392,13 @@ class WSClient:
             )
 
             # 验证过期时间
-            if time.time() > inst.expires_at:
+            if inst.expires_at and time.time() > inst.expires_at:
                 print(f"WebSocket: 指令已过期 id={inst.id}")
                 self._send_instruction_result(inst.id, "failed", None, "指令已过期")
                 return
 
             # 验证签名
-            sign_data = f"{inst.id}:{inst.type}:{json.dumps(inst.payload)}:{inst.nonce}"
+            sign_data = f"{inst.id}:{inst.type}:{payload_raw}:{inst.nonce}"
             if not self._verify_signature(sign_data.encode(), inst.signature):
                 print(f"WebSocket: 指令签名验证失败 id={inst.id}")
                 self._send_instruction_result(inst.id, "failed", None, "签名验证失败")
@@ -404,12 +456,13 @@ class WSClient:
 
     def _verify_signature(self, data: bytes, signature_base64: str) -> bool:
         """验证签名"""
-        if not hasattr(self.client, 'public_key') or self.client.public_key is None:
+        public_key = getattr(self.client, '_public_key', None) or getattr(self.client, 'public_key', None)
+        if public_key is None:
             return True  # 如果没有公钥，跳过验证
 
         try:
             signature = base64.b64decode(signature_base64)
-            self.client.public_key.verify(
+            public_key.verify(
                 signature,
                 data,
                 padding.PKCS1v15(),

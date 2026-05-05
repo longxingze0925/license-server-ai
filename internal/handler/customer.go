@@ -5,8 +5,10 @@ import (
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type CustomerHandler struct{}
@@ -31,6 +33,7 @@ type CreateCustomerRequest struct {
 func (h *CustomerHandler) Create(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 	userID := middleware.GetUserID(c)
+	userRole := middleware.GetUserRole(c)
 
 	var req CreateCustomerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -40,14 +43,16 @@ func (h *CustomerHandler) Create(c *gin.Context) {
 
 	// 检查邮箱是否已存在（同一租户内）
 	var existingCustomer model.Customer
-	if err := model.DB.Where("email = ? AND tenant_id = ?", req.Email, tenantID).First(&existingCustomer).Error; err == nil {
+	if err := model.DB.Unscoped().Where("email = ? AND tenant_id = ?", req.Email, tenantID).First(&existingCustomer).Error; err == nil {
 		response.Error(c, 400, "该邮箱已存在")
 		return
 	}
 
 	// 如果没有指定所属成员，默认为当前用户
 	ownerID := req.OwnerID
-	if ownerID == "" {
+	if !isTenantAdminRole(userRole) {
+		ownerID = userID
+	} else if ownerID == "" {
 		ownerID = userID
 	}
 
@@ -74,6 +79,10 @@ func (h *CustomerHandler) Create(c *gin.Context) {
 
 	// 如果提供了密码，则设置密码（使用预哈希逻辑，与SDK保持一致）
 	if req.Password != "" {
+		if err := validatePasswordPolicy(req.Password); err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
 		if err := customer.SetPasswordWithPreHash(req.Password, false); err != nil {
 			response.ServerError(c, "密码加密失败")
 			return
@@ -95,10 +104,20 @@ func (h *CustomerHandler) Create(c *gin.Context) {
 	})
 }
 
+func scopedCustomerQuery(c *gin.Context) *gorm.DB {
+	query := model.DB.Model(&model.Customer{}).Where("tenant_id = ?", middleware.GetTenantID(c))
+	if !isTenantAdminRole(middleware.GetUserRole(c)) {
+		query = query.Where("owner_id = ?", middleware.GetUserID(c))
+	}
+	return query
+}
+
+func isTenantAdminRole(role string) bool {
+	return role == string(model.RoleOwner) || role == string(model.RoleAdmin)
+}
+
 // List 获取客户列表
 func (h *CustomerHandler) List(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
-	userID := middleware.GetUserID(c)
 	userRole := middleware.GetUserRole(c)
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -114,13 +133,10 @@ func (h *CustomerHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	query := model.DB.Model(&model.Customer{}).Where("tenant_id = ?", tenantID)
+	query := scopedCustomerQuery(c)
 
 	// 权限控制：非管理员只能看到自己名下的客户
-	isAdmin := userRole == string(model.RoleOwner) || userRole == string(model.RoleAdmin)
-	if !isAdmin {
-		query = query.Where("owner_id = ?", userID)
-	} else if ownerID != "" {
+	if isTenantAdminRole(userRole) && ownerID != "" {
 		// 管理员可以按所属成员筛选
 		query = query.Where("owner_id = ?", ownerID)
 	}
@@ -170,16 +186,16 @@ func (h *CustomerHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var customer model.Customer
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&customer).Error; err != nil {
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
 		response.NotFound(c, "客户不存在")
 		return
 	}
 
 	// 获取关联数据统计
 	var licenseCount, subscriptionCount, deviceCount int64
-	model.DB.Model(&model.License{}).Where("customer_id = ?", id).Count(&licenseCount)
-	model.DB.Model(&model.Subscription{}).Where("customer_id = ?", id).Count(&subscriptionCount)
-	model.DB.Model(&model.Device{}).Where("customer_id = ?", id).Count(&deviceCount)
+	model.DB.Model(&model.License{}).Where("customer_id = ? AND tenant_id = ?", id, tenantID).Count(&licenseCount)
+	model.DB.Model(&model.Subscription{}).Where("customer_id = ? AND tenant_id = ?", id, tenantID).Count(&subscriptionCount)
+	model.DB.Model(&model.Device{}).Where("customer_id = ? AND tenant_id = ?", id, tenantID).Count(&deviceCount)
 
 	response.Success(c, gin.H{
 		"id":            customer.ID,
@@ -204,17 +220,16 @@ func (h *CustomerHandler) Get(c *gin.Context) {
 
 // UpdateCustomerRequest 更新客户请求
 type UpdateCustomerRequest struct {
-	Name     string `json:"name"`
-	Phone    string `json:"phone"`
-	Company  string `json:"company"`
-	Remark   string `json:"remark"`
-	Metadata string `json:"metadata"`
-	Status   string `json:"status"`
+	Name     *string `json:"name"`
+	Phone    *string `json:"phone"`
+	Company  *string `json:"company"`
+	Remark   *string `json:"remark"`
+	Metadata *string `json:"metadata"`
+	Status   *string `json:"status"`
 }
 
 // Update 更新客户
 func (h *CustomerHandler) Update(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var req UpdateCustomerRequest
@@ -224,29 +239,33 @@ func (h *CustomerHandler) Update(c *gin.Context) {
 	}
 
 	var customer model.Customer
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&customer).Error; err != nil {
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
 		response.NotFound(c, "客户不存在")
 		return
 	}
 
 	updates := map[string]interface{}{}
-	if req.Name != "" {
-		updates["name"] = req.Name
+	if req.Name != nil {
+		updates["name"] = *req.Name
 	}
-	if req.Phone != "" {
-		updates["phone"] = req.Phone
+	if req.Phone != nil {
+		updates["phone"] = *req.Phone
 	}
-	if req.Company != "" {
-		updates["company"] = req.Company
+	if req.Company != nil {
+		updates["company"] = *req.Company
 	}
-	if req.Remark != "" {
-		updates["remark"] = req.Remark
+	if req.Remark != nil {
+		updates["remark"] = *req.Remark
 	}
-	if req.Metadata != "" {
-		updates["metadata"] = req.Metadata
+	if req.Metadata != nil {
+		updates["metadata"] = *req.Metadata
 	}
-	if req.Status != "" {
-		updates["status"] = req.Status
+	if req.Status != nil && *req.Status != "" {
+		if !isValidCustomerStatus(*req.Status) {
+			response.BadRequest(c, "客户状态不支持")
+			return
+		}
+		updates["status"] = *req.Status
 	}
 
 	if len(updates) > 0 {
@@ -265,22 +284,52 @@ func (h *CustomerHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var customer model.Customer
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&customer).Error; err != nil {
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
 		response.NotFound(c, "客户不存在")
 		return
 	}
 
-	// 删除关联数据
+	now := time.Now()
 	tx := model.DB.Begin()
 
+	var deviceIDs []string
+	if err := tx.Model(&model.Device{}).Where("customer_id = ? AND tenant_id = ?", id, tenantID).Pluck("id", &deviceIDs).Error; err != nil {
+		tx.Rollback()
+		response.ServerError(c, "查询客户设备失败: "+err.Error())
+		return
+	}
+
+	if err := revokeActiveClientSessionsForCustomer(tx, tenantID, id, now); err != nil {
+		tx.Rollback()
+		response.ServerError(c, "撤销客户会话失败: "+err.Error())
+		return
+	}
+	if err := revokeActiveClientSessionsForDevices(tx, deviceIDs, now); err != nil {
+		tx.Rollback()
+		response.ServerError(c, "撤销设备会话失败: "+err.Error())
+		return
+	}
+
 	// 删除设备
-	tx.Where("customer_id = ?", id).Delete(&model.Device{})
+	if err := tx.Where("customer_id = ? AND tenant_id = ?", id, tenantID).Delete(&model.Device{}).Error; err != nil {
+		tx.Rollback()
+		response.ServerError(c, "删除客户设备失败: "+err.Error())
+		return
+	}
 
 	// 删除订阅
-	tx.Where("customer_id = ?", id).Delete(&model.Subscription{})
+	if err := tx.Where("customer_id = ? AND tenant_id = ?", id, tenantID).Delete(&model.Subscription{}).Error; err != nil {
+		tx.Rollback()
+		response.ServerError(c, "删除客户订阅失败: "+err.Error())
+		return
+	}
 
 	// 更新授权码（解除关联）
-	tx.Model(&model.License{}).Where("customer_id = ?", id).Update("customer_id", nil)
+	if err := tx.Model(&model.License{}).Where("customer_id = ? AND tenant_id = ?", id, tenantID).Update("customer_id", nil).Error; err != nil {
+		tx.Rollback()
+		response.ServerError(c, "解除客户授权关联失败: "+err.Error())
+		return
+	}
 
 	// 删除客户
 	if err := tx.Delete(&customer).Error; err != nil {
@@ -289,59 +338,69 @@ func (h *CustomerHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	tx.Commit()
+	if err := tx.Commit().Error; err != nil {
+		response.ServerError(c, "删除客户失败: "+err.Error())
+		return
+	}
 	response.SuccessWithMessage(c, "删除成功", nil)
 }
 
 // Disable 禁用客户
 func (h *CustomerHandler) Disable(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var customer model.Customer
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&customer).Error; err != nil {
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
 		response.NotFound(c, "客户不存在")
 		return
 	}
 
 	customer.Status = model.CustomerStatusDisabled
-	model.DB.Save(&customer)
+	if err := model.DB.Save(&customer).Error; err != nil {
+		response.ServerError(c, "禁用客户失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "客户已禁用", nil)
 }
 
 // Enable 启用客户
 func (h *CustomerHandler) Enable(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var customer model.Customer
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&customer).Error; err != nil {
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
 		response.NotFound(c, "客户不存在")
 		return
 	}
 
 	customer.Status = model.CustomerStatusActive
-	model.DB.Save(&customer)
+	if err := model.DB.Save(&customer).Error; err != nil {
+		response.ServerError(c, "启用客户失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "客户已启用", nil)
 }
 
 // ResetPassword 重置客户密码
 func (h *CustomerHandler) ResetPassword(c *gin.Context) {
-	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
 	var req struct {
-		Password string `json:"password" binding:"required,min=6"`
+		Password string `json:"password" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误: "+err.Error())
 		return
 	}
+	if err := validatePasswordPolicy(req.Password); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	var customer model.Customer
-	if err := model.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&customer).Error; err != nil {
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
 		response.NotFound(c, "客户不存在")
 		return
 	}
@@ -351,7 +410,10 @@ func (h *CustomerHandler) ResetPassword(c *gin.Context) {
 		return
 	}
 
-	model.DB.Save(&customer)
+	if err := model.DB.Save(&customer).Error; err != nil {
+		response.ServerError(c, "重置密码失败: "+err.Error())
+		return
+	}
 	response.SuccessWithMessage(c, "密码已重置", nil)
 }
 
@@ -359,6 +421,12 @@ func (h *CustomerHandler) ResetPassword(c *gin.Context) {
 func (h *CustomerHandler) GetLicenses(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
+
+	var customer model.Customer
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
+		response.NotFound(c, "客户不存在")
+		return
+	}
 
 	var licenses []model.License
 	model.DB.Preload("Application").Where("customer_id = ? AND tenant_id = ?", id, tenantID).Find(&licenses)
@@ -389,6 +457,12 @@ func (h *CustomerHandler) GetSubscriptions(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
+	var customer model.Customer
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
+		response.NotFound(c, "客户不存在")
+		return
+	}
+
 	var subscriptions []model.Subscription
 	model.DB.Preload("Application").Where("customer_id = ? AND tenant_id = ?", id, tenantID).Find(&subscriptions)
 
@@ -417,25 +491,40 @@ func (h *CustomerHandler) GetDevices(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 	id := c.Param("id")
 
+	var customer model.Customer
+	if err := scopedCustomerQuery(c).Where("id = ?", id).First(&customer).Error; err != nil {
+		response.NotFound(c, "客户不存在")
+		return
+	}
+
 	var devices []model.Device
 	model.DB.Where("customer_id = ? AND tenant_id = ?", id, tenantID).Find(&devices)
 
 	var result []gin.H
 	for _, d := range devices {
 		result = append(result, gin.H{
-			"id":               d.ID,
-			"machine_id":       d.MachineID,
-			"device_name":      d.DeviceName,
-			"hostname":         d.Hostname,
-			"os_type":          d.OSType,
-			"os_version":       d.OSVersion,
-			"app_version":      d.AppVersion,
-			"ip_address":       d.IPAddress,
-			"status":           d.Status,
+			"id":                d.ID,
+			"machine_id":        d.MachineID,
+			"device_name":       d.DeviceName,
+			"hostname":          d.Hostname,
+			"os_type":           d.OSType,
+			"os_version":        d.OSVersion,
+			"app_version":       d.AppVersion,
+			"ip_address":        d.IPAddress,
+			"status":            d.Status,
 			"last_heartbeat_at": d.LastHeartbeatAt,
-			"created_at":       d.CreatedAt,
+			"created_at":        d.CreatedAt,
 		})
 	}
 
 	response.Success(c, result)
+}
+
+func isValidCustomerStatus(status string) bool {
+	switch model.CustomerStatus(status) {
+	case model.CustomerStatusActive, model.CustomerStatusDisabled, model.CustomerStatusBanned, model.CustomerStatusPending:
+		return true
+	default:
+		return false
+	}
 }

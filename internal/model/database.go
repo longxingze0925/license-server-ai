@@ -58,6 +58,7 @@ func AutoMigrate() error {
 		&SecureScript{},
 		&ScriptDelivery{},
 		&RealtimeInstruction{},
+		&RealtimeInstructionResult{},
 		&DeviceConnection{},
 		// 授权管理
 		&License{},
@@ -92,5 +93,12 @@ func AutoMigrate() error {
 		&ClientSyncData{},
 		// 客户端会话
 		&ClientSession{},
+		// AI Provider 转发与计费
+		&ProviderCredential{},
+		&UserCredit{},
+		&CreditTransaction{},
+		&PricingRule{},
+		&GenerationTask{},
+		&GenerationFile{},
 	)
 }

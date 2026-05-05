@@ -1,9 +1,9 @@
 package middleware
 
 import (
-	"bytes"
-	"io"
 	"log"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,13 +16,6 @@ func LoggerMiddleware() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		query := c.Request.URL.RawQuery
 
-		// 读取请求体（用于日志记录）
-		var bodyBytes []byte
-		if c.Request.Body != nil {
-			bodyBytes, _ = io.ReadAll(c.Request.Body)
-			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		}
-
 		c.Next()
 
 		// 计算耗时
@@ -31,10 +24,7 @@ func LoggerMiddleware() gin.HandlerFunc {
 		method := c.Request.Method
 		statusCode := c.Writer.Status()
 
-		// 记录日志
-		if query != "" {
-			path = path + "?" + query
-		}
+		path = sanitizeLogPath(path, query)
 
 		log.Printf("[API] %d | %13v | %15s | %-7s %s",
 			statusCode,
@@ -44,4 +34,51 @@ func LoggerMiddleware() gin.HandlerFunc {
 			path,
 		)
 	}
+}
+
+var sensitiveQueryKeys = map[string]struct{}{
+	"access_token":  {},
+	"api_key":       {},
+	"api_token":     {},
+	"client_secret": {},
+	"key":           {},
+	"refresh_token": {},
+	"secret":        {},
+	"token":         {},
+}
+
+func sanitizeLogPath(path, rawQuery string) string {
+	if rawQuery == "" {
+		return path
+	}
+
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return path + "?" + redactRawQuery(rawQuery)
+	}
+
+	for key := range values {
+		if _, ok := sensitiveQueryKeys[strings.ToLower(key)]; ok {
+			values.Set(key, "***")
+		}
+	}
+	return path + "?" + values.Encode()
+}
+
+func redactRawQuery(rawQuery string) string {
+	parts := strings.Split(rawQuery, "&")
+	for i, part := range parts {
+		key, _, found := strings.Cut(part, "=")
+		if !found {
+			continue
+		}
+		decodedKey, err := url.QueryUnescape(key)
+		if err != nil {
+			decodedKey = key
+		}
+		if _, ok := sensitiveQueryKeys[strings.ToLower(decodedKey)]; ok {
+			parts[i] = key + "=***"
+		}
+	}
+	return strings.Join(parts, "&")
 }

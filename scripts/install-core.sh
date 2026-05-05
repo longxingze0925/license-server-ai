@@ -47,6 +47,9 @@ MAX_SECURE_SCRIPT_UPLOAD_MB="20"
 
 ADMIN_EMAIL="admin@example.com"
 ADMIN_PASSWORD=""
+LICENSE_MASTER_KEY=""
+DOWNLOAD_TOKEN_SECRET=""
+CLIENT_ACCESS_TOKEN_SECRET=""
 
 CUSTOM_CERT_PATH=""
 CUSTOM_KEY_PATH=""
@@ -319,6 +322,9 @@ load_existing_secrets() {
     v=$(get_env_value "MYSQL_PASSWORD" || true); [ -n "$v" ] && MYSQL_PASSWORD="$v"
     v=$(get_env_value "REDIS_PASSWORD" || true); [ -n "$v" ] && REDIS_PASSWORD="$v"
     v=$(get_env_value "JWT_SECRET" || true); [ -n "$v" ] && JWT_SECRET="$v"
+    v=$(get_env_value "LICENSE_MASTER_KEY" || true); [ -n "$v" ] && LICENSE_MASTER_KEY="$v"
+    v=$(get_env_value "DOWNLOAD_TOKEN_SECRET" || true); [ -n "$v" ] && DOWNLOAD_TOKEN_SECRET="$v"
+    v=$(get_env_value "CLIENT_ACCESS_TOKEN_SECRET" || true); [ -n "$v" ] && CLIENT_ACCESS_TOKEN_SECRET="$v"
     v=$(get_env_value "MAX_RELEASE_UPLOAD_MB" || true); [ -n "$v" ] && MAX_RELEASE_UPLOAD_MB="$v"
     v=$(get_env_value "MAX_REQUEST_BODY_MB" || true); [ -n "$v" ] && MAX_REQUEST_BODY_MB="$v"
     v=$(get_env_value "MULTIPART_MEMORY_MB" || true); [ -n "$v" ] && MULTIPART_MEMORY_MB="$v"
@@ -643,6 +649,13 @@ REDIS_PORT=6379
 JWT_SECRET=${JWT_SECRET}
 JWT_EXPIRE_HOURS=24
 
+# Provider 凭证信封加密主密钥
+LICENSE_MASTER_KEY=${LICENSE_MASTER_KEY}
+
+# 客户端下载与会话 token 独立密钥
+DOWNLOAD_TOKEN_SECRET=${DOWNLOAD_TOKEN_SECRET}
+CLIENT_ACCESS_TOKEN_SECRET=${CLIENT_ACCESS_TOKEN_SECRET}
+
 # 安全配置
 SERVER_MODE=release
 TLS_ENABLED=$([ "$SSL_MODE" = "http" ] && echo false || echo true)
@@ -767,6 +780,11 @@ security:
   multipart_memory_mb: ${MULTIPART_MEMORY_MB}
   max_script_upload_mb: ${MAX_SCRIPT_UPLOAD_MB}
   max_secure_script_upload_mb: ${MAX_SECURE_SCRIPT_UPLOAD_MB}
+  download_token_secret: "${DOWNLOAD_TOKEN_SECRET}"
+  download_token_expire_seconds: 300
+  client_access_token_secret: "${CLIENT_ACCESS_TOKEN_SECRET}"
+  client_access_token_expire_seconds: 900
+  client_refresh_token_expire_seconds: 2592000
   allowed_origins:
 ${origin_lines}
 EOF
@@ -886,6 +904,8 @@ start_services() {
     if [ "$NO_BUILD" = true ]; then
         log_info "拉取 Docker 镜像..."
         docker compose -f "$COMPOSE_FILE" pull
+        log_info "执行数据库迁移..."
+        docker compose -f "$COMPOSE_FILE" run --rm migrate
         log_info "启动服务..."
         docker compose -f "$COMPOSE_FILE" up -d
     else
@@ -895,6 +915,8 @@ start_services() {
         else
             docker compose -f "$COMPOSE_FILE" build
         fi
+        log_info "执行数据库迁移..."
+        docker compose -f "$COMPOSE_FILE" run --rm migrate
         log_info "启动服务..."
         docker compose -f "$COMPOSE_FILE" up -d
     fi
@@ -1166,6 +1188,12 @@ Redis 密码:      ${REDIS_PASSWORD}
 ${JWT_SECRET}
 
 ═══════════════════════════════════════════════════════════════════════════
+                    Provider 凭证加密主密钥
+═══════════════════════════════════════════════════════════════════════════
+
+${LICENSE_MASTER_KEY}
+
+═══════════════════════════════════════════════════════════════════════════
                             常用命令
 ═══════════════════════════════════════════════════════════════════════════
 
@@ -1341,6 +1369,9 @@ main() {
         MYSQL_PASSWORD=""
         REDIS_PASSWORD=""
         JWT_SECRET=""
+        LICENSE_MASTER_KEY=""
+        DOWNLOAD_TOKEN_SECRET=""
+        CLIENT_ACCESS_TOKEN_SECRET=""
     fi
 
     if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
@@ -1354,6 +1385,15 @@ main() {
     fi
     if [ -z "$JWT_SECRET" ]; then
         JWT_SECRET=$(generate_secret)
+    fi
+    if [ -z "$LICENSE_MASTER_KEY" ]; then
+        LICENSE_MASTER_KEY=$(generate_secret)
+    fi
+    if [ -z "$DOWNLOAD_TOKEN_SECRET" ]; then
+        DOWNLOAD_TOKEN_SECRET=$(generate_secret)
+    fi
+    if [ -z "$CLIENT_ACCESS_TOKEN_SECRET" ]; then
+        CLIENT_ACCESS_TOKEN_SECRET=$(generate_secret)
     fi
 
     create_directories

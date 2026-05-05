@@ -75,7 +75,10 @@ func (h *ScriptHandler) Upload(c *gin.Context) {
 		existingScript.Content = content
 		existingScript.ContentHash = contentHash
 		existingScript.FileSize = int64(len(content))
-		model.DB.Save(&existingScript)
+		if err := model.DB.Save(&existingScript).Error; err != nil {
+			response.ServerError(c, "更新脚本失败: "+err.Error())
+			return
+		}
 
 		response.Success(c, gin.H{
 			"id":       existingScript.ID,
@@ -191,7 +194,7 @@ func (h *ScriptHandler) Update(c *gin.Context) {
 	}
 
 	var req struct {
-		RolloutPercentage int    `json:"rollout_percentage"`
+		RolloutPercentage *int   `json:"rollout_percentage"`
 		Status            string `json:"status"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -200,14 +203,21 @@ func (h *ScriptHandler) Update(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{}
-	if req.RolloutPercentage > 0 && req.RolloutPercentage <= 100 {
-		updates["rollout_percentage"] = req.RolloutPercentage
+	if req.RolloutPercentage != nil {
+		if *req.RolloutPercentage < 0 || *req.RolloutPercentage > 100 {
+			response.BadRequest(c, "灰度比例必须在 0 到 100 之间")
+			return
+		}
+		updates["rollout_percentage"] = *req.RolloutPercentage
 	}
 	if req.Status != "" {
 		updates["status"] = req.Status
 	}
 
-	model.DB.Model(&script).Updates(updates)
+	if err := model.DB.Model(&script).Updates(updates).Error; err != nil {
+		response.ServerError(c, "更新脚本配置失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "更新成功", nil)
 }
@@ -225,7 +235,10 @@ func (h *ScriptHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	model.DB.Delete(&script)
+	if err := model.DB.Delete(&script).Error; err != nil {
+		response.ServerError(c, "删除脚本失败: "+err.Error())
+		return
+	}
 
 	response.SuccessWithMessage(c, "删除成功", nil)
 }
