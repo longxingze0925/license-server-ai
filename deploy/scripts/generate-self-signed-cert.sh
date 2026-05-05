@@ -5,6 +5,17 @@
 SSL_DIR="/etc/nginx/ssl"
 CERT_FILE="$SSL_DIR/server.crt"
 KEY_FILE="$SSL_DIR/server.key"
+NGINX_MODE="${NGINX_MODE:-auto}"
+
+if [ "$NGINX_MODE" = "http" ]; then
+    echo "[INFO] HTTP mode, skip SSL certificate generation"
+    exit 0
+fi
+
+if [ "$NGINX_MODE" = "auto" ] && [ ! -f "$CERT_FILE" ] && [ ! -f "$KEY_FILE" ]; then
+    echo "[INFO] no mounted SSL certificate, auto mode uses HTTP"
+    exit 0
+fi
 
 # 检查证书是否存在
 if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then

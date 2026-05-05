@@ -1086,14 +1086,30 @@ start_services() {
     fi
 
     log_info "等待服务启动..."
-    sleep 15
-
-    if docker compose -f "$COMPOSE_FILE" ps | grep -q "Up"; then
-        log_success "服务启动成功"
-    else
-        log_error "服务启动失败，请检查日志: docker compose -f $COMPOSE_FILE logs"
-        exit 1
+    local backend_ok=false
+    local frontend_ok=false
+    local frontend_health_url="http://127.0.0.1:80/"
+    if [ "$SSL_MODE" != "http" ]; then
+        frontend_health_url="https://127.0.0.1:443/"
     fi
+
+    for i in {1..30}; do
+        if docker compose -f "$COMPOSE_FILE" exec -T backend wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health >/dev/null 2>&1; then
+            backend_ok=true
+        fi
+        if docker compose -f "$COMPOSE_FILE" exec -T frontend wget --no-verbose --tries=1 --spider --no-check-certificate "$frontend_health_url" >/dev/null 2>&1; then
+            frontend_ok=true
+        fi
+        if [ "$backend_ok" = true ] && [ "$frontend_ok" = true ]; then
+            log_success "服务启动成功"
+            return 0
+        fi
+        sleep 2
+    done
+
+    log_error "服务启动失败，请检查日志: docker compose -f $COMPOSE_FILE logs"
+    docker compose -f "$COMPOSE_FILE" ps || true
+    exit 1
 }
 
 init_admin() {

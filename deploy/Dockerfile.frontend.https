@@ -31,12 +31,14 @@ RUN apk add --no-cache openssl
 
 # 默认上传限制（MB）
 ENV MAX_RELEASE_UPLOAD_MB=500
+ENV NGINX_MODE=auto
 
 # 创建 SSL 证书目录
 RUN mkdir -p /etc/nginx/ssl /var/www/certbot
 
-# 复制 nginx 模板（根据环境变量渲染）
-COPY deploy/nginx/https.conf.template /opt/nginx-template/default.conf.template
+# 复制 nginx 模板（根据运行模式渲染）
+COPY deploy/nginx/default.conf.template /opt/nginx-template/default-http.conf.template
+COPY deploy/nginx/https.conf.template /opt/nginx-template/default-https.conf.template
 
 # 从构建阶段复制静态文件
 COPY --from=builder /build/dist /usr/share/nginx/html

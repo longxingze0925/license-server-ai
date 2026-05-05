@@ -31,7 +31,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # 确定使用的 compose 文件
-if [ -f "docker-compose.https.yml" ] && [ -f "certs/ssl/server.crt" ]; then
+SSL_MODE=""
+if [ -f ".env" ]; then
+    SSL_MODE=$(grep -E '^SSL_MODE=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d '\r')
+fi
+
+if [ "$SSL_MODE" != "http" ] && [ -f "docker-compose.https.yml" ] && [ -f "certs/ssl/server.crt" ]; then
     COMPOSE_FILE="docker-compose.https.yml"
 else
     COMPOSE_FILE="docker-compose.yml"
@@ -82,6 +87,41 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+get_env_value() {
+    local key="$1"
+    if [ ! -f ".env" ]; then
+        return 1
+    fi
+    grep -E "^${key}=" .env | tail -1 | cut -d= -f2- | tr -d '"' | tr -d '\r'
+}
+
+get_frontend_status_url() {
+    local server_ip
+    local domain
+    local http_port
+    local https_port
+    server_ip=$(get_env_value "SERVER_IP" || echo "127.0.0.1")
+    domain=$(get_env_value "DOMAIN" || echo "")
+    http_port=$(get_env_value "HTTP_PORT" || echo "80")
+    https_port=$(get_env_value "HTTPS_PORT" || echo "443")
+
+    local host_name="${domain:-$server_ip}"
+    if [ "$SSL_MODE" = "http" ]; then
+        if [ "$http_port" = "80" ]; then
+            echo "http://${host_name}/"
+        else
+            echo "http://${host_name}:${http_port}/"
+        fi
+        return 0
+    fi
+
+    if [ "$https_port" = "443" ]; then
+        echo "https://${host_name}/"
+    else
+        echo "https://${host_name}:${https_port}/"
+    fi
+}
 
 # 显示当前版本
 show_current_version() {
@@ -142,7 +182,7 @@ restart_services() {
 
     # 检查后端健康状态
     for i in {1..30}; do
-        if compose_cmd exec -T backend wget --no-verbose --tries=1 --spider http://localhost:8080/api/health 2>/dev/null; then
+        if compose_cmd exec -T backend wget --no-verbose --tries=1 --spider http://localhost:8080/health 2>/dev/null; then
             log_success "后端服务就绪"
             break
         fi
@@ -153,7 +193,17 @@ restart_services() {
     compose_cmd up -d --no-deps frontend
 
     log_info "等待前端服务就绪..."
-    sleep 5
+    local frontend_health_url="http://127.0.0.1:80/"
+    if [ "$COMPOSE_FILE" = "docker-compose.https.yml" ]; then
+        frontend_health_url="https://127.0.0.1:443/"
+    fi
+    for i in {1..30}; do
+        if compose_cmd exec -T frontend wget --no-verbose --tries=1 --spider --no-check-certificate "$frontend_health_url" 2>/dev/null; then
+            log_success "前端服务就绪"
+            break
+        fi
+        sleep 2
+    done
 
     log_success "服务重启完成"
 }
@@ -168,17 +218,19 @@ check_status() {
     log_info "健康检查..."
 
     # 检查后端
-    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health | grep -q "200"; then
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health | grep -q "200"; then
         log_success "后端服务: 正常"
     else
         log_error "后端服务: 异常"
     fi
 
     # 检查前端
-    if curl -s -o /dev/null -w "%{http_code}" http://localhost/ | grep -q "200\|301\|302"; then
+    local frontend_url
+    frontend_url=$(get_frontend_status_url)
+    if curl -k -s -o /dev/null -w "%{http_code}" "$frontend_url" | grep -q "200\|301\|302"; then
         log_success "前端服务: 正常"
     else
-        log_error "前端服务: 异常"
+        log_error "前端服务: 异常 (${frontend_url})"
     fi
 }
 

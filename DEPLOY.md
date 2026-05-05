@@ -456,7 +456,7 @@ docker compose logs frontend
 
 ```bash
 # 手动测试健康检查
-curl http://localhost:8080/api/health
+curl http://localhost:8080/health
 curl http://localhost:80/
 ```
 
