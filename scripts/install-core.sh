@@ -541,7 +541,7 @@ build_frontend_url() {
             echo "http://${host_name}:${HTTP_PORT}"
         fi
     else
-        if [ "$ENABLE_NGINX_PROXY" = "yes" ] || [ "$HTTPS_PORT" = "443" ]; then
+        if [ "$ENABLE_NGINX_PROXY" = "yes" ] || [ -n "$DOMAIN" ] || [ "$HTTPS_PORT" = "443" ]; then
             echo "https://${host_name}"
         else
             echo "https://${host_name}:${HTTPS_PORT}"
@@ -1004,10 +1004,10 @@ resolve_nginx_proxy_choice() {
         return 0
     fi
 
-    if [ "$SSL_MODE" = "letsencrypt" ] && [ -n "$DOMAIN" ] && [ "$HTTPS_PORT" != "443" ]; then
+    if [ "$SSL_MODE" != "http" ] && [ -n "$DOMAIN" ] && [ "$HTTPS_PORT" != "443" ]; then
         if [ "$NON_INTERACTIVE" = true ] || [ "$YES" = true ]; then
             ENABLE_NGINX_PROXY="yes"
-            log_info "Let's Encrypt 域名部署使用非 443 容器端口，已自动启用 Nginx 反向代理"
+            log_info "域名 HTTPS 部署使用非 443 容器端口，已自动启用 Nginx 反向代理"
             return 0
         fi
 
@@ -1029,7 +1029,7 @@ resolve_nginx_proxy_choice() {
 }
 
 prompt_nginx_proxy_choice_for_domain() {
-    if [ "$SSL_MODE" != "letsencrypt" ] || [ -z "$DOMAIN" ] || [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+    if [ "$SSL_MODE" = "http" ] || [ -z "$DOMAIN" ] || [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
         return 0
     fi
 
