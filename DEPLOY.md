@@ -156,6 +156,15 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
 
 启用 Nginx 后，外部访问地址是 `https://example.com`；`4443` 只作为本机容器转发端口。
 
+如果服务器上已有 Nginx，脚本会复用它作为共享入口，只新增当前实例的站点配置：
+
+```text
+/etc/nginx/sites-available/license-server-<实例名>.conf
+/etc/nginx/sites-enabled/license-server-<实例名>.conf
+```
+
+卸载当前实例时只删除这两个配置，不会覆盖或删除其他站点。
+
 **自定义证书（已购买证书）**
 
 ```bash

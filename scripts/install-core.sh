@@ -506,12 +506,25 @@ validate_distinct_ports() {
     done
 }
 
+nginx_site_name() {
+    echo "license-server-${INSTANCE_NAME}.conf"
+}
+
+nginx_site_available_path() {
+    echo "/etc/nginx/sites-available/$(nginx_site_name)"
+}
+
+nginx_site_enabled_path() {
+    echo "/etc/nginx/sites-enabled/$(nginx_site_name)"
+}
+
 detect_existing_nginx_proxy() {
     if [ "$SSL_MODE" = "http" ] || [ -z "$DOMAIN" ]; then
         return 1
     fi
 
-    local nginx_config="/etc/nginx/sites-available/license-server"
+    local nginx_config
+    nginx_config=$(nginx_site_available_path)
     if [ -f "$nginx_config" ] && \
         grep -q "server_name ${DOMAIN}" "$nginx_config" && \
         grep -q "proxy_pass https://127.0.0.1:${HTTPS_PORT}" "$nginx_config"; then
@@ -519,6 +532,51 @@ detect_existing_nginx_proxy() {
     fi
 
     return 1
+}
+
+backup_conflicting_nginx_site() {
+    local path="$1"
+    if [ ! -f "$path" ]; then
+        return 0
+    fi
+    if grep -q "managed by license-server-ai instance ${INSTANCE_NAME}" "$path"; then
+        return 0
+    fi
+
+    local backup="${path}.bak.$(date '+%Y%m%d%H%M%S')"
+    cp "$path" "$backup"
+    log_warning "检测到同名 Nginx 配置，已备份: ${backup}"
+}
+
+remove_instance_nginx_proxy() {
+    local available enabled legacy_available legacy_enabled
+    available=$(nginx_site_available_path)
+    enabled=$(nginx_site_enabled_path)
+    legacy_available="/etc/nginx/sites-available/license-server"
+    legacy_enabled="/etc/nginx/sites-enabled/license-server"
+
+    if [ -L "$enabled" ] || [ -f "$enabled" ]; then
+        rm -f "$enabled"
+        log_info "已删除 Nginx 启用配置: ${enabled}"
+    fi
+
+    if [ -f "$available" ]; then
+        rm -f "$available"
+        log_info "已删除 Nginx 配置: ${available}"
+    fi
+
+    if [ -f "$legacy_available" ] && grep -q "server_name ${DOMAIN:-__missing_domain__}" "$legacy_available" 2>/dev/null; then
+        rm -f "$legacy_available" "$legacy_enabled"
+        log_info "已删除旧版 Nginx 配置: ${legacy_available}"
+    fi
+
+    if command -v nginx >/dev/null 2>&1; then
+        if nginx -t; then
+            systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+        else
+            log_warning "Nginx 配置测试失败，已跳过 reload"
+        fi
+    fi
 }
 
 sync_nginx_proxy_state() {
@@ -828,6 +886,7 @@ uninstall_instance() {
             remove_instance_services "$compose_file"
             remove_instance_containers
             remove_instance_network
+            remove_instance_nginx_proxy
             log_success "实例服务已卸载，数据库数据卷和配置已保留: ${ROOT_DIR}"
             log_info "如需重新安装，可再次运行一键安装脚本并使用同一实例名。"
             ;;
@@ -842,18 +901,13 @@ uninstall_instance() {
             remove_instance_containers
             remove_instance_volumes
             remove_instance_network
-            log_warning "Nginx/防火墙规则不会自动删除，如曾手动配置请自行检查。"
+            remove_instance_nginx_proxy
+            log_warning "防火墙规则不会自动删除，如曾手动配置请自行检查。"
             remove_install_dir
             log_success "实例已完全卸载: ${INSTANCE_NAME}"
             exit 0
             ;;
     esac
-
-    if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
-        log_warning "如曾启用系统 Nginx 反向代理，请手动检查 /etc/nginx/sites-available/license-server"
-    elif [ -f "/etc/nginx/sites-available/license-server" ]; then
-        log_warning "检测到系统 Nginx 配置 /etc/nginx/sites-available/license-server，未自动删除，请确认是否仍需要。"
-    fi
 
     exit 0
 }
@@ -1616,6 +1670,9 @@ install_nginx_proxy() {
     fi
 
     local host_name="${DOMAIN:-$SERVER_IP}"
+    local site_available site_enabled
+    site_available=$(nginx_site_available_path)
+    site_enabled=$(nginx_site_enabled_path)
     local SSL_CERT=""
     local SSL_KEY=""
 
@@ -1627,8 +1684,11 @@ install_nginx_proxy() {
         SSL_KEY="$(pwd)/certs/ssl/server.key"
     fi
 
-    cat > /etc/nginx/sites-available/license-server << EOF
+    backup_conflicting_nginx_site "$site_available"
+
+    cat > "$site_available" << EOF
 # License Server Nginx 反向代理配置
+# managed by license-server-ai instance ${INSTANCE_NAME}
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 
 server {
@@ -1674,13 +1734,12 @@ server {
 }
 EOF
 
-    ln -sf /etc/nginx/sites-available/license-server /etc/nginx/sites-enabled/
-    rm -f /etc/nginx/sites-enabled/default
+    ln -sf "$site_available" "$site_enabled"
 
     if nginx -t; then
-        systemctl restart nginx
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx
         systemctl enable nginx
-        log_success "Nginx 反向代理配置完成"
+        log_success "Nginx 反向代理配置完成: ${site_available}"
     else
         log_error "Nginx 配置测试失败，请检查配置"
         return 1
