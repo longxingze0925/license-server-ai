@@ -16,9 +16,6 @@ export default defineConfig({
           if (normalizedId.includes('/react/') || normalizedId.includes('/react-dom/') || normalizedId.includes('/react-router-dom/')) {
             return 'vendor-react';
           }
-          if (normalizedId.includes('/@ant-design/icons/')) {
-            return 'vendor-icons';
-          }
           if (
             normalizedId.includes('/recharts/') ||
             normalizedId.includes('/d3-')
