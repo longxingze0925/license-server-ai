@@ -155,6 +155,17 @@ const Devices: React.FC = () => {
       ),
     },
     {
+      title: '客户邮箱',
+      dataIndex: 'customer_email',
+      key: 'customer_email',
+      ellipsis: true,
+      render: (email: string, record: any) => (
+        <Tooltip title={record.customer_name || email || '-'}>
+          <span>{email || '-'}</span>
+        </Tooltip>
+      ),
+    },
+    {
       title: '操作系统',
       key: 'os',
       render: (_: any, record: any) => `${record.os_type || '-'} ${record.os_version || ''}`.trim(),
@@ -264,6 +275,12 @@ const Devices: React.FC = () => {
             </Descriptions.Item>
             <Descriptions.Item label="授权ID">
               <code>{currentDevice.license_id?.slice(0, 8)}...</code>
+            </Descriptions.Item>
+            <Descriptions.Item label="客户邮箱">
+              {currentDevice.customer_email || currentDevice.customer?.email || '-'}
+            </Descriptions.Item>
+            <Descriptions.Item label="客户名称">
+              {currentDevice.customer_name || currentDevice.customer?.name || '-'}
             </Descriptions.Item>
             <Descriptions.Item label="用户ID">
               {currentDevice.user_id ? <code>{currentDevice.user_id?.slice(0, 8)}...</code> : '-'}

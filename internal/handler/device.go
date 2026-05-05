@@ -397,8 +397,42 @@ func (h *DeviceHandler) GetBlacklist(c *gin.Context) {
 		return
 	}
 
-	var blacklist []model.DeviceBlacklist
-	if err := query.Offset((page - 1) * pageSize).Limit(pageSize).Order("device_blacklist.created_at DESC").Find(&blacklist).Error; err != nil {
+	type blacklistRow struct {
+		model.DeviceBlacklist
+		CustomerID    string `json:"customer_id"`
+		CustomerName  string `json:"customer_name"`
+		CustomerEmail string `json:"customer_email"`
+	}
+
+	var blacklist []blacklistRow
+	if err := query.
+		Select(`
+			device_blacklist.*,
+			COALESCE(MAX(customers.id), '') AS customer_id,
+			COALESCE(MAX(customers.name), '') AS customer_name,
+			COALESCE(MAX(customers.email), '') AS customer_email
+		`).
+		Joins(`
+			LEFT JOIN devices ON devices.tenant_id = device_blacklist.tenant_id
+				AND devices.machine_id = device_blacklist.machine_id
+				AND devices.deleted_at IS NULL
+				AND (
+					device_blacklist.app_id = ''
+					OR device_blacklist.app_id IS NULL
+					OR devices.license_id IN (
+						SELECT id FROM licenses WHERE licenses.app_id = device_blacklist.app_id AND licenses.tenant_id = device_blacklist.tenant_id
+					)
+					OR devices.subscription_id IN (
+						SELECT id FROM subscriptions WHERE subscriptions.app_id = device_blacklist.app_id AND subscriptions.tenant_id = device_blacklist.tenant_id
+					)
+				)
+		`).
+		Joins("LEFT JOIN customers ON customers.id = devices.customer_id AND customers.deleted_at IS NULL").
+		Group("device_blacklist.id").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Order("device_blacklist.created_at DESC").
+		Find(&blacklist).Error; err != nil {
 		response.ServerError(c, "获取黑名单列表失败")
 		return
 	}

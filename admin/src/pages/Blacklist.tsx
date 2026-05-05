@@ -58,12 +58,25 @@ const Blacklist: React.FC = () => {
 
   const filteredData = data.filter(item =>
     item.machine_id?.toLowerCase().includes(searchText.toLowerCase()) ||
+    item.customer_email?.toLowerCase().includes(searchText.toLowerCase()) ||
+    item.customer_name?.toLowerCase().includes(searchText.toLowerCase()) ||
     item.reason?.toLowerCase().includes(searchText.toLowerCase()) ||
     item.device_info?.toLowerCase().includes(searchText.toLowerCase())
   );
 
   const columns = [
     { title: '机器码', dataIndex: 'machine_id', key: 'machine_id', ellipsis: true },
+    {
+      title: '客户邮箱',
+      dataIndex: 'customer_email',
+      key: 'customer_email',
+      ellipsis: true,
+      render: (email: string, record: any) => (
+        <span title={record.customer_name || email || '-'}>
+          {email || '-'}
+        </span>
+      ),
+    },
     { title: '设备信息', dataIndex: 'device_info', key: 'device_info', ellipsis: true, render: (v: string) => v || '-' },
     { title: '操作系统', dataIndex: 'os', key: 'os', render: (v: string) => v || '-' },
     { title: '拉黑原因', dataIndex: 'reason', key: 'reason', ellipsis: true, render: (v: string) => v || '-' },
@@ -155,7 +168,7 @@ const Blacklist: React.FC = () => {
       <Card>
         <div style={{ marginBottom: 16 }}>
           <Input
-            placeholder="搜索机器码、原因、设备信息..."
+            placeholder="搜索机器码、客户邮箱、原因、设备信息..."
             prefix={<SearchOutlined />}
             value={searchText}
             onChange={e => setSearchText(e.target.value)}
