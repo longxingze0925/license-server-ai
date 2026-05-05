@@ -312,6 +312,130 @@ validate_positive_int() {
     fi
 }
 
+is_port_in_use() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn "( sport = :${port} )" 2>/dev/null | awk 'NR>1 {found=1} END {exit found ? 0 : 1}'
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" {found=1} END {exit found ? 0 : 1}'
+        return $?
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
+prompt_port() {
+    local label="$1"
+    local default_value="$2"
+    local var_name="$3"
+    local value=""
+
+    while true; do
+        read -p "${label} [${default_value}]: " value
+        value=${value:-$default_value}
+        if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ] || [ "$value" -gt 65535 ]; then
+            log_warning "${label} 必须是 1-65535 之间的端口"
+            continue
+        fi
+        if is_port_in_use "$value"; then
+            log_warning "端口 ${value} 已被占用，请重新输入"
+            continue
+        fi
+        printf -v "$var_name" '%s' "$value"
+        break
+    done
+}
+
+validate_port_available() {
+    local label="$1"
+    local port="$2"
+    validate_positive_int "$label" "$port"
+    if [ "$port" -gt 65535 ]; then
+        log_error "${label} 必须是 1-65535 之间的端口，当前值: ${port}"
+        exit 1
+    fi
+    if is_port_in_use "$port"; then
+        log_error "${label} 端口 ${port} 已被占用，请换一个端口"
+        exit 1
+    fi
+}
+
+validate_distinct_ports() {
+    local entries=("$@")
+    local i j left_name left_port right_name right_port
+    for ((i = 0; i < ${#entries[@]}; i += 2)); do
+        left_name="${entries[i]}"
+        left_port="${entries[i + 1]}"
+        for ((j = i + 2; j < ${#entries[@]}; j += 2)); do
+            right_name="${entries[j]}"
+            right_port="${entries[j + 1]}"
+            if [ "$left_port" = "$right_port" ]; then
+                log_error "${left_name} 和 ${right_name} 不能使用同一个端口: ${left_port}"
+                exit 1
+            fi
+        done
+    done
+}
+
+show_install_summary() {
+    local host_name="${DOMAIN:-$SERVER_IP}"
+    local frontend_url=""
+    local backend_url="http://${host_name}:${BACKEND_PORT}"
+
+    if [ "$SSL_MODE" = "http" ]; then
+        if [ "$HTTP_PORT" = "80" ]; then
+            frontend_url="http://${host_name}"
+        else
+            frontend_url="http://${host_name}:${HTTP_PORT}"
+        fi
+    else
+        if [ "$ENABLE_NGINX_PROXY" = "yes" ] || [ "$HTTPS_PORT" = "443" ]; then
+            frontend_url="https://${host_name}"
+        else
+            frontend_url="https://${host_name}:${HTTPS_PORT}"
+        fi
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "         即将使用以下配置安装"
+    echo "=========================================="
+    echo "管理后台: ${frontend_url}"
+    echo "后端 API: ${backend_url}"
+    echo "HTTP 端口: ${HTTP_PORT}"
+    if [ "$SSL_MODE" != "http" ]; then
+        echo "HTTPS 端口: ${HTTPS_PORT}"
+    fi
+    echo "后端端口: ${BACKEND_PORT}"
+    echo "MySQL 对外端口: ${MYSQL_PORT}"
+    echo "Redis 对外端口: ${REDIS_PORT}"
+    echo "管理员邮箱: ${ADMIN_EMAIL}"
+    echo "=========================================="
+}
+
+confirm_install_summary() {
+    if [ "$NON_INTERACTIVE" = true ] || [ "$YES" = true ]; then
+        return 0
+    fi
+
+    show_install_summary
+    local confirm=""
+    read -p "确认使用以上配置开始安装？[Y/n]: " confirm
+    confirm=${confirm:-Y}
+    case "$confirm" in
+        y|Y|yes|YES) ;;
+        *)
+            log_info "已取消安装"
+            exit 0
+            ;;
+    esac
+}
+
 get_env_value() {
     local key="$1"
     if [ ! -f ".env" ]; then
@@ -328,9 +452,7 @@ load_existing_secrets() {
     local v
     v=$(get_env_value "MYSQL_ROOT_PASSWORD" || true); [ -n "$v" ] && MYSQL_ROOT_PASSWORD="$v"
     v=$(get_env_value "MYSQL_PASSWORD" || true); [ -n "$v" ] && MYSQL_PASSWORD="$v"
-    v=$(get_env_value "MYSQL_PORT" || true); [ -n "$v" ] && MYSQL_PORT="$v"
     v=$(get_env_value "REDIS_PASSWORD" || true); [ -n "$v" ] && REDIS_PASSWORD="$v"
-    v=$(get_env_value "REDIS_PORT" || true); [ -n "$v" ] && REDIS_PORT="$v"
     v=$(get_env_value "JWT_SECRET" || true); [ -n "$v" ] && JWT_SECRET="$v"
     v=$(get_env_value "LICENSE_MASTER_KEY" || true); [ -n "$v" ] && LICENSE_MASTER_KEY="$v"
     v=$(get_env_value "DOWNLOAD_TOKEN_SECRET" || true); [ -n "$v" ] && DOWNLOAD_TOKEN_SECRET="$v"
@@ -340,6 +462,21 @@ load_existing_secrets() {
     v=$(get_env_value "MULTIPART_MEMORY_MB" || true); [ -n "$v" ] && MULTIPART_MEMORY_MB="$v"
     v=$(get_env_value "MAX_SCRIPT_UPLOAD_MB" || true); [ -n "$v" ] && MAX_SCRIPT_UPLOAD_MB="$v"
     v=$(get_env_value "MAX_SECURE_SCRIPT_UPLOAD_MB" || true); [ -n "$v" ] && MAX_SECURE_SCRIPT_UPLOAD_MB="$v"
+    return 0
+}
+
+load_existing_port_defaults() {
+    if [ ! -f ".env" ]; then
+        return 0
+    fi
+
+    local v
+    v=$(get_env_value "HTTP_PORT" || true); [ -n "$v" ] && HTTP_PORT="$v"
+    v=$(get_env_value "HTTPS_PORT" || true); [ -n "$v" ] && HTTPS_PORT="$v"
+    v=$(get_env_value "BACKEND_PORT" || true); [ -n "$v" ] && BACKEND_PORT="$v"
+    v=$(get_env_value "MYSQL_PORT" || true); [ -n "$v" ] && MYSQL_PORT="$v"
+    v=$(get_env_value "REDIS_PORT" || true); [ -n "$v" ] && REDIS_PORT="$v"
+    v=$(get_env_value "ADMIN_EMAIL" || true); [ -n "$v" ] && ADMIN_EMAIL="$v"
     return 0
 }
 
@@ -565,31 +702,20 @@ interactive_config() {
     fi
 
     if [ "$SSL_MODE" = "http" ]; then
-        read -p "HTTP 端口 [80]: " HTTP_PORT
-        HTTP_PORT=${HTTP_PORT:-80}
+        prompt_port "HTTP 端口" "80" HTTP_PORT
     else
-        read -p "HTTP 端口（用于重定向）[80]: " HTTP_PORT
-        HTTP_PORT=${HTTP_PORT:-80}
-        read -p "HTTPS 端口 [443]: " HTTPS_PORT
-        HTTPS_PORT=${HTTPS_PORT:-443}
+        prompt_port "HTTP 端口（用于重定向）" "80" HTTP_PORT
+        prompt_port "HTTPS 端口" "443" HTTPS_PORT
     fi
 
-    read -p "后端端口 [8080]: " BACKEND_PORT
-    BACKEND_PORT=${BACKEND_PORT:-8080}
+    prompt_port "后端 API 端口" "8080" BACKEND_PORT
 
-    read -p "MySQL 对外端口 [3306]: " MYSQL_PORT
-    MYSQL_PORT=${MYSQL_PORT:-3306}
+    prompt_port "MySQL 对外端口" "3306" MYSQL_PORT
 
-    read -p "Redis 对外端口 [6379]: " REDIS_PORT
-    REDIS_PORT=${REDIS_PORT:-6379}
+    prompt_port "Redis 对外端口" "6379" REDIS_PORT
 
     read -p "管理员邮箱 [admin@example.com]: " ADMIN_EMAIL
     ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
-
-    if [ -z "$ADMIN_PASSWORD" ]; then
-        log_info "正在生成安全密钥..."
-        ADMIN_PASSWORD=$(generate_password 12)
-    fi
 }
 
 validate_non_interactive() {
@@ -626,9 +752,6 @@ validate_non_interactive() {
         fi
     fi
 
-    if [ -z "$ADMIN_PASSWORD" ]; then
-        ADMIN_PASSWORD=$(generate_password 12)
-    fi
 }
 
 create_env_file() {
@@ -1294,10 +1417,6 @@ main() {
         REINSTALL_DB_MODE="${LS_REINSTALL_DB}"
     fi
 
-    check_requirements
-    install_dependencies
-    install_docker
-
     # 已安装检测
     if [ -f ".env" ] && [ "$FORCE_REINSTALL" = false ]; then
         if [ "$NON_INTERACTIVE" = true ]; then
@@ -1345,6 +1464,10 @@ main() {
         fi
     fi
 
+    if [ -f ".env" ]; then
+        load_existing_port_defaults
+    fi
+
     if [ "$NON_INTERACTIVE" = true ]; then
         validate_non_interactive
     else
@@ -1362,16 +1485,36 @@ main() {
     validate_positive_int "MULTIPART_MEMORY_MB" "$MULTIPART_MEMORY_MB"
     validate_positive_int "MAX_SCRIPT_UPLOAD_MB" "$MAX_SCRIPT_UPLOAD_MB"
     validate_positive_int "MAX_SECURE_SCRIPT_UPLOAD_MB" "$MAX_SECURE_SCRIPT_UPLOAD_MB"
-    validate_positive_int "HTTP_PORT" "$HTTP_PORT"
-    validate_positive_int "HTTPS_PORT" "$HTTPS_PORT"
-    validate_positive_int "BACKEND_PORT" "$BACKEND_PORT"
-    validate_positive_int "MYSQL_PORT" "$MYSQL_PORT"
-    validate_positive_int "REDIS_PORT" "$REDIS_PORT"
 
     if [ "$SSL_MODE" = "http" ] && [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
         log_warning "HTTP 模式下无法启用 Nginx 反向代理，已忽略 --nginx-proxy"
         ENABLE_NGINX_PROXY="no"
     fi
+
+    validate_port_available "HTTP_PORT" "$HTTP_PORT"
+    if [ "$SSL_MODE" != "http" ]; then
+        validate_port_available "HTTPS_PORT" "$HTTPS_PORT"
+        validate_distinct_ports \
+            "HTTP_PORT" "$HTTP_PORT" \
+            "HTTPS_PORT" "$HTTPS_PORT" \
+            "BACKEND_PORT" "$BACKEND_PORT" \
+            "MYSQL_PORT" "$MYSQL_PORT" \
+            "REDIS_PORT" "$REDIS_PORT"
+    else
+        validate_distinct_ports \
+            "HTTP_PORT" "$HTTP_PORT" \
+            "BACKEND_PORT" "$BACKEND_PORT" \
+            "MYSQL_PORT" "$MYSQL_PORT" \
+            "REDIS_PORT" "$REDIS_PORT"
+    fi
+    validate_port_available "BACKEND_PORT" "$BACKEND_PORT"
+    validate_port_available "MYSQL_PORT" "$MYSQL_PORT"
+    validate_port_available "REDIS_PORT" "$REDIS_PORT"
+    confirm_install_summary
+
+    check_requirements
+    install_dependencies
+    install_docker
 
     if [ "$REUSE_SECRETS" = true ]; then
         if ! load_existing_secrets; then
@@ -1403,6 +1546,9 @@ main() {
     fi
     if [ -z "$REDIS_PASSWORD" ]; then
         REDIS_PASSWORD=$(generate_password 16)
+    fi
+    if [ -z "$ADMIN_PASSWORD" ]; then
+        ADMIN_PASSWORD=$(generate_password 12)
     fi
     if [ -z "$JWT_SECRET" ]; then
         JWT_SECRET=$(generate_secret)

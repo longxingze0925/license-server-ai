@@ -34,6 +34,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-
 ```
 
 > 无参数时进入交互模式，会引导你选择证书类型、域名、端口、管理员账号等。
+> 脚本会先让你填写端口并确认配置，确认后才开始安装依赖、Docker、拉镜像和启动服务。
 > 过程中会询问是否拉取源码：默认不拉取源码，仅下载必要文件；如需源码可选择 `y` 或使用 `--source` / `LS_SOURCE=1`。
 
 ### HTTPS（Let's Encrypt，域名）
