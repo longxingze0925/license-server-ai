@@ -36,6 +36,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-
 > 无参数时进入交互模式，会先填写部署实例名，再引导你选择证书类型、域名、端口、管理员账号等。
 > 部署实例名用于隔离安装目录、容器、数据卷和网络；脚本会先让你确认配置，确认后才开始安装依赖、Docker、拉镜像和启动服务。
 > 过程中会询问是否拉取源码：默认不拉取源码，仅下载必要文件；如需源码可选择 `y` 或使用 `--source` / `LS_SOURCE=1`。
+> 已有安装目录时会自动刷新安装脚本和 Compose 文件；只有设置 `LS_NO_PULL=1` 才会跳过刷新。
 
 ### HTTPS（Let's Encrypt，域名）
 

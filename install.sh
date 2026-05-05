@@ -381,6 +381,39 @@ download_required_files() {
     log_success "必要文件下载完成"
 }
 
+refresh_install_files() {
+    if [ -n "${LS_NO_PULL:-}" ]; then
+        return 0
+    fi
+
+    if [ ! -d "$INSTALL_DIR" ]; then
+        return 0
+    fi
+
+    if [ -d "$INSTALL_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+        if git -C "$INSTALL_DIR" diff --quiet 2>/dev/null && git -C "$INSTALL_DIR" diff --cached --quiet 2>/dev/null; then
+            maybe_pull_repo
+            return 0
+        fi
+        log_warning "检测到本地修改，改用远程 raw 文件刷新安装脚本"
+    fi
+
+    local repo_path
+    repo_path=$(get_github_repo_path) || return 0
+    local raw_base="https://raw.githubusercontent.com/${repo_path}/${REPO_BRANCH}"
+
+    log_info "刷新安装脚本到最新版本..."
+    download_file "${raw_base}/install.sh" "${INSTALL_DIR}/install.sh"
+    download_file "${raw_base}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml"
+    download_file "${raw_base}/docker-compose.https.yml" "${INSTALL_DIR}/docker-compose.https.yml"
+    download_file "${raw_base}/update.sh" "${INSTALL_DIR}/update.sh"
+    download_file "${raw_base}/ssl-manager.sh" "${INSTALL_DIR}/ssl-manager.sh"
+    download_file "${raw_base}/deploy/mysql/init.sql" "${INSTALL_DIR}/deploy/mysql/init.sql"
+    download_file "${raw_base}/scripts/install-core.sh" "${INSTALL_DIR}/scripts/install-core.sh"
+
+    chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/update.sh" "${INSTALL_DIR}/ssl-manager.sh" "${INSTALL_DIR}/scripts/install-core.sh"
+}
+
 clone_repo() {
     local target_dir="$1"
 
@@ -426,17 +459,7 @@ ensure_repo_dir_nosource() {
             exit 1
         fi
 
-        if [ ! -f "${INSTALL_DIR}/scripts/install-core.sh" ] || ! grep -q -- "--uninstall" "${INSTALL_DIR}/scripts/install-core.sh"; then
-            log_info "更新卸载脚本..."
-            local repo_path raw_base
-            repo_path=$(get_github_repo_path) || {
-                log_error "仅支持 GitHub 仓库的远程脚本更新"
-                exit 1
-            }
-            raw_base="https://raw.githubusercontent.com/${repo_path}/${REPO_BRANCH}"
-            download_file "${raw_base}/scripts/install-core.sh" "${INSTALL_DIR}/scripts/install-core.sh"
-            chmod +x "${INSTALL_DIR}/scripts/install-core.sh"
-        fi
+        refresh_install_files
 
         cd "$INSTALL_DIR"
         return 0
@@ -450,11 +473,12 @@ ensure_repo_dir_nosource() {
 ensure_repo_dir() {
     if [ "$USE_SOURCE" = true ]; then
         if [ -f "scripts/install-core.sh" ] && [ -f "docker-compose.yml" ]; then
+            refresh_install_files
             return 0
         fi
 
         if [ -d "$INSTALL_DIR/.git" ]; then
-            maybe_pull_repo
+            refresh_install_files
             cd "$INSTALL_DIR"
             return 0
         fi

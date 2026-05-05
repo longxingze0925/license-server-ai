@@ -127,6 +127,8 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
+已有安装目录时，安装脚本会自动刷新核心安装脚本、Compose 文件和 SSL 管理脚本；只有设置 `LS_NO_PULL=1` 才会跳过刷新。
+
 ### 非交互安装（示例）
 
 **Let's Encrypt（域名）**
