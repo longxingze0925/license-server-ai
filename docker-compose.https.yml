@@ -128,8 +128,8 @@ services:
       NGINX_MODE: https
       MAX_RELEASE_UPLOAD_MB: ${MAX_RELEASE_UPLOAD_MB:-500}
     ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
+      - "${FRONTEND_BIND_HOST:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${FRONTEND_BIND_HOST:-0.0.0.0}:${HTTPS_PORT:-443}:443"
     volumes:
       # SSL 证书挂载（可选，如果不挂载会自动生成自签名证书）
       - ./certs/ssl:/etc/nginx/ssl:ro

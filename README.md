@@ -65,6 +65,8 @@ LS_ADMIN_EMAIL=admin@example.com LS_ADMIN_PASSWORD='Admin@123456' \
 bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
 ```
 
+域名部署时，如果 HTTPS 容器端口不是 `443`，脚本会自动启用系统 Nginx 反向代理：外部访问 `https://example.com`，Nginx 再转发到本机容器端口。也可以显式传入 `--nginx-proxy`。
+
 源码安装示例：
 
 ```bash

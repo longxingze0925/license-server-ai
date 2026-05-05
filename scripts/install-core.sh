@@ -352,6 +352,79 @@ is_port_in_use() {
     return 1
 }
 
+is_port_owned_by_instance() {
+    local port="$1"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+    docker ps --filter "name=^/${INSTANCE_NAME}-" --format '{{.Ports}}' 2>/dev/null | grep -Eq "(:|\\[::\\]:)${port}->"
+}
+
+is_port_owned_by_nginx() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp "( sport = :${port} )" 2>/dev/null | grep -Eq 'users:\(\("nginx"'
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" && $7 ~ /nginx/ {found=1} END {exit found ? 0 : 1}'
+        return $?
+    fi
+    return 1
+}
+
+is_yes_choice() {
+    case "$1" in
+        1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+find_available_port() {
+    local start="$1"
+    local port="$start"
+    while [ "$port" -le 65535 ]; do
+        if ! is_port_in_use "$port" || is_port_owned_by_instance "$port"; then
+            echo "$port"
+            return 0
+        fi
+        port=$((port + 1))
+    done
+    return 1
+}
+
+resolve_nginx_internal_ports() {
+    if [ "$ENABLE_NGINX_PROXY" != "yes" ]; then
+        return 0
+    fi
+
+    if [ "$HTTP_PORT" = "80" ] || [ "$HTTP_PORT" = "443" ]; then
+        local new_http_port
+        new_http_port=$(find_available_port 8088) || {
+            log_error "无法找到可用的前端容器 HTTP 端口"
+            exit 1
+        }
+        log_info "启用 Nginx 反向代理，前端容器 HTTP 端口自动调整为 ${new_http_port}"
+        HTTP_PORT="$new_http_port"
+    fi
+
+    if [ "$HTTPS_PORT" = "80" ] || [ "$HTTPS_PORT" = "443" ] || [ "$HTTPS_PORT" = "$HTTP_PORT" ]; then
+        local new_https_port
+        new_https_port=$(find_available_port 4443) || {
+            log_error "无法找到可用的前端容器 HTTPS 端口"
+            exit 1
+        }
+        if [ "$new_https_port" = "$HTTP_PORT" ]; then
+            new_https_port=$(find_available_port $((new_https_port + 1))) || {
+                log_error "无法找到可用的前端容器 HTTPS 端口"
+                exit 1
+            }
+        fi
+        log_info "启用 Nginx 反向代理，前端容器 HTTPS 端口自动调整为 ${new_https_port}"
+        HTTPS_PORT="$new_https_port"
+    fi
+}
+
 prompt_port() {
     local label="$1"
     local default_value="$2"
@@ -384,6 +457,34 @@ validate_port_available() {
     fi
     if is_port_in_use "$port"; then
         log_error "${label} 端口 ${port} 已被占用，请换一个端口"
+        exit 1
+    fi
+}
+
+validate_public_port_available() {
+    local label="$1"
+    local port="$2"
+    validate_positive_int "$label" "$port"
+    if [ "$port" -gt 65535 ]; then
+        log_error "${label} 必须是 1-65535 之间的端口，当前值: ${port}"
+        exit 1
+    fi
+    if is_port_in_use "$port" && ! is_port_owned_by_instance "$port" && ! is_port_owned_by_nginx "$port"; then
+        log_error "${label} 端口 ${port} 已被占用，请换一个端口"
+        exit 1
+    fi
+}
+
+validate_loopback_port_available() {
+    local label="$1"
+    local port="$2"
+    validate_positive_int "$label" "$port"
+    if [ "$port" -gt 65535 ]; then
+        log_error "${label} 必须是 1-65535 之间的端口，当前值: ${port}"
+        exit 1
+    fi
+    if is_port_in_use "$port" && ! is_port_owned_by_instance "$port"; then
+        log_error "${label} 本机端口 ${port} 已被占用，请换一个端口"
         exit 1
     fi
 }
@@ -430,9 +531,19 @@ show_install_summary() {
     echo "=========================================="
     echo "管理后台: ${frontend_url}"
     echo "后端 API: ${backend_url}"
-    echo "HTTP 端口: ${HTTP_PORT}"
+    if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+        echo "公网 HTTP 端口: 80"
+        echo "前端容器 HTTP 端口: ${HTTP_PORT}"
+    else
+        echo "HTTP 端口: ${HTTP_PORT}"
+    fi
     if [ "$SSL_MODE" != "http" ]; then
-        echo "HTTPS 端口: ${HTTPS_PORT}"
+        if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+            echo "公网 HTTPS 端口: 443"
+            echo "前端容器 HTTPS 端口: ${HTTPS_PORT}"
+        else
+            echo "HTTPS 端口: ${HTTPS_PORT}"
+        fi
     fi
     echo "后端端口: ${BACKEND_PORT}"
     echo "MySQL 对外端口: ${MYSQL_PORT}"
@@ -850,6 +961,54 @@ check_domain_access() {
     return 0
 }
 
+resolve_nginx_proxy_choice() {
+    if [ "$SSL_MODE" = "http" ]; then
+        ENABLE_NGINX_PROXY="no"
+        return 0
+    fi
+
+    if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+        return 0
+    fi
+
+    if [ "$SSL_MODE" = "letsencrypt" ] && [ -n "$DOMAIN" ] && [ "$HTTPS_PORT" != "443" ]; then
+        if [ "$NON_INTERACTIVE" = true ] || [ "$YES" = true ]; then
+            ENABLE_NGINX_PROXY="yes"
+            log_info "Let's Encrypt 域名部署使用非 443 容器端口，已自动启用 Nginx 反向代理"
+            return 0
+        fi
+
+        echo ""
+        echo "你设置的 HTTPS 容器端口是 ${HTTPS_PORT}。"
+        echo "启用 Nginx 后，用户访问 https://${DOMAIN}，Nginx 再转发到容器端口 ${HTTPS_PORT}。"
+        read -p "是否启用 Nginx 反向代理？[Y/n]: " nginx_choice
+        nginx_choice=${nginx_choice:-Y}
+        case "$nginx_choice" in
+            n|N|no|NO)
+                ENABLE_NGINX_PROXY="no"
+                log_warning "未启用 Nginx，访问地址将带端口: https://${DOMAIN}:${HTTPS_PORT}"
+                ;;
+            *)
+                ENABLE_NGINX_PROXY="yes"
+                ;;
+        esac
+    fi
+}
+
+prompt_nginx_proxy_choice_for_domain() {
+    if [ "$SSL_MODE" != "letsencrypt" ] || [ -z "$DOMAIN" ] || [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "域名部署建议启用 Nginx 反向代理：用户访问 https://${DOMAIN}，Docker 前端只监听本机内部端口。"
+    read -p "是否启用 Nginx 反向代理？[Y/n]: " nginx_choice
+    nginx_choice=${nginx_choice:-Y}
+    if is_yes_choice "$nginx_choice"; then
+        ENABLE_NGINX_PROXY="yes"
+    fi
+}
+
 interactive_config() {
     log_info "开始配置..."
     echo ""
@@ -935,12 +1094,19 @@ interactive_config() {
         fi
     fi
 
+    prompt_nginx_proxy_choice_for_domain
+
     if [ "$SSL_MODE" = "http" ]; then
         prompt_port "HTTP 端口" "80" HTTP_PORT
+    elif [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+        prompt_port "前端容器 HTTP 端口（Nginx 内部转发）" "8088" HTTP_PORT
+        prompt_port "前端容器 HTTPS 端口（Nginx 内部转发）" "4443" HTTPS_PORT
     else
         prompt_port "HTTP 端口（用于重定向）" "80" HTTP_PORT
         prompt_port "HTTPS 端口" "443" HTTPS_PORT
     fi
+
+    resolve_nginx_proxy_choice
 
     prompt_port "后端 API 端口" "8080" BACKEND_PORT
 
@@ -1007,6 +1173,8 @@ BACKEND_PORT=${BACKEND_PORT}
 HTTP_PORT=${HTTP_PORT}
 HTTPS_PORT=${HTTPS_PORT}
 FRONTEND_PORT=${HTTP_PORT}
+FRONTEND_BIND_HOST=$([ "$ENABLE_NGINX_PROXY" = "yes" ] && echo "127.0.0.1" || echo "0.0.0.0")
+NGINX_PROXY_ENABLED=${ENABLE_NGINX_PROXY}
 IMAGE_TAG=${IMAGE_TAG}
 
 # MySQL 配置
@@ -1752,26 +1920,38 @@ main() {
         log_warning "HTTP 模式下无法启用 Nginx 反向代理，已忽略 --nginx-proxy"
         ENABLE_NGINX_PROXY="no"
     fi
+    resolve_nginx_proxy_choice
+    resolve_nginx_internal_ports
 
-    validate_port_available "HTTP_PORT" "$HTTP_PORT"
-    if [ "$SSL_MODE" != "http" ]; then
-        validate_port_available "HTTPS_PORT" "$HTTPS_PORT"
-        validate_distinct_ports \
-            "HTTP_PORT" "$HTTP_PORT" \
-            "HTTPS_PORT" "$HTTPS_PORT" \
-            "BACKEND_PORT" "$BACKEND_PORT" \
-            "MYSQL_PORT" "$MYSQL_PORT" \
-            "REDIS_PORT" "$REDIS_PORT"
+    local distinct_ports=()
+    if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+        validate_public_port_available "PUBLIC_HTTP_PORT" "80"
+        validate_public_port_available "PUBLIC_HTTPS_PORT" "443"
+        validate_loopback_port_available "FRONTEND_HTTP_PORT" "$HTTP_PORT"
+        validate_loopback_port_available "FRONTEND_HTTPS_PORT" "$HTTPS_PORT"
+        distinct_ports+=(
+            "PUBLIC_HTTP_PORT" "80"
+            "PUBLIC_HTTPS_PORT" "443"
+            "FRONTEND_HTTP_PORT" "$HTTP_PORT"
+            "FRONTEND_HTTPS_PORT" "$HTTPS_PORT"
+        )
     else
-        validate_distinct_ports \
-            "HTTP_PORT" "$HTTP_PORT" \
-            "BACKEND_PORT" "$BACKEND_PORT" \
-            "MYSQL_PORT" "$MYSQL_PORT" \
-            "REDIS_PORT" "$REDIS_PORT"
+        validate_public_port_available "HTTP_PORT" "$HTTP_PORT"
+        distinct_ports+=("HTTP_PORT" "$HTTP_PORT")
+        if [ "$SSL_MODE" != "http" ]; then
+            validate_public_port_available "HTTPS_PORT" "$HTTPS_PORT"
+            distinct_ports+=("HTTPS_PORT" "$HTTPS_PORT")
+        fi
     fi
-    validate_port_available "BACKEND_PORT" "$BACKEND_PORT"
-    validate_port_available "MYSQL_PORT" "$MYSQL_PORT"
-    validate_port_available "REDIS_PORT" "$REDIS_PORT"
+    validate_public_port_available "BACKEND_PORT" "$BACKEND_PORT"
+    validate_public_port_available "MYSQL_PORT" "$MYSQL_PORT"
+    validate_public_port_available "REDIS_PORT" "$REDIS_PORT"
+    distinct_ports+=(
+        "BACKEND_PORT" "$BACKEND_PORT"
+        "MYSQL_PORT" "$MYSQL_PORT"
+        "REDIS_PORT" "$REDIS_PORT"
+    )
+    validate_distinct_ports "${distinct_ports[@]}"
     confirm_install_summary
 
     check_requirements

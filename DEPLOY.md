@@ -140,6 +140,20 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
   --ssl letsencrypt --domain example.com --email admin@example.com -y
 ```
 
+如果你希望 Docker 前端使用 `4443` 等非标准容器端口，但用户访问不带端口，启用 Nginx 反向代理：
+
+```bash
+export GIT_TOKEN=YOUR_TOKEN
+curl -H "Authorization: token $GIT_TOKEN" -fsSL \
+  https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh | \
+  bash -s -- --repo https://github.com/longxingze0925/license-server-ai.git \
+  --branch main --git-token "$GIT_TOKEN" \
+  --ssl letsencrypt --domain example.com --email admin@example.com \
+  --https-port 4443 --nginx-proxy -y
+```
+
+启用 Nginx 后，外部访问地址是 `https://example.com`；`4443` 只作为本机容器转发端口。
+
 **自定义证书（已购买证书）**
 
 ```bash

@@ -117,8 +117,13 @@ generate_letsencrypt() {
     fi
 
     # 确保 80 端口可用
-    log_info "确保 80 端口可用（临时停止 Docker 服务）..."
+    log_info "确保 80 端口可用（必要时临时停止 Docker/Nginx）..."
     docker compose down 2>/dev/null || true
+    local nginx_was_active=false
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+        nginx_was_active=true
+        systemctl stop nginx 2>/dev/null || true
+    fi
 
     # 申请证书
     certbot certonly --standalone \
@@ -145,7 +150,14 @@ generate_letsencrypt() {
         log_info "证书会在到期前自动续期"
     else
         log_error "证书申请失败"
+        if [ "$nginx_was_active" = true ]; then
+            systemctl start nginx 2>/dev/null || true
+        fi
         exit 1
+    fi
+
+    if [ "$nginx_was_active" = true ]; then
+        systemctl start nginx 2>/dev/null || true
     fi
 }
 
@@ -154,8 +166,17 @@ renew_certificates() {
     log_info "正在检查并续期证书..."
 
     if command -v certbot &> /dev/null; then
-        # 临时停止服务以释放 80 端口
-        docker compose down 2>/dev/null || true
+        local nginx_proxy_enabled="no"
+        if [ -f ".env" ]; then
+            nginx_proxy_enabled=$(grep -E '^NGINX_PROXY_ENABLED=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d '\r')
+        fi
+
+        if [ "$nginx_proxy_enabled" = "yes" ]; then
+            systemctl stop nginx 2>/dev/null || true
+        else
+            # 临时停止服务以释放 80 端口
+            docker compose down 2>/dev/null || true
+        fi
 
         certbot renew
 
@@ -172,8 +193,13 @@ renew_certificates() {
             fi
         done
 
-        # 重启服务
-        docker compose -f docker-compose.https.yml up -d
+        if [ "$nginx_proxy_enabled" = "yes" ]; then
+            systemctl start nginx 2>/dev/null || true
+            systemctl reload nginx 2>/dev/null || true
+        else
+            # 重启服务
+            docker compose -f docker-compose.https.yml up -d
+        fi
 
         log_success "证书续期完成"
     else
