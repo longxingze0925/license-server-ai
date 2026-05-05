@@ -615,6 +615,7 @@ load_existing_port_defaults() {
     v=$(get_env_value "REDIS_PORT" || true); [ -n "$v" ] && REDIS_PORT="$v"
     v=$(get_env_value "INSTANCE_NAME" || true); [ -n "$v" ] && [ "$INSTANCE_NAME_SET" = false ] && INSTANCE_NAME="$v"
     v=$(get_env_value "ADMIN_EMAIL" || true); [ -n "$v" ] && ADMIN_EMAIL="$v"
+    v=$(get_env_value "NGINX_PROXY_ENABLED" || true); [ "$v" = "yes" ] && ENABLE_NGINX_PROXY="yes"
     return 0
 }
 
@@ -1663,7 +1664,10 @@ configure_firewall() {
     log_info "配置防火墙..."
 
     if command -v ufw &> /dev/null; then
-        if [ "$SSL_MODE" = "http" ]; then
+        if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+            ufw allow 80/tcp
+            ufw allow 443/tcp
+        elif [ "$SSL_MODE" = "http" ]; then
             ufw allow ${HTTP_PORT}/tcp
             ufw allow ${BACKEND_PORT}/tcp
         else
@@ -1672,7 +1676,10 @@ configure_firewall() {
         fi
         log_success "UFW 防火墙规则已添加"
     elif command -v firewall-cmd &> /dev/null; then
-        if [ "$SSL_MODE" = "http" ]; then
+        if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+            firewall-cmd --permanent --add-port=80/tcp
+            firewall-cmd --permanent --add-port=443/tcp
+        elif [ "$SSL_MODE" = "http" ]; then
             firewall-cmd --permanent --add-port=${HTTP_PORT}/tcp
             firewall-cmd --permanent --add-port=${BACKEND_PORT}/tcp
         else
