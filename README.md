@@ -33,8 +33,8 @@
 bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
 ```
 
-> 无参数时进入交互模式，会引导你选择证书类型、域名、端口、管理员账号等。
-> 脚本会先让你填写端口并确认配置，确认后才开始安装依赖、Docker、拉镜像和启动服务。
+> 无参数时进入交互模式，会先填写部署实例名，再引导你选择证书类型、域名、端口、管理员账号等。
+> 部署实例名用于隔离安装目录、容器、数据卷和网络；脚本会先让你确认配置，确认后才开始安装依赖、Docker、拉镜像和启动服务。
 > 过程中会询问是否拉取源码：默认不拉取源码，仅下载必要文件；如需源码可选择 `y` 或使用 `--source` / `LS_SOURCE=1`。
 
 ### HTTPS（Let's Encrypt，域名）
@@ -95,6 +95,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh) \
+  --instance license-server-ai-new \
   --ssl http \
   --http-port 8088 \
   --backend-port 18080 \
@@ -105,6 +106,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-
 也可以用环境变量：
 
 ```bash
+LS_INSTANCE=license-server-ai-new \
 LS_SSL=http LS_HTTP_PORT=8088 LS_BACKEND_PORT=18080 \
 LS_MYSQL_PORT=13306 LS_REDIS_PORT=16379 \
 bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
@@ -113,7 +115,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-
 ### 更新（拉取镜像）
 
 ```bash
-cd /opt/license-server
+cd /opt/license-server-ai
 ./update.sh              # 拉取 main 镜像并更新
 ./update.sh v1.2.0       # 拉取指定标签并更新
 # 或者在 .env 中设置 IMAGE_TAG=main / v1.2.0

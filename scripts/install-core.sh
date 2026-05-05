@@ -31,6 +31,8 @@ SSL_MODE="" # self-signed / letsencrypt / http / custom
 DOMAIN=""
 SSL_EMAIL=""
 SERVER_IP=""
+INSTANCE_NAME="license-server-ai"
+INSTANCE_NAME_SET=false
 
 HTTP_PORT="80"
 HTTPS_PORT="443"
@@ -84,6 +86,7 @@ SSL & 端口:
   --domain <domain>         域名（Let's Encrypt 必填）
   --email <email>           证书邮箱（Let's Encrypt 必填）
   --server-ip <ip>          指定服务器 IP（默认自动获取）
+  --instance <name>         部署实例名，用于隔离容器/数据卷/网络（默认: license-server-ai）
   --http-port <port>        HTTP 端口（默认: 80）
   --https-port <port>       HTTPS 端口（默认: 443）
   --backend-port <port>     后端端口（默认: 8080）
@@ -137,6 +140,8 @@ parse_args() {
                 SSL_EMAIL="$2"; shift 2 ;;
             --server-ip)
                 SERVER_IP="$2"; shift 2 ;;
+            --instance)
+                INSTANCE_NAME="$2"; INSTANCE_NAME_SET=true; shift 2 ;;
             --http-port)
                 HTTP_PORT="$2"; shift 2 ;;
             --https-port)
@@ -312,6 +317,14 @@ validate_positive_int() {
     fi
 }
 
+validate_instance_name() {
+    local value="$1"
+    if ! [[ "$value" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,62}$ ]]; then
+        log_error "部署实例名只能包含字母、数字、点、下划线、短横线，长度 2-63，并且必须以字母或数字开头"
+        exit 1
+    fi
+}
+
 is_port_in_use() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
@@ -414,6 +427,9 @@ show_install_summary() {
     echo "后端端口: ${BACKEND_PORT}"
     echo "MySQL 对外端口: ${MYSQL_PORT}"
     echo "Redis 对外端口: ${REDIS_PORT}"
+    echo "部署实例名: ${INSTANCE_NAME}"
+    echo "容器前缀: ${INSTANCE_NAME}-*"
+    echo "数据卷前缀: ${INSTANCE_NAME}-*"
     echo "管理员邮箱: ${ADMIN_EMAIL}"
     echo "=========================================="
 }
@@ -476,14 +492,15 @@ load_existing_port_defaults() {
     v=$(get_env_value "BACKEND_PORT" || true); [ -n "$v" ] && BACKEND_PORT="$v"
     v=$(get_env_value "MYSQL_PORT" || true); [ -n "$v" ] && MYSQL_PORT="$v"
     v=$(get_env_value "REDIS_PORT" || true); [ -n "$v" ] && REDIS_PORT="$v"
+    v=$(get_env_value "INSTANCE_NAME" || true); [ -n "$v" ] && [ "$INSTANCE_NAME_SET" = false ] && INSTANCE_NAME="$v"
     v=$(get_env_value "ADMIN_EMAIL" || true); [ -n "$v" ] && ADMIN_EMAIL="$v"
     return 0
 }
 
 reset_data_volumes() {
     log_warning "将重置数据库与缓存数据（会清空 MySQL/Redis）"
-    docker rm -f license-backend license-frontend license-mysql license-redis >/dev/null 2>&1 || true
-    docker volume rm -f license-mysql-data license-redis-data >/dev/null 2>&1 || true
+    docker rm -f "${INSTANCE_NAME}-backend" "${INSTANCE_NAME}-frontend" "${INSTANCE_NAME}-mysql" "${INSTANCE_NAME}-redis" >/dev/null 2>&1 || true
+    docker volume rm -f "${INSTANCE_NAME}-mysql-data" "${INSTANCE_NAME}-redis-data" >/dev/null 2>&1 || true
 }
 
 apply_reinstall_db_mode() {
@@ -632,6 +649,12 @@ interactive_config() {
         SERVER_IP=${SERVER_IP:-$DEFAULT_IP}
     fi
 
+    if [ "$INSTANCE_NAME_SET" = false ]; then
+        read -p "部署实例名 [${INSTANCE_NAME}]: " input_instance
+        INSTANCE_NAME=${input_instance:-$INSTANCE_NAME}
+    fi
+    validate_instance_name "$INSTANCE_NAME"
+
     if [ -z "$DOMAIN" ]; then
         read -p "域名（可留空）: " DOMAIN
     fi
@@ -752,6 +775,7 @@ validate_non_interactive() {
         fi
     fi
 
+    validate_instance_name "$INSTANCE_NAME"
 }
 
 create_env_file() {
@@ -765,6 +789,7 @@ create_env_file() {
 
 # 服务器配置
 SERVER_IP=${SERVER_IP}
+INSTANCE_NAME=${INSTANCE_NAME}
 DOMAIN=${DOMAIN:-}
 SSL_MODE=${SSL_MODE}
 BACKEND_PORT=${BACKEND_PORT}
@@ -1078,12 +1103,13 @@ init_admin() {
     fi
 
     log_info "初始化管理员账号..."
+    local mysql_container="${INSTANCE_NAME}-mysql"
 
     log_info "等待数据库就绪..."
     local max_retries=30
     local retry=0
     while [ $retry -lt $max_retries ]; do
-        if docker exec license-mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "SELECT 1" &>/dev/null; then
+        if docker exec "$mysql_container" mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "SELECT 1" &>/dev/null; then
             log_success "数据库已就绪"
             break
         fi
@@ -1122,15 +1148,15 @@ WHERE @admin_exists = 0;
 SELECT COUNT(*) as created FROM team_members WHERE email = '${ADMIN_EMAIL}';
 EOSQL
 
-    docker cp /tmp/init_admin.sql license-mysql:/tmp/init_admin.sql
-    docker exec license-mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}" --default-character-set=utf8mb4 license_server -e "source /tmp/init_admin.sql"
+    docker cp /tmp/init_admin.sql "${mysql_container}:/tmp/init_admin.sql"
+    docker exec "$mysql_container" mysql -u root -p"${MYSQL_ROOT_PASSWORD}" --default-character-set=utf8mb4 license_server -e "source /tmp/init_admin.sql"
 
     local result=$?
     rm -f /tmp/init_admin.sql
-    docker exec license-mysql rm -f /tmp/init_admin.sql
+    docker exec "$mysql_container" rm -f /tmp/init_admin.sql
 
     if [ $result -eq 0 ]; then
-        local count=$(docker exec license-mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -N -e "SELECT COUNT(*) FROM license_server.team_members WHERE email='${ADMIN_EMAIL}';" 2>/dev/null)
+        local count=$(docker exec "$mysql_container" mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -N -e "SELECT COUNT(*) FROM license_server.team_members WHERE email='${ADMIN_EMAIL}';" 2>/dev/null)
         if [ "$count" = "1" ]; then
             log_success "管理员账号初始化完成"
         else

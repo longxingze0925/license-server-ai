@@ -11,11 +11,15 @@ set -e
 
 REPO_URL_DEFAULT="https://github.com/longxingze0925/license-server-ai.git"
 REPO_BRANCH_DEFAULT="main"
-INSTALL_DIR_DEFAULT="/opt/license-server"
+INSTANCE_NAME_DEFAULT="${LS_INSTANCE:-license-server-ai}"
+INSTALL_DIR_DEFAULT="/opt/${INSTANCE_NAME_DEFAULT}"
 
 REPO_URL="${LS_REPO:-$REPO_URL_DEFAULT}"
 REPO_BRANCH="${LS_BRANCH:-$REPO_BRANCH_DEFAULT}"
 INSTALL_DIR="${LS_DIR:-$INSTALL_DIR_DEFAULT}"
+INSTANCE_NAME="${LS_INSTANCE:-$INSTANCE_NAME_DEFAULT}"
+INSTALL_DIR_EXPLICIT=false
+[ -n "${LS_DIR:-}" ] && INSTALL_DIR_EXPLICIT=true
 
 GIT_TOKEN="${LS_GIT_TOKEN:-${GIT_TOKEN:-}}"
 USE_SOURCE=""
@@ -50,7 +54,8 @@ usage() {
 Bootstrap 选项:
   --repo <url>        Git 仓库地址
   --branch <name>     分支或标签
-  --dir <path>        安装目录（默认: /opt/license-server）
+  --instance <name>   部署实例名（默认: license-server-ai）
+  --dir <path>        安装目录（默认: /opt/<instance>）
   --git-token <token> 私有仓库 Token（HTTPS）
   --ssh               使用 SSH 克隆
   --source            拉取源码（可本地构建）
@@ -71,8 +76,15 @@ parse_args() {
                 REPO_URL="$2"; shift 2 ;;
             --branch)
                 REPO_BRANCH="$2"; shift 2 ;;
+            --instance)
+                INSTANCE_NAME="$2"
+                if [ "$INSTALL_DIR_EXPLICIT" = false ]; then
+                    INSTALL_DIR="/opt/${INSTANCE_NAME}"
+                fi
+                PASS_ARGS+=("--instance" "$INSTANCE_NAME")
+                shift 2 ;;
             --dir)
-                INSTALL_DIR="$2"; shift 2 ;;
+                INSTALL_DIR="$2"; INSTALL_DIR_EXPLICIT=true; shift 2 ;;
             --git-token)
                 GIT_TOKEN="$2"; shift 2 ;;
             --ssh)
@@ -116,6 +128,34 @@ append_arg_if_set() {
     fi
 }
 
+get_env_value_from_file() {
+    local file="$1"
+    local key="$2"
+    if [ ! -f "$file" ]; then
+        return 1
+    fi
+    grep -E "^${key}=" "$file" | tail -1 | cut -d= -f2- | tr -d '\r' | sed 's/^"//;s/"$//'
+}
+
+load_existing_instance_default() {
+    if [ -n "${LS_INSTANCE:-}" ] || has_arg "--instance"; then
+        return 0
+    fi
+
+    local value=""
+    value=$(get_env_value_from_file ".env" "INSTANCE_NAME" || true)
+    if [ -z "$value" ]; then
+        value=$(get_env_value_from_file "${INSTALL_DIR}/.env" "INSTANCE_NAME" || true)
+    fi
+
+    if [ -n "$value" ]; then
+        INSTANCE_NAME="$value"
+        if [ "$INSTALL_DIR_EXPLICIT" = false ]; then
+            INSTALL_DIR="/opt/${INSTANCE_NAME}"
+        fi
+    fi
+}
+
 apply_env_overrides() {
     local ssl_mode="${LS_SSL:-}"
     local domain="${LS_DOMAIN:-}"
@@ -141,6 +181,7 @@ apply_env_overrides() {
     append_arg_if_set "--domain" "$domain"
     append_arg_if_set "--email" "$email"
     append_arg_if_set "--server-ip" "$server_ip"
+    append_arg_if_set "--instance" "${LS_INSTANCE:-}"
     append_arg_if_set "--http-port" "$http_port"
     append_arg_if_set "--https-port" "$https_port"
     append_arg_if_set "--backend-port" "$backend_port"
@@ -191,6 +232,30 @@ apply_env_overrides() {
     if is_true "${LS_NO_SOURCE:-}"; then
         USE_SOURCE=false
     fi
+}
+
+validate_instance_name() {
+    local value="$1"
+    if ! [[ "$value" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,62}$ ]]; then
+        log_error "部署实例名只能包含字母、数字、点、下划线、短横线，长度 2-63，并且必须以字母或数字开头"
+        exit 1
+    fi
+}
+
+prompt_instance_name() {
+    if [ "$NON_INTERACTIVE" = false ] && ! has_arg "--instance"; then
+        echo ""
+        read -p "部署实例名 [${INSTANCE_NAME}]: " input_instance
+        INSTANCE_NAME=${input_instance:-$INSTANCE_NAME}
+    fi
+
+    validate_instance_name "$INSTANCE_NAME"
+
+    if [ "$INSTALL_DIR_EXPLICIT" = false ]; then
+        INSTALL_DIR="/opt/${INSTANCE_NAME}"
+    fi
+
+    append_arg_if_set "--instance" "$INSTANCE_NAME"
 }
 
 normalize_repo_url() {
@@ -406,6 +471,8 @@ main() {
         exit 0
     fi
 
+    load_existing_instance_default
+    prompt_instance_name
     resolve_source_choice
 
     if [ "$USE_SOURCE" = false ] && has_arg "--build"; then

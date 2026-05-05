@@ -12,7 +12,7 @@ services:
   # ===== MySQL 数据库 =====
   mysql:
     image: mysql:8.0
-    container_name: license-mysql
+    container_name: ${INSTANCE_NAME:-license-server-ai}-mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
@@ -39,7 +39,7 @@ services:
   # ===== Redis 缓存 =====
   redis:
     image: redis:7-alpine
-    container_name: license-redis
+    container_name: ${INSTANCE_NAME:-license-server-ai}-redis
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
@@ -60,7 +60,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
-    container_name: license-migrate
+    container_name: ${INSTANCE_NAME:-license-server-ai}-migrate
     restart: "no"
     depends_on:
       mysql:
@@ -84,7 +84,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
-    container_name: license-backend
+    container_name: ${INSTANCE_NAME:-license-server-ai}-backend
     restart: unless-stopped
     depends_on:
       mysql:
@@ -118,7 +118,7 @@ services:
       dockerfile: deploy/Dockerfile.frontend.https
       args:
         VITE_API_URL: ${VITE_API_URL:-/api}
-    container_name: license-frontend
+    container_name: ${INSTANCE_NAME:-license-server-ai}-frontend
     restart: unless-stopped
     depends_on:
       - backend
@@ -147,7 +147,7 @@ services:
   # 如果使用 Let's Encrypt 证书，取消下面的注释
   # certbot:
   #   image: certbot/certbot
-  #   container_name: license-certbot
+  #   container_name: ${INSTANCE_NAME:-license-server-ai}-certbot
   #   volumes:
   #     - ./certs/letsencrypt:/etc/letsencrypt
   #     - ./certs/certbot:/var/www/certbot
@@ -158,12 +158,12 @@ services:
 # ===== 数据卷 =====
 volumes:
   mysql_data:
-    name: license-mysql-data
+    name: ${INSTANCE_NAME:-license-server-ai}-mysql-data
   redis_data:
-    name: license-redis-data
+    name: ${INSTANCE_NAME:-license-server-ai}-redis-data
 
 # ===== 网络 =====
 networks:
   license-network:
-    name: license-network
+    name: ${INSTANCE_NAME:-license-server-ai}-network
     driver: bridge
