@@ -141,6 +141,30 @@ LS_REINSTALL_DB=reset
 LS_REINSTALL_DB=reset-new
 ```
 
+### 卸载当前实例
+
+重新执行一键安装命令，检测到已有安装后选择“卸载当前实例”：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
+```
+
+卸载模式：
+
+| 模式 | 说明 | 是否删除数据库数据 |
+|------|------|------------------|
+| `stop` | 只停止服务，保留容器、数据和配置 | 否 |
+| `remove` | 删除容器和网络，保留数据卷、配置和 `credentials.txt` | 否 |
+| `purge` | 删除容器、数据卷和安装目录，需输入实例名确认 | 是 |
+
+非交互示例：
+
+```bash
+LS_INSTANCE=license-server-ai \
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh) \
+  --uninstall --uninstall-mode remove -y
+```
+
 ## 快速开始
 
 ### 1. 配置数据库

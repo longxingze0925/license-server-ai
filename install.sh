@@ -60,7 +60,9 @@ Bootstrap 选项:
   --ssh               使用 SSH 克隆
   --source            拉取源码（可本地构建）
   --no-source         不拉取源码（默认，仅下载必要文件）
-  -y, --non-interactive  非交互模式
+  --uninstall         卸载当前实例（会进入卸载选项）
+  --uninstall-mode <mode> 卸载模式: stop/remove/purge
+  -y, --yes, --non-interactive  非交互模式
   -h, --help          显示帮助
 
 说明:
@@ -93,7 +95,11 @@ parse_args() {
                 USE_SOURCE=true; shift ;;
             --no-source)
                 USE_SOURCE=false; shift ;;
-            -y|--non-interactive)
+            --uninstall)
+                PASS_ARGS+=("$1"); shift ;;
+            --uninstall-mode)
+                PASS_ARGS+=("$1" "$2"); shift 2 ;;
+            -y|--yes|--non-interactive)
                 NON_INTERACTIVE=true; PASS_ARGS+=("$1"); shift ;;
             -h|--help)
                 SHOW_HELP=true; PASS_ARGS+=("$1"); shift ;;
@@ -231,6 +237,16 @@ apply_env_overrides() {
 
     if is_true "${LS_NO_SOURCE:-}"; then
         USE_SOURCE=false
+    fi
+
+    if is_true "${LS_UNINSTALL:-}"; then
+        if ! has_arg "--uninstall"; then
+            PASS_ARGS+=("--uninstall")
+        fi
+    fi
+
+    if [ -n "${LS_UNINSTALL_MODE:-}" ]; then
+        append_arg_if_set "--uninstall-mode" "$LS_UNINSTALL_MODE"
     fi
 }
 
@@ -403,6 +419,29 @@ clone_repo() {
 }
 
 ensure_repo_dir_nosource() {
+    if has_arg "--uninstall"; then
+        if [ ! -d "$INSTALL_DIR" ]; then
+            log_error "未找到实例安装目录: ${INSTALL_DIR}"
+            log_error "请确认实例名是否正确，或使用 LS_INSTANCE/--instance 指定要卸载的实例"
+            exit 1
+        fi
+
+        if [ ! -f "${INSTALL_DIR}/scripts/install-core.sh" ] || ! grep -q -- "--uninstall" "${INSTALL_DIR}/scripts/install-core.sh"; then
+            log_info "更新卸载脚本..."
+            local repo_path raw_base
+            repo_path=$(get_github_repo_path) || {
+                log_error "仅支持 GitHub 仓库的远程脚本更新"
+                exit 1
+            }
+            raw_base="https://raw.githubusercontent.com/${repo_path}/${REPO_BRANCH}"
+            download_file "${raw_base}/scripts/install-core.sh" "${INSTALL_DIR}/scripts/install-core.sh"
+            chmod +x "${INSTALL_DIR}/scripts/install-core.sh"
+        fi
+
+        cd "$INSTALL_DIR"
+        return 0
+    fi
+
     mkdir -p "$INSTALL_DIR"
     download_required_files
     cd "$INSTALL_DIR"
@@ -473,7 +512,12 @@ main() {
 
     load_existing_instance_default
     prompt_instance_name
-    resolve_source_choice
+
+    if has_arg "--uninstall"; then
+        USE_SOURCE=false
+    else
+        resolve_source_choice
+    fi
 
     if [ "$USE_SOURCE" = false ] && has_arg "--build"; then
         log_error "无源码模式不支持 --build，请使用 --source 或 LS_SOURCE=1"

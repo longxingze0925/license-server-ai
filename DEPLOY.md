@@ -164,6 +164,33 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
 
 所有密码和密钥将自动生成并保存到 `credentials.txt`。
 
+### 卸载当前实例
+
+服务器上已有安装时，重新执行一键安装命令会出现操作菜单，选择“卸载当前实例”即可：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
+# 选择 3) 卸载当前实例
+```
+
+卸载有三种模式：
+
+| 模式 | 说明 | 是否删除数据库数据 |
+|------|------|------------------|
+| `stop` | 只停止服务，保留容器、数据和配置 | 否 |
+| `remove` | 删除容器和网络，保留数据卷、配置和 `credentials.txt` | 否 |
+| `purge` | 删除容器、数据卷和安装目录 | 是 |
+
+非交互卸载服务、保留数据：
+
+```bash
+LS_INSTANCE=license-server-ai \
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh) \
+  --uninstall --uninstall-mode remove -y
+```
+
+完全卸载会删除数据卷和安装目录，需要显式传入 `--uninstall-mode purge -y`。脚本不会自动删除系统 Nginx 和防火墙规则，避免影响同机其他实例或站点。
+
 ### 静默安装
 
 如果已配置好 `.env` 文件：

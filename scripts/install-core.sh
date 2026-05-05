@@ -63,6 +63,8 @@ YES=false
 UPDATE_ONLY=false
 UPDATE_VERSION=""
 UPDATE_FORCE=false
+UNINSTALL_ONLY=false
+UNINSTALL_MODE=""
 FORCE_REINSTALL=false
 REINSTALL_DB_MODE=""
 SKIP_FIREWALL=false
@@ -113,6 +115,10 @@ SSL & 端口:
   --update                  仅更新（调用 update.sh）
   --update-version <vX.Y>   更新到指定版本
   --update-force            更新时强制丢弃本地修改
+
+卸载:
+  --uninstall               卸载当前实例
+  --uninstall-mode <mode>   卸载模式: stop/remove/purge
 
 行为控制:
   --nginx-proxy             启用 Nginx 反向代理（HTTPS 非 443 时可用）
@@ -184,6 +190,10 @@ parse_args() {
                 UPDATE_VERSION="$2"; shift 2 ;;
             --update-force)
                 UPDATE_FORCE=true; shift ;;
+            --uninstall)
+                UNINSTALL_ONLY=true; shift ;;
+            --uninstall-mode)
+                UNINSTALL_MODE="$2"; shift 2 ;;
             --skip-firewall)
                 SKIP_FIREWALL=true; shift ;;
             --no-init-admin)
@@ -501,6 +511,207 @@ reset_data_volumes() {
     log_warning "将重置数据库与缓存数据（会清空 MySQL/Redis）"
     docker rm -f "${INSTANCE_NAME}-backend" "${INSTANCE_NAME}-frontend" "${INSTANCE_NAME}-mysql" "${INSTANCE_NAME}-redis" >/dev/null 2>&1 || true
     docker volume rm -f "${INSTANCE_NAME}-mysql-data" "${INSTANCE_NAME}-redis-data" >/dev/null 2>&1 || true
+}
+
+detect_compose_file() {
+    local ssl_mode=""
+    if [ -f ".env" ]; then
+        ssl_mode=$(get_env_value "SSL_MODE" || true)
+    fi
+
+    if [ "$ssl_mode" != "http" ] && [ -f "docker-compose.https.yml" ]; then
+        echo "docker-compose.https.yml"
+    else
+        echo "docker-compose.yml"
+    fi
+}
+
+stop_instance_services() {
+    local compose_file="$1"
+
+    if [ -f "$compose_file" ] && command -v docker >/dev/null 2>&1; then
+        log_info "停止实例服务: ${INSTANCE_NAME}"
+        INSTANCE_NAME="$INSTANCE_NAME" docker compose -f "$compose_file" stop >/dev/null 2>&1 || true
+    fi
+}
+
+remove_instance_services() {
+    local compose_file="$1"
+
+    if [ -f "$compose_file" ] && command -v docker >/dev/null 2>&1; then
+        log_info "停止并删除实例服务: ${INSTANCE_NAME}"
+        INSTANCE_NAME="$INSTANCE_NAME" docker compose -f "$compose_file" down --remove-orphans >/dev/null 2>&1 || true
+    fi
+}
+
+remove_instance_containers() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log_info "删除实例容器: ${INSTANCE_NAME}-*"
+    docker rm -f \
+        "${INSTANCE_NAME}-backend" \
+        "${INSTANCE_NAME}-frontend" \
+        "${INSTANCE_NAME}-mysql" \
+        "${INSTANCE_NAME}-redis" \
+        "${INSTANCE_NAME}-migrate" \
+        "${INSTANCE_NAME}-certbot" >/dev/null 2>&1 || true
+}
+
+remove_instance_network() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log_info "删除实例网络: ${INSTANCE_NAME}-network"
+    docker network rm "${INSTANCE_NAME}-network" >/dev/null 2>&1 || true
+}
+
+remove_instance_volumes() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log_warning "删除实例数据卷: ${INSTANCE_NAME}-mysql-data, ${INSTANCE_NAME}-redis-data"
+    docker volume rm -f "${INSTANCE_NAME}-mysql-data" "${INSTANCE_NAME}-redis-data" >/dev/null 2>&1 || true
+}
+
+remove_install_dir() {
+    if [ -z "$ROOT_DIR" ] || [ "$ROOT_DIR" = "/" ] || [ "$ROOT_DIR" = "/opt" ]; then
+        log_error "安装目录异常，拒绝删除: ${ROOT_DIR}"
+        exit 1
+    fi
+
+    case "$ROOT_DIR" in
+        /opt/*) ;;
+        *)
+            if [ "$YES" = true ]; then
+                log_error "安装目录不在 /opt 下，非交互模式拒绝自动删除: ${ROOT_DIR}"
+                exit 1
+            fi
+            local confirm_dir=""
+            read -p "安装目录不在 /opt 下，请输入完整路径 ${ROOT_DIR} 确认删除: " confirm_dir
+            if [ "$confirm_dir" != "$ROOT_DIR" ]; then
+                log_error "安装目录不匹配，已取消完全卸载"
+                exit 1
+            fi
+            ;;
+    esac
+
+    log_warning "删除安装目录: ${ROOT_DIR}"
+    cd /
+    rm -rf "$ROOT_DIR"
+}
+
+prompt_uninstall_mode() {
+    if [ -n "$UNINSTALL_MODE" ]; then
+        return 0
+    fi
+
+    if [ "$NON_INTERACTIVE" = true ]; then
+        UNINSTALL_MODE="remove"
+        return 0
+    fi
+
+    echo ""
+    echo "卸载当前实例: ${INSTANCE_NAME}"
+    echo "  1) 只停止服务，保留数据和配置"
+    echo "  2) 卸载服务，保留数据库数据卷和 credentials.txt（推荐）"
+    echo "  3) 完全卸载，删除容器、数据卷、安装目录"
+    echo "  4) 取消"
+    read -p "请选择 [2]: " uninstall_choice
+    uninstall_choice=${uninstall_choice:-2}
+
+    case $uninstall_choice in
+        1) UNINSTALL_MODE="stop" ;;
+        2) UNINSTALL_MODE="remove" ;;
+        3) UNINSTALL_MODE="purge" ;;
+        4)
+            log_info "已取消卸载"
+            exit 0
+            ;;
+        *) UNINSTALL_MODE="remove" ;;
+    esac
+}
+
+confirm_purge() {
+    local confirm=""
+
+    if [ "$NON_INTERACTIVE" = true ] && [ "$YES" != true ]; then
+        log_error "完全卸载会删除数据卷和安装目录，非交互模式请同时传入 --yes"
+        exit 1
+    fi
+
+    if [ "$YES" = true ]; then
+        return 0
+    fi
+
+    echo ""
+    log_warning "完全卸载会删除数据库数据卷、Redis 数据卷和安装目录，无法恢复。"
+    read -p "请输入实例名 ${INSTANCE_NAME} 确认完全卸载: " confirm
+    if [ "$confirm" != "$INSTANCE_NAME" ]; then
+        log_error "实例名不匹配，已取消完全卸载"
+        exit 1
+    fi
+}
+
+uninstall_instance() {
+    if [ -f ".env" ]; then
+        load_existing_port_defaults
+    fi
+    validate_instance_name "$INSTANCE_NAME"
+
+    prompt_uninstall_mode
+
+    case "$UNINSTALL_MODE" in
+        stop|remove|purge) ;;
+        *)
+            log_error "无效的卸载模式: $UNINSTALL_MODE"
+            exit 1
+            ;;
+    esac
+
+    local compose_file
+    compose_file=$(detect_compose_file)
+
+    case "$UNINSTALL_MODE" in
+        stop)
+            stop_instance_services "$compose_file"
+            log_success "实例服务已停止，数据和配置已保留: ${ROOT_DIR}"
+            ;;
+        remove)
+            remove_instance_services "$compose_file"
+            remove_instance_containers
+            remove_instance_network
+            log_success "实例服务已卸载，数据库数据卷和配置已保留: ${ROOT_DIR}"
+            log_info "如需重新安装，可再次运行一键安装脚本并使用同一实例名。"
+            ;;
+        purge)
+            if [ ! -f ".env" ]; then
+                log_error "未找到 .env，拒绝完全卸载，避免误删非安装目录。"
+                log_error "如只是停止或移除容器，请选择 stop/remove。"
+                exit 1
+            fi
+            confirm_purge
+            remove_instance_services "$compose_file"
+            remove_instance_containers
+            remove_instance_volumes
+            remove_instance_network
+            log_warning "Nginx/防火墙规则不会自动删除，如曾手动配置请自行检查。"
+            remove_install_dir
+            log_success "实例已完全卸载: ${INSTANCE_NAME}"
+            exit 0
+            ;;
+    esac
+
+    if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+        log_warning "如曾启用系统 Nginx 反向代理，请手动检查 /etc/nginx/sites-available/license-server"
+    elif [ -f "/etc/nginx/sites-available/license-server" ]; then
+        log_warning "检测到系统 Nginx 配置 /etc/nginx/sites-available/license-server，未自动删除，请确认是否仍需要。"
+    fi
+
+    exit 0
 }
 
 apply_reinstall_db_mode() {
@@ -1455,6 +1666,10 @@ main() {
         run_update
     fi
 
+    if [ "$UNINSTALL_ONLY" = true ]; then
+        uninstall_instance
+    fi
+
     if [ -n "${LS_REINSTALL_DB:-}" ] && [ -z "$REINSTALL_DB_MODE" ]; then
         REINSTALL_DB_MODE="${LS_REINSTALL_DB}"
     fi
@@ -1470,7 +1685,8 @@ main() {
         echo "检测到已有安装，请选择操作:"
         echo "  1) 更新到最新版本"
         echo "  2) 重新安装（覆盖配置）"
-        echo "  3) 退出"
+        echo "  3) 卸载当前实例"
+        echo "  4) 退出"
         read -p "请选择 [1]: " install_choice
         install_choice=${install_choice:-1}
 
@@ -1491,6 +1707,10 @@ main() {
                 fi
                 ;;
             3)
+                UNINSTALL_ONLY=true
+                uninstall_instance
+                ;;
+            4)
                 log_info "已退出"
                 exit 0
                 ;;
