@@ -1053,6 +1053,10 @@ using var client = new LicenseClient(
 // 账号密码模式会保存 /api/client 的 access_token/refresh_token。
 await client.LoginAsync("user@example.com", "password");
 
+// 自动按当前会话模式选择授权码或订阅校验/心跳。
+var verified = await client.VerifyAsync();
+var heartbeat = await client.SendHeartbeatAsync("1.0.0");
+
 // 热更新
 // client.HotUpdates.SetSignaturePublicKeyPem(appPublicKeyPem); // 可选：校验更新包 RSA 签名
 var update = await client.HotUpdates.CheckAsync("1.0.0");

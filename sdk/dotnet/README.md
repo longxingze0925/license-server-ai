@@ -20,6 +20,10 @@ It does not depend on WPF or AiVideoStudio assemblies.
 The SDK is still HTTP based. It wraps request construction, Bearer token injection,
 license-server response parsing, unauthorized-session clearing, and proxy DTOs.
 
+The client-side `LicenseClient` also wraps `/api/client/*` app sessions. Use
+`VerifyAsync()` and `SendHeartbeatAsync()` for normal clients; they choose the
+license-code or subscription endpoint from the saved session mode.
+
 ## Basic Usage
 
 ```csharp

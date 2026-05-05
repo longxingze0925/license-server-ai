@@ -1023,7 +1023,7 @@ func decodeAPIData(body []byte) (json.RawMessage, error) {
 
 func (d *DataSyncClient) requestSyncAPIData(method, path string, params url.Values, reqBody interface{}) (json.RawMessage, error) {
 	doRequest := func() (json.RawMessage, error) {
-		accessToken, _, _, _ := d.client.getSessionSnapshot()
+		accessToken, _, _, _, _ := d.client.getSessionSnapshot()
 		if accessToken == "" {
 			return nil, fmt.Errorf("请先激活或登录")
 		}

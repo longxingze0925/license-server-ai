@@ -2,6 +2,9 @@ package license
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -10,6 +13,20 @@ const (
 	TestServerURL = "http://localhost:8080"
 	TestAppKey    = "test-app-key"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func jsonResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
 
 // TestClientCreation tests basic client creation
 func TestClientCreation(t *testing.T) {
@@ -218,6 +235,91 @@ func TestHotUpdateManager(t *testing.T) {
 	fmt.Printf("  Current version: %s\n", manager.GetCurrentVersion())
 
 	client.Close()
+}
+
+func TestHeartbeatCanRestartAfterStop(t *testing.T) {
+	client := NewClient(TestServerURL, TestAppKey,
+		WithSkipVerify(true),
+		WithHeartbeatInterval(time.Hour),
+	)
+	defer client.Close()
+
+	client.startHeartbeat()
+	if !client.heartbeatRunning {
+		t.Fatal("heartbeat should be running after start")
+	}
+
+	client.StopHeartbeat()
+	if client.heartbeatRunning {
+		t.Fatal("heartbeat should stop after StopHeartbeat")
+	}
+
+	client.startHeartbeat()
+	if !client.heartbeatRunning {
+		t.Fatal("heartbeat should restart after StopHeartbeat")
+	}
+}
+
+func TestVerifyAndHeartbeatUseSubscriptionMode(t *testing.T) {
+	client := NewClient(TestServerURL, TestAppKey, WithSkipVerify(true))
+	defer client.Close()
+
+	client.mu.Lock()
+	client.licenseInfo = &LicenseInfo{AuthMode: "subscription"}
+	client.mu.Unlock()
+
+	var verifyCalled bool
+	var heartbeatCalled bool
+	originalRequest := client.httpClient.Transport
+	client.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/client/subscription/verify":
+			verifyCalled = true
+		case "/api/client/subscription/heartbeat":
+			heartbeatCalled = true
+		default:
+			t.Fatalf("unexpected request path: %s", req.URL.Path)
+		}
+		return jsonResponse(`{"code":0,"message":"success","data":{"valid":true}}`), nil
+	})
+	defer func() { client.httpClient.Transport = originalRequest }()
+
+	if !client.Verify() {
+		t.Fatal("Verify should return true for subscription response")
+	}
+	if !verifyCalled {
+		t.Fatal("Verify should call subscription verify endpoint in subscription mode")
+	}
+	if !client.Heartbeat() {
+		t.Fatal("Heartbeat should return true for subscription response")
+	}
+	if !heartbeatCalled {
+		t.Fatal("Heartbeat should call subscription heartbeat endpoint in subscription mode")
+	}
+}
+
+func TestVerifyUsesSubscriptionModeWhenSubscriptionIDExists(t *testing.T) {
+	client := NewClient(TestServerURL, TestAppKey, WithSkipVerify(true))
+	defer client.Close()
+
+	client.mu.Lock()
+	client.licenseInfo = &LicenseInfo{SubscriptionID: "sub-test"}
+	client.mu.Unlock()
+
+	var requestedPath string
+	originalRequest := client.httpClient.Transport
+	client.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestedPath = req.URL.Path
+		return jsonResponse(`{"code":0,"message":"success","data":{"valid":true}}`), nil
+	})
+	defer func() { client.httpClient.Transport = originalRequest }()
+
+	if !client.Verify() {
+		t.Fatal("Verify should return true")
+	}
+	if requestedPath != "/api/client/subscription/verify" {
+		t.Fatalf("Verify should infer subscription mode from subscription_id, got %s", requestedPath)
+	}
 }
 
 // TestSecureScriptManager tests secure script manager creation

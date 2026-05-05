@@ -165,6 +165,14 @@ public sealed class LicenseClient : IDisposable
             machine_id = MachineId,
         }, ct: ct);
 
+    public Task<ClientLicenseInfo> VerifyAsync(CancellationToken ct = default)
+    {
+        var session = Sessions.GetSession();
+        return string.Equals(session?.AuthMode, "subscription", StringComparison.OrdinalIgnoreCase)
+            ? VerifySubscriptionAsync(ct)
+            : VerifyLicenseAsync(ct);
+    }
+
     public Task<ClientHeartbeatResult> HeartbeatAsync(string? appVersion = null, CancellationToken ct = default)
         => PostAsync<ClientHeartbeatResult>("/auth/heartbeat", new
         {
@@ -180,6 +188,14 @@ public sealed class LicenseClient : IDisposable
             machine_id = MachineId,
             app_version = appVersion,
         }, ct: ct);
+
+    public Task<ClientHeartbeatResult> SendHeartbeatAsync(string? appVersion = null, CancellationToken ct = default)
+    {
+        var session = Sessions.GetSession();
+        return string.Equals(session?.AuthMode, "subscription", StringComparison.OrdinalIgnoreCase)
+            ? SubscriptionHeartbeatAsync(appVersion, ct)
+            : HeartbeatAsync(appVersion, ct);
+    }
 
     public async Task<ClientSession> RefreshSessionAsync(CancellationToken ct = default)
     {

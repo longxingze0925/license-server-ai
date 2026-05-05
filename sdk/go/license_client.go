@@ -170,9 +170,10 @@ type Client struct {
 	machineID   string
 	httpClient  *http.Client
 
-	stopHeartbeat chan struct{}
-	heartbeatOnce sync.Once
-	mu            sync.RWMutex
+	stopHeartbeat    chan struct{}
+	heartbeatMu      sync.Mutex
+	heartbeatRunning bool
+	mu               sync.RWMutex
 }
 
 // Option 客户端配置选项
@@ -1047,6 +1048,11 @@ func (c *Client) ChangePassword(oldPassword, newPassword, email string) (map[str
 
 // Verify 验证授权状态
 func (c *Client) Verify() bool {
+	_, _, authMode, _, subscriptionID := c.getSessionSnapshot()
+	if isSubscriptionMode(authMode, subscriptionID) {
+		return c.SubscriptionVerify()
+	}
+
 	data := map[string]interface{}{
 		"app_key":    c.appKey,
 		"machine_id": c.machineID,
@@ -1081,6 +1087,11 @@ func (c *Client) Verify() bool {
 
 // Heartbeat 发送心跳
 func (c *Client) Heartbeat() bool {
+	_, _, authMode, _, subscriptionID := c.getSessionSnapshot()
+	if isSubscriptionMode(authMode, subscriptionID) {
+		return c.SubscriptionHeartbeat()
+	}
+
 	data := map[string]interface{}{
 		"app_key":     c.appKey,
 		"machine_id":  c.machineID,
@@ -1176,13 +1187,17 @@ func (c *Client) SubscriptionVerify() bool {
 	return false
 }
 
-func (c *Client) getSessionSnapshot() (accessToken, refreshToken, authMode, email string) {
+func (c *Client) getSessionSnapshot() (accessToken, refreshToken, authMode, email, subscriptionID string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.licenseInfo == nil {
-		return "", "", "", ""
+		return "", "", "", "", ""
 	}
-	return c.licenseInfo.AccessToken, c.licenseInfo.RefreshToken, c.licenseInfo.AuthMode, c.licenseInfo.Email
+	return c.licenseInfo.AccessToken, c.licenseInfo.RefreshToken, c.licenseInfo.AuthMode, c.licenseInfo.Email, c.licenseInfo.SubscriptionID
+}
+
+func isSubscriptionMode(authMode, subscriptionID string) bool {
+	return strings.ToLower(strings.TrimSpace(authMode)) == "subscription" || strings.TrimSpace(subscriptionID) != ""
 }
 
 func (c *Client) isAccessTokenExpiredSoon(skew time.Duration) bool {
@@ -1195,12 +1210,12 @@ func (c *Client) isAccessTokenExpiredSoon(skew time.Duration) bool {
 }
 
 func (c *Client) getValidAccessToken() (string, error) {
-	accessToken, _, _, _ := c.getSessionSnapshot()
+	accessToken, _, _, _, _ := c.getSessionSnapshot()
 	if accessToken == "" || c.isAccessTokenExpiredSoon(clientTokenRefreshSkew) {
 		if !c.refreshClientSession() {
 			return "", fmt.Errorf("刷新客户端会话失败")
 		}
-		accessToken, _, _, _ = c.getSessionSnapshot()
+		accessToken, _, _, _, _ = c.getSessionSnapshot()
 	}
 	if accessToken == "" {
 		return "", fmt.Errorf("缺少客户端访问令牌，请先激活或登录")
@@ -1209,7 +1224,7 @@ func (c *Client) getValidAccessToken() (string, error) {
 }
 
 func (c *Client) refreshClientSession() bool {
-	_, refreshToken, _, _ := c.getSessionSnapshot()
+	_, refreshToken, _, _, _ := c.getSessionSnapshot()
 	if refreshToken == "" {
 		return false
 	}
@@ -1274,7 +1289,7 @@ func shouldRetryWithRefresh(err error) bool {
 
 func (c *Client) requestWithClientSession(method, endpoint string, data interface{}) (map[string]interface{}, error) {
 	doRequest := func() (map[string]interface{}, error) {
-		accessToken, _, _, _ := c.getSessionSnapshot()
+		accessToken, _, _, _, _ := c.getSessionSnapshot()
 		if accessToken == "" {
 			return nil, fmt.Errorf("请先激活或登录")
 		}
@@ -1334,11 +1349,10 @@ func (c *Client) requestRawWithClientSession(method, rawURL string, data interfa
 // Deactivate 解绑设备。
 // 订阅模式请传入密码：Deactivate("your_password")。
 func (c *Client) Deactivate(password ...string) bool {
-	accessToken, _, authMode, email := c.getSessionSnapshot()
+	accessToken, _, authMode, email, subscriptionID := c.getSessionSnapshot()
 	if accessToken != "" {
-		mode := strings.ToLower(strings.TrimSpace(authMode))
 		body := map[string]interface{}{}
-		if mode == "subscription" {
+		if isSubscriptionMode(authMode, subscriptionID) {
 			pass := ""
 			if len(password) > 0 {
 				pass = strings.TrimSpace(password[0])
@@ -1357,7 +1371,7 @@ func (c *Client) Deactivate(password ...string) bool {
 		headers := map[string]string{"Authorization": "Bearer " + accessToken}
 		_, err := c.requestWithHeaders("DELETE", "/devices/self", body, headers)
 		if err != nil && shouldRetryWithRefresh(err) && c.refreshClientSession() {
-			accessToken, _, _, _ = c.getSessionSnapshot()
+			accessToken, _, _, _, _ = c.getSessionSnapshot()
 			if accessToken != "" {
 				headers["Authorization"] = "Bearer " + accessToken
 				_, err = c.requestWithHeaders("DELETE", "/devices/self", body, headers)
@@ -1368,7 +1382,7 @@ func (c *Client) Deactivate(password ...string) bool {
 			c.StopHeartbeat()
 			return true
 		}
-		if mode == "subscription" {
+		if isSubscriptionMode(authMode, subscriptionID) {
 			return false
 		}
 	}
@@ -1566,33 +1580,57 @@ func (c *Client) CheckUpdate() (*UpdateInfo, error) {
 
 // startHeartbeat 启动心跳
 func (c *Client) startHeartbeat() {
-	c.heartbeatOnce.Do(func() {
-		go func() {
-			ticker := time.NewTicker(c.heartbeatInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					_, _, authMode, _ := c.getSessionSnapshot()
-					if strings.ToLower(strings.TrimSpace(authMode)) == "subscription" {
-						c.SubscriptionHeartbeat()
-					} else {
-						c.Heartbeat()
-					}
-				case <-c.stopHeartbeat:
-					return
-				}
+	c.heartbeatMu.Lock()
+	if c.heartbeatRunning {
+		c.heartbeatMu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	c.stopHeartbeat = stopCh
+	c.heartbeatRunning = true
+	interval := c.heartbeatInterval
+	c.heartbeatMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		defer func() {
+			c.heartbeatMu.Lock()
+			if c.stopHeartbeat == stopCh {
+				c.heartbeatRunning = false
 			}
+			c.heartbeatMu.Unlock()
 		}()
-	})
+
+		for {
+			select {
+			case <-ticker.C:
+				_, _, authMode, _, subscriptionID := c.getSessionSnapshot()
+				if isSubscriptionMode(authMode, subscriptionID) {
+					c.SubscriptionHeartbeat()
+				} else {
+					c.Heartbeat()
+				}
+			case <-stopCh:
+				return
+			}
+		}
+	}()
 }
 
 // StopHeartbeat 停止心跳
 func (c *Client) StopHeartbeat() {
-	select {
-	case c.stopHeartbeat <- struct{}{}:
-	default:
+	c.heartbeatMu.Lock()
+	if !c.heartbeatRunning {
+		c.heartbeatMu.Unlock()
+		return
 	}
+	stopCh := c.stopHeartbeat
+	c.heartbeatRunning = false
+	c.stopHeartbeat = nil
+	c.heartbeatMu.Unlock()
+
+	close(stopCh)
 }
 
 // parseResult 解析结果

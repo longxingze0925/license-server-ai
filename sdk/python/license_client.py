@@ -393,7 +393,8 @@ class LicenseClient:
         self._license_info: Optional[Dict] = None
         self._machine_id: Optional[str] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
-        self._stop_heartbeat = False
+        self._heartbeat_stop_event: Optional[threading.Event] = None
+        self._heartbeat_lock = threading.Lock()
         self._encryption: Optional[CacheEncryption] = None
         self._session: Optional[requests.Session] = None
 
@@ -411,6 +412,12 @@ class LicenseClient:
         self._init_session()
 
         self._load_cache()
+
+    @staticmethod
+    def _is_subscription_mode(info: Optional[Dict]) -> bool:
+        info = info or {}
+        auth_mode = (info.get('auth_mode') or '').strip().lower()
+        return auth_mode == 'subscription' or bool((info.get('subscription_id') or '').strip())
 
     def _init_public_key(self):
         """初始化公钥"""
@@ -745,6 +752,9 @@ class LicenseClient:
     def verify(self) -> bool:
         """验证授权状态"""
         try:
+            if self._is_subscription_mode(self._license_info):
+                return self.subscription_verify()
+
             data = {
                 "app_key": self.app_key,
                 "machine_id": self.machine_id
@@ -758,11 +768,26 @@ class LicenseClient:
         except LicenseError:
             return False
 
+    def subscription_verify(self) -> bool:
+        """验证订阅模式授权状态"""
+        try:
+            data = {
+                "app_key": self.app_key,
+                "machine_id": self.machine_id
+            }
+            result = self._request_with_verification('POST', '/subscription/verify', data)
+            if self._license_info:
+                self._license_info['last_verified_at'] = time.time()
+                self._license_info.update(result)
+                self._save_cache()
+            return result.get('valid', False)
+        except LicenseError:
+            return False
+
     def heartbeat(self) -> bool:
         """发送心跳"""
         try:
-            auth_mode = (self._license_info or {}).get('auth_mode', '')
-            if (auth_mode or '').strip().lower() == 'subscription':
+            if self._is_subscription_mode(self._license_info):
                 return self.subscription_heartbeat()
 
             data = {
@@ -872,13 +897,12 @@ class LicenseClient:
     def deactivate(self, password: Optional[str] = None) -> bool:
         """解绑设备。订阅模式需要传入 password。"""
         try:
-            auth_mode = (self._license_info or {}).get('auth_mode', '')
             access_token = (self._license_info or {}).get('access_token', '')
 
             if access_token:
-                mode = (auth_mode or '').strip().lower()
+                is_subscription = self._is_subscription_mode(self._license_info)
                 body: Dict[str, Union[str, bool]] = {}
-                if mode == 'subscription':
+                if is_subscription:
                     if not password:
                         return False
                     email = (self._license_info or {}).get('email', '')
@@ -890,11 +914,11 @@ class LicenseClient:
 
                 self._request_with_client_auth('DELETE', '/devices/self', body)
                 self._clear_cache()
-                self._stop_heartbeat = True
+                self._stop_heartbeat()
                 return True
 
             # 兼容旧版（授权码模式）
-            if (auth_mode or '').strip().lower() == 'subscription':
+            if self._is_subscription_mode(self._license_info):
                 return False
             data = {
                 "app_key": self.app_key,
@@ -902,7 +926,7 @@ class LicenseClient:
             }
             self._request('POST', '/auth/deactivate', data)
             self._clear_cache()
-            self._stop_heartbeat = True
+            self._stop_heartbeat()
             return True
         except LicenseError:
             return False
@@ -963,22 +987,37 @@ class LicenseClient:
 
     def _start_heartbeat(self):
         """启动心跳线程"""
-        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
-            return
-        self._stop_heartbeat = False
-        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        self._heartbeat_thread.start()
+        with self._heartbeat_lock:
+            if (
+                self._heartbeat_thread
+                and self._heartbeat_thread.is_alive()
+                and self._heartbeat_stop_event
+                and not self._heartbeat_stop_event.is_set()
+            ):
+                return
+            stop_event = threading.Event()
+            self._heartbeat_stop_event = stop_event
+            self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, args=(stop_event,), daemon=True)
+            self._heartbeat_thread.start()
 
-    def _heartbeat_loop(self):
+    def _stop_heartbeat(self):
+        """停止心跳线程"""
+        with self._heartbeat_lock:
+            if self._heartbeat_stop_event:
+                self._heartbeat_stop_event.set()
+
+    def _heartbeat_loop(self, stop_event: threading.Event):
         """心跳循环"""
-        while not self._stop_heartbeat:
-            time.sleep(self.heartbeat_interval)
-            if not self._stop_heartbeat:
-                self.heartbeat()
+        while not stop_event.wait(self.heartbeat_interval):
+            self.heartbeat()
+
+        with self._heartbeat_lock:
+            if self._heartbeat_stop_event is stop_event:
+                self._heartbeat_stop_event = None
 
     def close(self):
         """关闭客户端"""
-        self._stop_heartbeat = True
+        self._stop_heartbeat()
 
     # ==================== 签名验证相关方法 ====================
 
