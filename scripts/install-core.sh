@@ -72,6 +72,7 @@ NO_INIT_ADMIN=false
 BUILD_NO_CACHE=true
 NO_BUILD=true
 ENABLE_NGINX_PROXY="no"
+TAKE_OVER_WEB_PORT=false
 RESET_VOLUMES=false
 REUSE_SECRETS=false
 
@@ -122,6 +123,7 @@ SSL & 端口:
 
 行为控制:
   --nginx-proxy             启用 Nginx 反向代理（HTTPS 非 443 时可用）
+  --take-over-web-port      Nginx 反代时停止占用公网 80/443 的 Docker 容器
   --skip-firewall           跳过防火墙配置
   --no-init-admin           跳过管理员初始化
   --build                   本地构建镜像（默认从 GHCR 拉取）
@@ -180,6 +182,8 @@ parse_args() {
                 CUSTOM_KEY_PATH="$2"; shift 2 ;;
             --nginx-proxy)
                 ENABLE_NGINX_PROXY="yes"; shift ;;
+            --take-over-web-port)
+                TAKE_OVER_WEB_PORT=true; shift ;;
             --non-interactive)
                 NON_INTERACTIVE=true; shift ;;
             -y|--yes)
@@ -352,12 +356,95 @@ is_port_in_use() {
     return 1
 }
 
+describe_port_owner() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp "( sport = :${port} )" 2>/dev/null | awk 'NR>1 {print}'
+        return 0
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" {print}'
+        return 0
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true
+        return 0
+    fi
+    return 0
+}
+
 is_port_owned_by_instance() {
     local port="$1"
     if ! command -v docker >/dev/null 2>&1; then
         return 1
     fi
     docker ps --filter "name=^/${INSTANCE_NAME}-" --format '{{.Ports}}' 2>/dev/null | grep -Eq "(:|\\[::\\]:)${port}->"
+}
+
+containers_publishing_port() {
+    local port="$1"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+    docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' 2>/dev/null | awk -v p=":${port}->" 'index($0, p) > 0 {print $1" "$2}'
+}
+
+stop_containers_publishing_port() {
+    local port="$1"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local containers
+    containers=$(containers_publishing_port "$port" || true)
+    if [ -z "$containers" ]; then
+        return 1
+    fi
+
+    echo "$containers" | while read -r id name; do
+        [ -z "$id" ] && continue
+        log_warning "停止占用公网端口 ${port} 的 Docker 容器: ${name}"
+        docker stop "$id" >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+ensure_public_web_port_available() {
+    local label="$1"
+    local port="$2"
+
+    if ! is_port_in_use "$port" || is_port_owned_by_instance "$port" || is_port_owned_by_nginx "$port"; then
+        return 0
+    fi
+
+    local containers
+    containers=$(containers_publishing_port "$port" || true)
+    if [ -n "$containers" ]; then
+        log_warning "${label} 端口 ${port} 被 Docker 容器占用:"
+        echo "$containers" | while read -r id name; do
+            [ -z "$id" ] && continue
+            echo "  - ${name} (${id})"
+        done
+
+        if [ "$TAKE_OVER_WEB_PORT" = true ]; then
+            stop_containers_publishing_port "$port"
+            return 0
+        fi
+
+        if [ "$NON_INTERACTIVE" != true ]; then
+            local takeover_choice=""
+            read -p "是否停止这些容器，把 ${port} 交给 Nginx？[y/N]: " takeover_choice
+            if is_yes_choice "$takeover_choice"; then
+                stop_containers_publishing_port "$port"
+                return 0
+            fi
+        fi
+    fi
+
+    log_error "${label} 端口 ${port} 已被占用，且不是 Nginx。占用信息:"
+    describe_port_owner "$port" || true
+    log_error "请先释放 ${port}，或确认后使用 --take-over-web-port / LS_TAKE_OVER_WEB_PORT=1 停止占用该端口的 Docker 容器"
+    exit 1
 }
 
 is_port_owned_by_nginx() {
@@ -469,8 +556,13 @@ validate_public_port_available() {
         log_error "${label} 必须是 1-65535 之间的端口，当前值: ${port}"
         exit 1
     fi
-    if is_port_in_use "$port" && ! is_port_owned_by_instance "$port" && ! is_port_owned_by_nginx "$port"; then
-        log_error "${label} 端口 ${port} 已被占用，请换一个端口"
+    if [ "$ENABLE_NGINX_PROXY" = "yes" ] && { [ "$port" = "80" ] || [ "$port" = "443" ]; }; then
+        ensure_public_web_port_available "$label" "$port"
+        return 0
+    fi
+    if is_port_in_use "$port" && ! is_port_owned_by_instance "$port"; then
+        log_error "${label} 端口 ${port} 已被占用，请换一个端口。占用信息:"
+        describe_port_owner "$port" || true
         exit 1
     fi
 }

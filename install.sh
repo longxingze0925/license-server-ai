@@ -62,6 +62,7 @@ Bootstrap 选项:
   --no-source         不拉取源码（默认，仅下载必要文件）
   --uninstall         卸载当前实例（会进入卸载选项）
   --uninstall-mode <mode> 卸载模式: stop/remove/purge
+  --take-over-web-port 停止占用公网 80/443 的 Docker 容器（Nginx 反代）
   -y, --yes, --non-interactive  非交互模式
   -h, --help          显示帮助
 
@@ -99,6 +100,8 @@ parse_args() {
                 PASS_ARGS+=("$1"); shift ;;
             --uninstall-mode)
                 PASS_ARGS+=("$1" "$2"); shift 2 ;;
+            --take-over-web-port)
+                PASS_ARGS+=("$1"); shift ;;
             -y|--yes|--non-interactive)
                 NON_INTERACTIVE=true; PASS_ARGS+=("$1"); shift ;;
             -h|--help)
@@ -207,6 +210,12 @@ apply_env_overrides() {
     if is_true "${LS_NGINX_PROXY:-}"; then
         if ! has_arg "--nginx-proxy"; then
             PASS_ARGS+=("--nginx-proxy")
+        fi
+    fi
+
+    if is_true "${LS_TAKE_OVER_WEB_PORT:-}"; then
+        if ! has_arg "--take-over-web-port"; then
+            PASS_ARGS+=("--take-over-web-port")
         fi
     fi
 

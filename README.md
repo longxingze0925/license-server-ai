@@ -67,6 +67,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-
 ```
 
 域名部署时，如果 HTTPS 容器端口不是 `443`，脚本会自动启用系统 Nginx 反向代理：外部访问 `https://example.com`，Nginx 再转发到本机容器端口。已有 Nginx 会作为共享入口复用，只新增当前实例的站点配置；卸载当前实例时只删除当前实例配置。
+如果公网 `80/443` 被旧 Docker 容器占用，交互安装会询问是否停止；非交互可加 `--take-over-web-port`。
 
 源码安装示例：
 

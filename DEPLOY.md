@@ -165,6 +165,14 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
 
 卸载当前实例时只删除这两个配置，不会覆盖或删除其他站点。
 
+如果公网 `80/443` 被旧 Docker 容器占用，交互安装会列出容器并询问是否停止；非交互可显式加：
+
+```bash
+--take-over-web-port
+```
+
+不会自动停止非 Docker 服务。
+
 **自定义证书（已购买证书）**
 
 ```bash
