@@ -506,24 +506,56 @@ validate_distinct_ports() {
     done
 }
 
-show_install_summary() {
+detect_existing_nginx_proxy() {
+    if [ "$SSL_MODE" = "http" ] || [ -z "$DOMAIN" ]; then
+        return 1
+    fi
+
+    local nginx_config="/etc/nginx/sites-available/license-server"
+    if [ -f "$nginx_config" ] && \
+        grep -q "server_name ${DOMAIN}" "$nginx_config" && \
+        grep -q "proxy_pass https://127.0.0.1:${HTTPS_PORT}" "$nginx_config"; then
+        return 0
+    fi
+
+    return 1
+}
+
+sync_nginx_proxy_state() {
+    if [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
+        return 0
+    fi
+    if detect_existing_nginx_proxy; then
+        ENABLE_NGINX_PROXY="yes"
+        log_info "检测到当前域名已配置系统 Nginx 反向代理，访问地址将使用标准 443 端口"
+    fi
+}
+
+build_frontend_url() {
     local host_name="${DOMAIN:-$SERVER_IP}"
-    local frontend_url=""
-    local backend_url="http://${host_name}:${BACKEND_PORT}"
 
     if [ "$SSL_MODE" = "http" ]; then
         if [ "$HTTP_PORT" = "80" ]; then
-            frontend_url="http://${host_name}"
+            echo "http://${host_name}"
         else
-            frontend_url="http://${host_name}:${HTTP_PORT}"
+            echo "http://${host_name}:${HTTP_PORT}"
         fi
     else
         if [ "$ENABLE_NGINX_PROXY" = "yes" ] || [ "$HTTPS_PORT" = "443" ]; then
-            frontend_url="https://${host_name}"
+            echo "https://${host_name}"
         else
-            frontend_url="https://${host_name}:${HTTPS_PORT}"
+            echo "https://${host_name}:${HTTPS_PORT}"
         fi
     fi
+}
+
+show_install_summary() {
+    sync_nginx_proxy_state
+
+    local frontend_url
+    local host_name="${DOMAIN:-$SERVER_IP}"
+    local backend_url="http://${host_name}:${BACKEND_PORT}"
+    frontend_url=$(build_frontend_url)
 
     echo ""
     echo "=========================================="
@@ -1695,25 +1727,12 @@ configure_firewall() {
 
 save_credentials() {
     local CREDENTIALS_FILE="credentials.txt"
-    local FRONTEND_URL=""
-    local BACKEND_URL=""
     local host_name="${DOMAIN:-$SERVER_IP}"
+    local FRONTEND_URL
+    local BACKEND_URL="http://${host_name}:${BACKEND_PORT}"
 
-    if [ "$SSL_MODE" = "http" ]; then
-        if [ "$HTTP_PORT" = "80" ]; then
-            FRONTEND_URL="http://${host_name}"
-        else
-            FRONTEND_URL="http://${host_name}:${HTTP_PORT}"
-        fi
-        BACKEND_URL="http://${host_name}:${BACKEND_PORT}"
-    else
-        if [ "$ENABLE_NGINX_PROXY" = "yes" ] || [ "$HTTPS_PORT" = "443" ]; then
-            FRONTEND_URL="https://${host_name}"
-        else
-            FRONTEND_URL="https://${host_name}:${HTTPS_PORT}"
-        fi
-        BACKEND_URL="http://${host_name}:${BACKEND_PORT}"
-    fi
+    sync_nginx_proxy_state
+    FRONTEND_URL=$(build_frontend_url)
 
     cat > "$CREDENTIALS_FILE" << EOF
 ╔══════════════════════════════════════════════════════════════════════════╗
@@ -1776,21 +1795,9 @@ EOF
 }
 
 print_completion() {
-    local FRONTEND_URL=""
-    local host_name="${DOMAIN:-$SERVER_IP}"
-    if [ "$SSL_MODE" = "http" ]; then
-        if [ "$HTTP_PORT" = "80" ]; then
-            FRONTEND_URL="http://${host_name}"
-        else
-            FRONTEND_URL="http://${host_name}:${HTTP_PORT}"
-        fi
-    else
-        if [ "$ENABLE_NGINX_PROXY" = "yes" ] || [ "$HTTPS_PORT" = "443" ]; then
-            FRONTEND_URL="https://${host_name}"
-        else
-            FRONTEND_URL="https://${host_name}:${HTTPS_PORT}"
-        fi
-    fi
+    local FRONTEND_URL
+    sync_nginx_proxy_state
+    FRONTEND_URL=$(build_frontend_url)
 
     echo ""
     echo -e "${GREEN}"
