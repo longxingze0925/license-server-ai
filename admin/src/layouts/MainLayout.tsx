@@ -34,18 +34,25 @@ type MenuItem = Required<MenuProps>['items'][number];
 
 // 所有菜单项定义
 const allMenuItems: MenuItem[] = [
-  { key: '/', icon: <DashboardOutlined />, label: '仪表盘' },
-  { key: '/analytics', icon: <BarChartOutlined />, label: '数据分析' },
   {
-    key: 'auth',
-    icon: <SafetyCertificateOutlined />,
-    label: '授权中心',
+    key: 'workspace',
+    icon: <DashboardOutlined />,
+    label: '工作台',
     children: [
+      { key: '/', icon: <DashboardOutlined />, label: '仪表盘' },
+      { key: '/analytics', icon: <BarChartOutlined />, label: '数据分析' },
+    ],
+  },
+  {
+    key: 'customer-auth',
+    icon: <UsergroupAddOutlined />,
+    label: '客户与授权',
+    children: [
+      { key: '/customers', icon: <UsergroupAddOutlined />, label: '客户管理' },
       { key: '/licenses', icon: <KeyOutlined />, label: '授权码' },
       { key: '/subscriptions', icon: <CrownOutlined />, label: '订阅' },
     ],
   },
-  { key: '/customers', icon: <UsergroupAddOutlined />, label: '客户管理' },
   {
     key: 'device',
     icon: <DesktopOutlined />,
@@ -53,11 +60,18 @@ const allMenuItems: MenuItem[] = [
     children: [
       { key: '/devices', icon: <DesktopOutlined />, label: '设备列表' },
       { key: '/blacklist', icon: <StopOutlined />, label: '黑名单' },
+      { key: '/instructions', icon: <SendOutlined />, label: '实时指令' },
     ],
   },
-  { key: '/apps', icon: <AppstoreOutlined />, label: '应用管理' },
-  { key: '/instructions', icon: <SendOutlined />, label: '实时指令' },
-  { key: '/secure-scripts', icon: <SafetyCertificateOutlined />, label: '安全脚本' },
+  {
+    key: 'app-management',
+    icon: <AppstoreOutlined />,
+    label: '应用管理',
+    children: [
+      { key: '/apps', icon: <AppstoreOutlined />, label: '应用列表' },
+      { key: '/secure-scripts', icon: <SafetyCertificateOutlined />, label: '安全脚本' },
+    ],
+  },
   {
     key: 'ai',
     icon: <ApiOutlined />,
@@ -68,13 +82,13 @@ const allMenuItems: MenuItem[] = [
       { key: '/user-credits', icon: <DollarOutlined />, label: '用户额度' },
     ],
   },
-  { key: '/backups', icon: <CloudSyncOutlined />, label: '数据备份' },
-  { key: '/team', icon: <TeamOutlined />, label: '团队管理' },
   {
     key: 'system',
     icon: <ToolOutlined />,
-    label: '系统',
+    label: '系统管理',
     children: [
+      { key: '/team', icon: <TeamOutlined />, label: '团队管理' },
+      { key: '/backups', icon: <CloudSyncOutlined />, label: '数据备份' },
       { key: '/audit', icon: <FileTextOutlined />, label: '操作日志' },
       { key: '/export', icon: <DownloadOutlined />, label: '数据导出' },
     ],
@@ -82,25 +96,90 @@ const allMenuItems: MenuItem[] = [
 ];
 
 // 只读用户需要隐藏的菜单
-const viewerHiddenMenus = ['/team', 'system', 'ai', '/backups', '/instructions', '/secure-scripts'];
+const viewerHiddenMenus = ['system', 'ai', '/team', '/backups', '/audit', '/export', '/instructions', '/secure-scripts'];
 const aiManagerRoles = ['owner', 'admin'];
 const appManagerRoles = ['owner', 'admin', 'developer'];
 
+const canShowMenuItem = (key: string, role?: string) => {
+  if (role === 'viewer' && viewerHiddenMenus.includes(key)) {
+    return false;
+  }
+  if ((key === 'ai' || key === '/provider-credentials' || key === '/pricing-rules' || key === '/user-credits' || key === '/backups' || key === '/audit') && !aiManagerRoles.includes(role || '')) {
+    return false;
+  }
+  if ((key === '/instructions' || key === '/secure-scripts' || key === '/team' || key === '/export') && !appManagerRoles.includes(role || '')) {
+    return false;
+  }
+  return true;
+};
+
 // 根据角色过滤菜单
 const getMenuItemsByRole = (role?: string): MenuItem[] => {
-  return allMenuItems.filter(item => {
+  const filterItems = (items: MenuItem[]): MenuItem[] => items
+    .map(item => {
+      if (!item) return null;
+      const key = String((item as any)?.key || '');
+      const children = (item as any)?.children as MenuItem[] | undefined;
+      if (children) {
+        const filteredChildren = filterItems(children);
+        if (filteredChildren.length === 0 || !canShowMenuItem(key, role)) {
+          return null;
+        }
+        return { ...(item as any), children: filteredChildren } as MenuItem;
+      }
+      return canShowMenuItem(key, role) ? item : null;
+    })
+    .filter(Boolean) as MenuItem[];
+
+  return filterItems(allMenuItems);
+};
+
+const getParentKeyByPath = (path: string) => {
+  if (['/', '/analytics'].includes(path)) return 'workspace';
+  if (['/customers', '/licenses', '/subscriptions'].includes(path)) return 'customer-auth';
+  if (['/devices', '/blacklist', '/instructions'].includes(path)) return 'device';
+  if (['/apps', '/secure-scripts'].includes(path) || path.startsWith('/apps/')) return 'app-management';
+  if (['/provider-credentials', '/pricing-rules', '/user-credits'].includes(path)) return 'ai';
+  if (['/team', '/backups', '/audit', '/export', '/settings'].includes(path)) return 'system';
+  return '';
+};
+
+const getSelectedKey = (path: string) => {
+  if (path.startsWith('/apps/')) return '/apps';
+  return path;
+};
+
+const getOpenKeysByPath = (path: string) => {
+  const parentKey = getParentKeyByPath(path);
+  return parentKey ? [parentKey] : [];
+};
+
+const isMenuLeafKey = (key: string) => key.startsWith('/');
+
+const getFirstLeafKey = (item: MenuItem): string | null => {
+  const key = String((item as any)?.key || '');
+  if (isMenuLeafKey(key)) return key;
+  const children = (item as any)?.children as MenuItem[] | undefined;
+  if (!children) return null;
+  for (const child of children) {
+    const childKey = getFirstLeafKey(child);
+    if (childKey) return childKey;
+  }
+  return null;
+};
+
+const findMenuItemByKey = (items: MenuItem[], targetKey: string): MenuItem | null => {
+  for (const item of items) {
+    if (!item) continue;
     const key = (item as any)?.key;
-    if (role === 'viewer' && viewerHiddenMenus.includes(key)) {
-      return false;
+    if (key === targetKey) return item;
+    const children = (item as any)?.children as MenuItem[] | undefined;
+    if (children) {
+      const found = findMenuItemByKey(children, targetKey);
+      if (found) return found;
     }
-    if ((key === 'ai' || key === '/backups') && !aiManagerRoles.includes(role || '')) {
-      return false;
-    }
-    if ((key === '/instructions' || key === '/secure-scripts') && !appManagerRoles.includes(role || '')) {
-      return false;
-    }
-    return true;
-  });
+  }
+  return null;
 };
 
 const MainLayout: React.FC = () => {
@@ -115,18 +194,21 @@ const MainLayout: React.FC = () => {
 
   // 根据当前路径获取展开的菜单
   const getOpenKeys = () => {
-    const path = location.pathname;
-    if (['/licenses', '/subscriptions'].includes(path)) return ['auth'];
-    if (['/devices', '/blacklist'].includes(path)) return ['device'];
-    if (['/audit', '/export', '/settings'].includes(path)) return ['system'];
-    if (['/provider-credentials', '/pricing-rules', '/user-credits'].includes(path)) return ['ai'];
-    return [];
+    return getOpenKeysByPath(location.pathname);
   };
 
   const [openKeys, setOpenKeys] = useState<string[]>(getOpenKeys());
 
   const handleMenuClick = ({ key }: { key: string }) => {
-    navigate(key);
+    if (isMenuLeafKey(key)) {
+      navigate(key);
+      return;
+    }
+    const item = findMenuItemByKey(menuItems, key);
+    const firstLeafKey = item ? getFirstLeafKey(item) : null;
+    if (firstLeafKey) {
+      navigate(firstLeafKey);
+    }
   };
 
   const handleOpenChange = (keys: string[]) => {
@@ -180,7 +262,7 @@ const MainLayout: React.FC = () => {
         <Menu
           theme="dark"
           mode="inline"
-          selectedKeys={[location.pathname]}
+          selectedKeys={[getSelectedKey(location.pathname)]}
           openKeys={collapsed ? [] : openKeys}
           onOpenChange={handleOpenChange}
           items={menuItems}
