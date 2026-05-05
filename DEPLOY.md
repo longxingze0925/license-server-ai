@@ -96,6 +96,8 @@ curl -H "Authorization: token $GIT_TOKEN" -fsSL \
 | `HTTP_PORT` | HTTP 端口 | 可选 | `80` |
 | `HTTPS_PORT` | HTTPS 端口 | 可选 | `443` |
 | `BACKEND_PORT` | 后端端口 | 可选 | `8080` |
+| `MYSQL_PORT` | MySQL 对外端口 | 可选 | `3306` |
+| `REDIS_PORT` | Redis 对外端口 | 可选 | `6379` |
 
 ### 配置文件列表
 

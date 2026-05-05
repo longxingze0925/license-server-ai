@@ -90,6 +90,25 @@ bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-
 
 > 若镜像是私有的，请先 `docker login ghcr.io`。
 
+### 自定义端口安装
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh) \
+  --ssl http \
+  --http-port 8088 \
+  --backend-port 18080 \
+  --mysql-port 13306 \
+  --redis-port 16379
+```
+
+也可以用环境变量：
+
+```bash
+LS_SSL=http LS_HTTP_PORT=8088 LS_BACKEND_PORT=18080 \
+LS_MYSQL_PORT=13306 LS_REDIS_PORT=16379 \
+bash <(curl -Ls https://raw.githubusercontent.com/longxingze0925/license-server-ai/main/install.sh)
+```
+
 ### 更新（拉取镜像）
 
 ```bash

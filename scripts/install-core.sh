@@ -36,6 +36,8 @@ HTTP_PORT="80"
 HTTPS_PORT="443"
 BACKEND_PORT="8080"
 FRONTEND_PORT="80"
+MYSQL_PORT="3306"
+REDIS_PORT="6379"
 IMAGE_TAG="main"
 
 # 上传限制（MB）
@@ -85,6 +87,8 @@ SSL & 端口:
   --http-port <port>        HTTP 端口（默认: 80）
   --https-port <port>       HTTPS 端口（默认: 443）
   --backend-port <port>     后端端口（默认: 8080）
+  --mysql-port <port>       MySQL 对外端口（默认: 3306）
+  --redis-port <port>       Redis 对外端口（默认: 6379）
   --image-tag <tag>         镜像标签（默认: main）
   --max-release-upload-mb <mb> 发布/热更新包上传上限（默认: 500）
   --max-request-body-mb <mb>   全局请求体上限（默认: 1024）
@@ -139,6 +143,10 @@ parse_args() {
                 HTTPS_PORT="$2"; shift 2 ;;
             --backend-port)
                 BACKEND_PORT="$2"; shift 2 ;;
+            --mysql-port)
+                MYSQL_PORT="$2"; shift 2 ;;
+            --redis-port)
+                REDIS_PORT="$2"; shift 2 ;;
             --image-tag)
                 IMAGE_TAG="$2"; shift 2 ;;
             --max-release-upload-mb)
@@ -320,7 +328,9 @@ load_existing_secrets() {
     local v
     v=$(get_env_value "MYSQL_ROOT_PASSWORD" || true); [ -n "$v" ] && MYSQL_ROOT_PASSWORD="$v"
     v=$(get_env_value "MYSQL_PASSWORD" || true); [ -n "$v" ] && MYSQL_PASSWORD="$v"
+    v=$(get_env_value "MYSQL_PORT" || true); [ -n "$v" ] && MYSQL_PORT="$v"
     v=$(get_env_value "REDIS_PASSWORD" || true); [ -n "$v" ] && REDIS_PASSWORD="$v"
+    v=$(get_env_value "REDIS_PORT" || true); [ -n "$v" ] && REDIS_PORT="$v"
     v=$(get_env_value "JWT_SECRET" || true); [ -n "$v" ] && JWT_SECRET="$v"
     v=$(get_env_value "LICENSE_MASTER_KEY" || true); [ -n "$v" ] && LICENSE_MASTER_KEY="$v"
     v=$(get_env_value "DOWNLOAD_TOKEN_SECRET" || true); [ -n "$v" ] && DOWNLOAD_TOKEN_SECRET="$v"
@@ -567,6 +577,12 @@ interactive_config() {
     read -p "后端端口 [8080]: " BACKEND_PORT
     BACKEND_PORT=${BACKEND_PORT:-8080}
 
+    read -p "MySQL 对外端口 [3306]: " MYSQL_PORT
+    MYSQL_PORT=${MYSQL_PORT:-3306}
+
+    read -p "Redis 对外端口 [6379]: " REDIS_PORT
+    REDIS_PORT=${REDIS_PORT:-6379}
+
     read -p "管理员邮箱 [admin@example.com]: " ADMIN_EMAIL
     ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
 
@@ -639,11 +655,11 @@ MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
 MYSQL_DATABASE=license_server
 MYSQL_USER=license_admin
 MYSQL_PASSWORD=${MYSQL_PASSWORD}
-MYSQL_PORT=3306
+MYSQL_PORT=${MYSQL_PORT}
 
 # Redis 配置
 REDIS_PASSWORD=${REDIS_PASSWORD}
-REDIS_PORT=6379
+REDIS_PORT=${REDIS_PORT}
 
 # JWT 配置
 JWT_SECRET=${JWT_SECRET}
@@ -1346,6 +1362,11 @@ main() {
     validate_positive_int "MULTIPART_MEMORY_MB" "$MULTIPART_MEMORY_MB"
     validate_positive_int "MAX_SCRIPT_UPLOAD_MB" "$MAX_SCRIPT_UPLOAD_MB"
     validate_positive_int "MAX_SECURE_SCRIPT_UPLOAD_MB" "$MAX_SECURE_SCRIPT_UPLOAD_MB"
+    validate_positive_int "HTTP_PORT" "$HTTP_PORT"
+    validate_positive_int "HTTPS_PORT" "$HTTPS_PORT"
+    validate_positive_int "BACKEND_PORT" "$BACKEND_PORT"
+    validate_positive_int "MYSQL_PORT" "$MYSQL_PORT"
+    validate_positive_int "REDIS_PORT" "$REDIS_PORT"
 
     if [ "$SSL_MODE" = "http" ] && [ "$ENABLE_NGINX_PROXY" = "yes" ]; then
         log_warning "HTTP 模式下无法启用 Nginx 反向代理，已忽略 --nginx-proxy"
