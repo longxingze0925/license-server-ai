@@ -160,10 +160,50 @@ func TestBuildGrokThirdPartyGenerateBody_AllowsLongReferenceDuration(t *testing.
 	}
 }
 
+func TestBuildDuoYuanVideoBody_UsesImagesArrayForUploads(t *testing.T) {
+	tmp := t.TempDir()
+	first := writeGrokTestUpload(t, tmp, "first.png")
+	second := writeGrokTestUpload(t, tmp, "second.png")
+
+	out, err := buildDuoYuanVideoBody([]byte(`{"model":"grok-video-3","prompt":"test","duration_seconds":8,"image":"legacy","reference_images":["legacy"]}`), []serverUpload{
+		{FileName: "first.png", MimeType: "image/png", Path: first},
+		{FileName: "second.png", MimeType: "image/png", Path: second},
+	})
+	if err != nil {
+		t.Fatalf("buildDuoYuanVideoBody failed: %v", err)
+	}
+
+	var parsed struct {
+		Duration        int      `json:"duration"`
+		DurationSeconds int      `json:"durationSeconds"`
+		DurationSnake   int      `json:"duration_seconds"`
+		Images          []string `json:"images"`
+		Image           string   `json:"image"`
+		ReferenceImages []string `json:"reference_images"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if parsed.Duration != 8 || parsed.DurationSeconds != 0 || parsed.DurationSnake != 0 {
+		t.Fatalf("duration fields = duration:%d durationSeconds:%d duration_seconds:%d, want duration only", parsed.Duration, parsed.DurationSeconds, parsed.DurationSnake)
+	}
+	if len(parsed.Images) != 2 {
+		t.Fatalf("images count = %d, want 2", len(parsed.Images))
+	}
+	for _, image := range parsed.Images {
+		if !strings.HasPrefix(image, "data:image/png;base64,") {
+			t.Fatalf("unexpected image ref: %q", image)
+		}
+	}
+	if parsed.Image != "" || len(parsed.ReferenceImages) != 0 {
+		t.Fatalf("legacy image fields should be removed, got image=%q reference_images=%#v", parsed.Image, parsed.ReferenceImages)
+	}
+}
+
 func TestGrokCreate_DuoYuanModeUsesDuoYuanEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/video/generations" {
-			t.Fatalf("path = %q, want /v1/video/generations", r.URL.Path)
+		if r.URL.Path != "/v1/video/create" {
+			t.Fatalf("path = %q, want /v1/video/create", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer key" {
 			t.Fatalf("authorization = %q", got)
@@ -172,14 +212,17 @@ func TestGrokCreate_DuoYuanModeUsesDuoYuanEndpoint(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
-		if _, ok := body["durationSeconds"]; !ok {
-			t.Fatalf("request body should include durationSeconds: %#v", body)
+		if _, ok := body["duration"]; !ok {
+			t.Fatalf("request body should include duration: %#v", body)
 		}
-		if _, ok := body["duration_seconds"]; !ok {
-			t.Fatalf("request body should keep duration_seconds for compatibility: %#v", body)
+		if _, ok := body["duration_seconds"]; ok {
+			t.Fatalf("request body should not include duration_seconds: %#v", body)
+		}
+		if _, ok := body["durationSeconds"]; ok {
+			t.Fatalf("request body should not include durationSeconds: %#v", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":200,"data":{"taskId":"task-1"}}`))
+		_, _ = w.Write([]byte(`{"code":200,"data":{"id":"task-1"}}`))
 	}))
 	defer server.Close()
 
@@ -196,33 +239,25 @@ func TestGrokCreate_DuoYuanModeUsesDuoYuanEndpoint(t *testing.T) {
 	}
 }
 
-func TestGrokCreate_DuoYuanModeFallsBackToApiVideoEndpoint(t *testing.T) {
+func TestGrokCreate_DuoYuanModeDoesNotFallbackToUnsupportedEndpoint(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
-		if r.URL.Path != "/api/v1/video/generations" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"error":{"message":"Invalid URL"}}`))
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":200,"data":{"taskId":"task-1"}}`))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"message":"Invalid URL"}}`))
 	}))
 	defer server.Close()
 
-	res, err := (GrokVideoAdapter{}).Create(context.Background(), &model.ProviderCredential{
+	_, err := (GrokVideoAdapter{}).Create(context.Background(), &model.ProviderCredential{
 		Mode:         "duoyuan",
 		UpstreamBase: server.URL,
 		DefaultModel: "grok-video-3",
 	}, []byte("key"), []byte(`{"prompt":"test","duration_seconds":8}`))
-	if err != nil {
-		t.Fatalf("Create failed: %v", err)
+	if err == nil {
+		t.Fatal("Create should return upstream 404")
 	}
-	if res.UpstreamTaskID != "dy2:task-1" {
-		t.Fatalf("task id = %q, want dy2:task-1", res.UpstreamTaskID)
-	}
-	want := []string{"/v1/video/generations", "/v1/videos/generations", "/api/v1/video/generations"}
+	want := []string{"/v1/video/create"}
 	if strings.Join(paths, ",") != strings.Join(want, ",") {
 		t.Fatalf("paths = %#v, want %#v", paths, want)
 	}
@@ -253,11 +288,11 @@ func TestGrokCreate_SuChuangModeKeepsCompatibleEndpoint(t *testing.T) {
 
 func TestGrokPoll_DuoYuanModeParsesResultJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/video/generations" {
-			t.Fatalf("path = %q, want /v1/video/generations", r.URL.Path)
+		if r.URL.Path != "/v1/video/query" {
+			t.Fatalf("path = %q, want /v1/video/query", r.URL.Path)
 		}
-		if got := r.URL.Query().Get("task_id"); got != "request-1" {
-			t.Fatalf("task_id = %q, want request-1", got)
+		if got := r.URL.Query().Get("id"); got != "request-1" {
+			t.Fatalf("id = %q, want request-1", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":200,"data":{"state":"success","resultJson":"{\"resultUrls\":[\"https://cdn.example.test/duoyuan.mp4\"],\"videoDuration\":8,\"videoSize\":\"1920x1080\"}"}}`))
@@ -282,6 +317,37 @@ func TestGrokPoll_DuoYuanModeParsesResultJSON(t *testing.T) {
 	}
 	if res.Media[0].DurationMs != 8000 || res.Media[0].Width != 1920 || res.Media[0].Height != 1080 {
 		t.Fatalf("media metadata = %#v", res.Media[0])
+	}
+}
+
+func TestGrokPoll_DuoYuanModeParsesDocumentVideoURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/video/query" {
+			t.Fatalf("path = %q, want /v1/video/query", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("id"); got != "grok:request-1" {
+			t.Fatalf("id = %q, want grok:request-1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"grok:request-1","status":"completed","progress":100,"video_url":"https://cdn.example.test/document.mp4","detail":{"status":"completed","progress_pct":1}}`))
+	}))
+	defer server.Close()
+
+	res, err := (GrokVideoAdapter{}).Poll(context.Background(), &model.ProviderCredential{
+		Mode:         "duoyuan",
+		UpstreamBase: server.URL,
+	}, []byte("key"), "grok:request-1")
+	if err != nil {
+		t.Fatalf("Poll returned error: %v", err)
+	}
+	if res.Status != AsyncStatusSucceeded {
+		t.Fatalf("status = %v, want succeeded", res.Status)
+	}
+	if res.Progress != 1 {
+		t.Fatalf("progress = %v, want 1", res.Progress)
+	}
+	if len(res.Media) != 1 || res.Media[0].DownloadURL != "https://cdn.example.test/document.mp4" {
+		t.Fatalf("media = %#v", res.Media)
 	}
 }
 

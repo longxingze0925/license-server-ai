@@ -420,7 +420,7 @@ const ProviderCredentials: React.FC = () => {
               showIcon
               type="info"
               style={{ marginBottom: 16 }}
-              message="Grok 多元模式会优先调用 /v1/video/generations，并自动兜底 /v1/videos/generations、/api/v1/video/generations；默认模型建议填 grok-video-3。"
+              message="Grok 多元模式会按多元开发文档调用 /v1/video/create 创建任务、/v1/video/query 查询结果；默认模型建议填 grok-video-3。"
             />
           )}
 
@@ -438,7 +438,7 @@ const ProviderCredentials: React.FC = () => {
               showIcon
               type="info"
               style={{ marginBottom: 16 }}
-              message="Veo 多元模式会优先调用 /v1/video/generations，并自动兜底 /v1/videos/generations、/api/v1/video/generations；默认模型建议填 veo3。"
+              message="Veo 多元模式会按多元开发文档调用 /v1/video/create 创建任务、/v1/video/query 查询结果；默认模型按多元后台可用模型填写。"
             />
           )}
 

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,53 +41,37 @@ func buildDuoYuanVideoBody(body []byte, uploads []serverUpload) ([]byte, error) 
 		return nil, fmt.Errorf("解析多元视频请求失败: %w", err)
 	}
 
-	if v, ok := m["duration_seconds"]; ok {
-		if _, exists := m["durationSeconds"]; !exists {
-			m["durationSeconds"] = v
+	if _, exists := m["duration"]; !exists {
+		if v, ok := m["duration_seconds"]; ok {
+			m["duration"] = v
+		} else if v, ok := m["durationSeconds"]; ok {
+			m["duration"] = v
 		}
 	}
+	delete(m, "duration_seconds")
+	delete(m, "durationSeconds")
 	if v, ok := m["resolution"].(string); ok && strings.TrimSpace(v) != "" {
 		if _, exists := m["size"]; !exists {
 			m["size"] = strings.ToUpper(strings.TrimSpace(v))
 		}
 	}
+	delete(m, "resolution")
 
 	if len(uploads) > 0 {
 		images, err := buildDuoYuanImageRefs(uploads)
 		if err != nil {
 			return nil, err
 		}
-		m["image"] = images[0]
-		if len(images) > 1 {
-			m["reference_images"] = images
-		}
+		m["images"] = images
+		delete(m, "image")
+		delete(m, "reference_images")
 	}
 
 	return json.Marshal(m)
 }
 
 func createDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, body []byte) (*CreateResult, error) {
-	var attempts []string
-	var lastErr error
-	for index, upURL := range duoYuanVideoCreateURLs(cred) {
-		attempts = append(attempts, upURL)
-		res, err := createDuoYuanVideoOnce(ctx, cred, plainKey, body, upURL)
-		if err == nil {
-			res.UpstreamTaskID = encodeDuoYuanUpstreamTaskID(index, res.UpstreamTaskID)
-			return res, nil
-		}
-		lastErr = err
-		if !shouldTryNextDuoYuanVideoCreateURL(err) {
-			break
-		}
-	}
-	if lastErr == nil {
-		lastErr = errors.New("没有可用的多元视频创建路径")
-	}
-	return nil, fmt.Errorf("%w（已尝试: %s）", lastErr, strings.Join(attempts, ", "))
-}
-
-func createDuoYuanVideoOnce(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, body []byte, upURL string) (*CreateResult, error) {
+	upURL := duoYuanVideoCreateURL(cred)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -113,7 +96,7 @@ func createDuoYuanVideoOnce(ctx context.Context, cred *model.ProviderCredential,
 	}
 	if parsed.Code != 0 && parsed.Code != http.StatusOK {
 		message := firstNonEmptyAdapter(parsed.Msg, parsed.Message, parsed.Error.Message, "上游返回业务失败")
-		return nil, &duoYuanVideoBusinessError{Message: message}
+		return nil, fmt.Errorf("create 上游业务失败: %s", message)
 	}
 	taskID := firstNonEmptyAdapter(
 		parsed.ID,
@@ -126,7 +109,7 @@ func createDuoYuanVideoOnce(ctx context.Context, cred *model.ProviderCredential,
 		parsed.Data.TaskIDCamel,
 	)
 	if taskID == "" {
-		return nil, &duoYuanVideoBusinessError{Message: "create 响应缺少 id/request_id/task_id/taskId 字段"}
+		return nil, fmt.Errorf("create 响应缺少 id/request_id/task_id/taskId 字段")
 	}
 	return &CreateResult{
 		UpstreamTaskID:   taskID,
@@ -136,8 +119,7 @@ func createDuoYuanVideoOnce(ctx context.Context, cred *model.ProviderCredential,
 }
 
 func pollDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, upstreamTaskID string) (*PollResult, error) {
-	urlIndex, taskID := decodeDuoYuanUpstreamTaskID(upstreamTaskID)
-	upURL := duoYuanVideoPollURL(cred, urlIndex, taskID)
+	upURL := duoYuanVideoPollURL(cred, upstreamTaskID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upURL, nil)
 	if err != nil {
 		return nil, err
@@ -166,11 +148,24 @@ func pollDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, plain
 	}
 	if parsed.Code != 0 && parsed.Code != http.StatusOK {
 		out.Status = AsyncStatusFailed
-		out.Error = firstNonEmptyAdapter(parsed.Msg, parsed.Message, "多元视频任务查询失败")
+		out.Error = firstNonEmptyAdapter(parsed.Msg, parsed.Message, parsed.Error, "多元视频任务查询失败")
 		return out, nil
 	}
 
-	status := strings.ToLower(firstNonEmptyAdapter(parsed.Status, parsed.State, parsed.Data.Status, parsed.Data.State))
+	status := strings.ToLower(firstNonEmptyAdapter(parsed.Status, parsed.State, parsed.Detail.Status, parsed.Detail.State, parsed.Data.Status, parsed.Data.State))
+	if parsed.Progress > 0 {
+		out.Progress = normalizeDuoYuanProgress(parsed.Progress)
+	} else if parsed.ProgressPct > 0 {
+		out.Progress = normalizeDuoYuanProgress(parsed.ProgressPct)
+	} else if parsed.Detail.Progress > 0 {
+		out.Progress = normalizeDuoYuanProgress(parsed.Detail.Progress)
+	} else if parsed.Detail.ProgressPct > 0 {
+		out.Progress = normalizeDuoYuanProgress(parsed.Detail.ProgressPct)
+	} else if parsed.Data.Progress > 0 {
+		out.Progress = normalizeDuoYuanProgress(parsed.Data.Progress)
+	} else if parsed.Data.ProgressPct > 0 {
+		out.Progress = normalizeDuoYuanProgress(parsed.Data.ProgressPct)
+	}
 	switch status {
 	case "done", "completed", "succeeded", "success":
 		out.Status = AsyncStatusSucceeded
@@ -178,110 +173,87 @@ func pollDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, plain
 		appendDuoYuanVideoURL(out, firstNonEmptyAdapter(parsed.URL, parsed.VideoURL, parsed.DownloadURL, parsed.OutputURL), 0, "", 0, 0)
 		appendDuoYuanResultURLs(out, parsed.ResultURLs, 0, "", 0, 0)
 		appendDuoYuanResultURLs(out, parsed.ResultURLsSnake, 0, "", 0, 0)
+		appendDuoYuanVideoURL(out, firstNonEmptyAdapter(parsed.Detail.URL, parsed.Detail.VideoURL, parsed.Detail.DownloadURL, parsed.Detail.OutputURL), 0, "", 0, 0)
+		appendDuoYuanResultURLs(out, parsed.Detail.ResultURLs, 0, "", 0, 0)
+		appendDuoYuanResultURLs(out, parsed.Detail.ResultURLsSnake, 0, "", 0, 0)
 		appendDuoYuanVideoURL(out, firstNonEmptyAdapter(parsed.Data.URL, parsed.Data.VideoURL, parsed.Data.DownloadURL, parsed.Data.OutputURL), 0, "", 0, 0)
 		appendDuoYuanResultURLs(out, parsed.Data.ResultURLs, 0, "", 0, 0)
 		appendDuoYuanResultURLs(out, parsed.Data.ResultURLsSnake, 0, "", 0, 0)
-		appendDuoYuanResultJSON(out, firstNonEmptyAdapter(parsed.ResultJSON, parsed.Data.ResultJSON))
+		appendDuoYuanResultJSON(out, firstNonEmptyAdapter(parsed.ResultJSON, parsed.Detail.ResultJSON, parsed.Data.ResultJSON))
 		if len(out.Media) == 0 {
 			out.Status = AsyncStatusFailed
-			out.Error = firstNonEmptyAdapter(parsed.FailMsg, parsed.Message, parsed.Msg, parsed.Data.FailMsg, parsed.Data.Message, "多元视频任务成功但缺少视频 URL")
+			out.Error = firstNonEmptyAdapter(parsed.FailMsg, parsed.Error, parsed.Message, parsed.Msg, parsed.Detail.FailMsg, parsed.Detail.Error, parsed.Detail.Message, parsed.Data.FailMsg, parsed.Data.Error, parsed.Data.Message, "多元视频任务成功但缺少视频 URL")
 		}
 	case "failed", "error", "expired":
 		out.Status = AsyncStatusFailed
-		out.Error = firstNonEmptyAdapter(parsed.FailMsg, parsed.Message, parsed.Msg, parsed.Data.FailMsg, parsed.Data.Message, "多元视频生成失败或已过期")
+		out.Error = firstNonEmptyAdapter(parsed.FailMsg, parsed.Error, parsed.Message, parsed.Msg, parsed.Detail.FailMsg, parsed.Detail.Error, parsed.Detail.Message, parsed.Data.FailMsg, parsed.Data.Error, parsed.Data.Message, "多元视频生成失败或已过期")
 	default:
 		out.Status = AsyncStatusRunning
 	}
 	return out, nil
 }
 
-type duoYuanVideoBusinessError struct {
-	Message string
-}
-
-func (e *duoYuanVideoBusinessError) Error() string {
-	return e.Message
-}
-
 type duoYuanVideoPollResponse struct {
-	Code            int      `json:"code"`
-	Msg             string   `json:"msg"`
+	Code            int                    `json:"code"`
+	Msg             string                 `json:"msg"`
+	Status          string                 `json:"status"`
+	State           string                 `json:"state"`
+	Progress        float64                `json:"progress"`
+	ProgressPct     float64                `json:"progress_pct"`
+	URL             string                 `json:"url"`
+	VideoURL        string                 `json:"video_url"`
+	DownloadURL     string                 `json:"download_url"`
+	OutputURL       string                 `json:"output_url"`
+	ThumbnailURL    string                 `json:"thumbnail_url"`
+	ResultURLs      []string               `json:"resultUrls"`
+	ResultURLsSnake []string               `json:"result_urls"`
+	ResultJSON      string                 `json:"resultJson"`
+	FailMsg         string                 `json:"failMsg"`
+	Error           string                 `json:"error"`
+	Message         string                 `json:"message"`
+	Detail          duoYuanVideoPollDetail `json:"detail"`
+	Data            duoYuanVideoPollDetail `json:"data"`
+}
+
+type duoYuanVideoPollDetail struct {
 	Status          string   `json:"status"`
 	State           string   `json:"state"`
+	Progress        float64  `json:"progress"`
+	ProgressPct     float64  `json:"progress_pct"`
 	URL             string   `json:"url"`
 	VideoURL        string   `json:"video_url"`
 	DownloadURL     string   `json:"download_url"`
 	OutputURL       string   `json:"output_url"`
+	ThumbnailURL    string   `json:"thumbnail_url"`
 	ResultURLs      []string `json:"resultUrls"`
 	ResultURLsSnake []string `json:"result_urls"`
 	ResultJSON      string   `json:"resultJson"`
 	FailMsg         string   `json:"failMsg"`
+	Error           string   `json:"error"`
 	Message         string   `json:"message"`
-	Data            struct {
-		Status          string   `json:"status"`
-		State           string   `json:"state"`
-		URL             string   `json:"url"`
-		VideoURL        string   `json:"video_url"`
-		DownloadURL     string   `json:"download_url"`
-		OutputURL       string   `json:"output_url"`
-		ResultURLs      []string `json:"resultUrls"`
-		ResultURLsSnake []string `json:"result_urls"`
-		ResultJSON      string   `json:"resultJson"`
-		FailMsg         string   `json:"failMsg"`
-		Message         string   `json:"message"`
-	} `json:"data"`
 }
 
-func duoYuanVideoCreateURLs(cred *model.ProviderCredential) []string {
+func duoYuanVideoCreateURL(cred *model.ProviderCredential) string {
 	base := strings.TrimRight(cred.UpstreamBase, "/")
-	return []string{
-		base + "/v1/video/generations",
-		base + "/v1/videos/generations",
-		base + "/api/v1/video/generations",
-	}
+	return base + "/v1/video/create"
 }
 
-func duoYuanVideoPollURL(cred *model.ProviderCredential, urlIndex int, upstreamTaskID string) string {
+func duoYuanVideoPollURL(cred *model.ProviderCredential, upstreamTaskID string) string {
 	base := strings.TrimRight(cred.UpstreamBase, "/")
-	switch urlIndex {
-	case 1:
-		return base + "/v1/videos/generations/" + url.PathEscape(upstreamTaskID)
-	case 2:
-		return base + "/api/v1/video/generations?task_id=" + url.QueryEscape(upstreamTaskID)
-	default:
-		return base + "/v1/video/generations?task_id=" + url.QueryEscape(upstreamTaskID)
-	}
+	return base + "/v1/video/query?id=" + url.QueryEscape(strings.TrimSpace(upstreamTaskID))
 }
 
-func shouldTryNextDuoYuanVideoCreateURL(err error) bool {
-	var httpErr *UpstreamHTTPError
-	if errors.As(err, &httpErr) {
-		return httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusBadRequest
+func normalizeDuoYuanProgress(progress float64) float32 {
+	if progress > 1 {
+		progress = progress / 100
 	}
-	var businessErr *duoYuanVideoBusinessError
-	if errors.As(err, &businessErr) {
-		message := strings.ToLower(strings.TrimSpace(businessErr.Message))
-		return strings.Contains(message, "invalid url") || strings.Contains(message, "not found")
+	if progress < 0 {
+		progress = 0
 	}
-	return false
-}
-
-func encodeDuoYuanUpstreamTaskID(urlIndex int, taskID string) string {
-	if urlIndex <= 0 {
-		return taskID
+	if progress > 1 {
+		progress = 1
 	}
-	return fmt.Sprintf("dy%d:%s", urlIndex, taskID)
-}
-
-func decodeDuoYuanUpstreamTaskID(raw string) (int, string) {
-	raw = strings.TrimSpace(raw)
-	if strings.HasPrefix(raw, "dy1:") {
-		return 1, strings.TrimPrefix(raw, "dy1:")
-	}
-	if strings.HasPrefix(raw, "dy2:") {
-		return 2, strings.TrimPrefix(raw, "dy2:")
-	}
-	return 0, raw
+	return float32(progress)
 }
 
 func appendDuoYuanResultURLs(out *PollResult, urls []string, duration float64, mimeType string, width, height int) {
