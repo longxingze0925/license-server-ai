@@ -162,8 +162,8 @@ func TestBuildGrokThirdPartyGenerateBody_AllowsLongReferenceDuration(t *testing.
 
 func TestGrokCreate_DuoYuanModeUsesDuoYuanEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/video/generations" {
-			t.Fatalf("path = %q, want /api/v1/video/generations", r.URL.Path)
+		if r.URL.Path != "/v1/video/generations" {
+			t.Fatalf("path = %q, want /v1/video/generations", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer key" {
 			t.Fatalf("authorization = %q", got)
@@ -196,6 +196,38 @@ func TestGrokCreate_DuoYuanModeUsesDuoYuanEndpoint(t *testing.T) {
 	}
 }
 
+func TestGrokCreate_DuoYuanModeFallsBackToApiVideoEndpoint(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/api/v1/video/generations" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"message":"Invalid URL"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":{"taskId":"task-1"}}`))
+	}))
+	defer server.Close()
+
+	res, err := (GrokVideoAdapter{}).Create(context.Background(), &model.ProviderCredential{
+		Mode:         "duoyuan",
+		UpstreamBase: server.URL,
+		DefaultModel: "grok-video-3",
+	}, []byte("key"), []byte(`{"prompt":"test","duration_seconds":8}`))
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if res.UpstreamTaskID != "dy2:task-1" {
+		t.Fatalf("task id = %q, want dy2:task-1", res.UpstreamTaskID)
+	}
+	want := []string{"/v1/video/generations", "/v1/videos/generations", "/api/v1/video/generations"}
+	if strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
 func TestGrokCreate_SuChuangModeKeepsCompatibleEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/videos/generations" {
@@ -221,8 +253,8 @@ func TestGrokCreate_SuChuangModeKeepsCompatibleEndpoint(t *testing.T) {
 
 func TestGrokPoll_DuoYuanModeParsesResultJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/video/generations" {
-			t.Fatalf("path = %q, want /api/v1/video/generations", r.URL.Path)
+		if r.URL.Path != "/v1/video/generations" {
+			t.Fatalf("path = %q, want /v1/video/generations", r.URL.Path)
 		}
 		if got := r.URL.Query().Get("task_id"); got != "request-1" {
 			t.Fatalf("task_id = %q, want request-1", got)

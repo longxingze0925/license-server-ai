@@ -16,6 +16,25 @@ import (
 	"license-server/internal/model"
 )
 
+type duoYuanVideoCreateResponse struct {
+	Code    int    `json:"code"`
+	Msg     string `json:"msg"`
+	Message string `json:"message"`
+	Error   struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	ID          string `json:"id"`
+	RequestID   string `json:"request_id"`
+	TaskID      string `json:"task_id"`
+	TaskIDCamel string `json:"taskId"`
+	Data        struct {
+		ID          string `json:"id"`
+		RequestID   string `json:"request_id"`
+		TaskID      string `json:"task_id"`
+		TaskIDCamel string `json:"taskId"`
+	} `json:"data"`
+}
+
 func buildDuoYuanVideoBody(body []byte, uploads []serverUpload) ([]byte, error) {
 	cleanBody := stripServerOnlyFields(body)
 	var m map[string]any
@@ -49,7 +68,27 @@ func buildDuoYuanVideoBody(body []byte, uploads []serverUpload) ([]byte, error) 
 }
 
 func createDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, body []byte) (*CreateResult, error) {
-	upURL := duoYuanVideoCreateURL(cred)
+	var attempts []string
+	var lastErr error
+	for index, upURL := range duoYuanVideoCreateURLs(cred) {
+		attempts = append(attempts, upURL)
+		res, err := createDuoYuanVideoOnce(ctx, cred, plainKey, body, upURL)
+		if err == nil {
+			res.UpstreamTaskID = encodeDuoYuanUpstreamTaskID(index, res.UpstreamTaskID)
+			return res, nil
+		}
+		lastErr = err
+		if !shouldTryNextDuoYuanVideoCreateURL(err) {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("没有可用的多元视频创建路径")
+	}
+	return nil, fmt.Errorf("%w（已尝试: %s）", lastErr, strings.Join(attempts, ", "))
+}
+
+func createDuoYuanVideoOnce(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, body []byte, upURL string) (*CreateResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -68,37 +107,26 @@ func createDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, pla
 		return nil, newUpstreamHTTPError("create "+upURL, resp.StatusCode, respBody, 200)
 	}
 
-	var parsed struct {
-		Code        int    `json:"code"`
-		Msg         string `json:"msg"`
-		ID          string `json:"id"`
-		TaskID      string `json:"task_id"`
-		TaskIDCamel string `json:"taskId"`
-		Data        struct {
-			ID          string `json:"id"`
-			TaskID      string `json:"task_id"`
-			TaskIDCamel string `json:"taskId"`
-		} `json:"data"`
-	}
+	var parsed duoYuanVideoCreateResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return nil, fmt.Errorf("create 响应解析失败: %w", err)
 	}
 	if parsed.Code != 0 && parsed.Code != http.StatusOK {
-		if parsed.Msg == "" {
-			parsed.Msg = "上游返回业务失败"
-		}
-		return nil, errors.New(parsed.Msg)
+		message := firstNonEmptyAdapter(parsed.Msg, parsed.Message, parsed.Error.Message, "上游返回业务失败")
+		return nil, &duoYuanVideoBusinessError{Message: message}
 	}
 	taskID := firstNonEmptyAdapter(
 		parsed.ID,
+		parsed.RequestID,
 		parsed.TaskID,
 		parsed.TaskIDCamel,
 		parsed.Data.ID,
+		parsed.Data.RequestID,
 		parsed.Data.TaskID,
 		parsed.Data.TaskIDCamel,
 	)
 	if taskID == "" {
-		return nil, errors.New("create 响应缺少 id/task_id/taskId 字段")
+		return nil, &duoYuanVideoBusinessError{Message: "create 响应缺少 id/request_id/task_id/taskId 字段"}
 	}
 	return &CreateResult{
 		UpstreamTaskID:   taskID,
@@ -108,7 +136,8 @@ func createDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, pla
 }
 
 func pollDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, upstreamTaskID string) (*PollResult, error) {
-	upURL := duoYuanVideoPollURL(cred, upstreamTaskID)
+	urlIndex, taskID := decodeDuoYuanUpstreamTaskID(upstreamTaskID)
+	upURL := duoYuanVideoPollURL(cred, urlIndex, taskID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upURL, nil)
 	if err != nil {
 		return nil, err
@@ -166,6 +195,14 @@ func pollDuoYuanVideo(ctx context.Context, cred *model.ProviderCredential, plain
 	return out, nil
 }
 
+type duoYuanVideoBusinessError struct {
+	Message string
+}
+
+func (e *duoYuanVideoBusinessError) Error() string {
+	return e.Message
+}
+
 type duoYuanVideoPollResponse struct {
 	Code            int      `json:"code"`
 	Msg             string   `json:"msg"`
@@ -195,12 +232,56 @@ type duoYuanVideoPollResponse struct {
 	} `json:"data"`
 }
 
-func duoYuanVideoCreateURL(cred *model.ProviderCredential) string {
-	return strings.TrimRight(cred.UpstreamBase, "/") + "/api/v1/video/generations"
+func duoYuanVideoCreateURLs(cred *model.ProviderCredential) []string {
+	base := strings.TrimRight(cred.UpstreamBase, "/")
+	return []string{
+		base + "/v1/video/generations",
+		base + "/v1/videos/generations",
+		base + "/api/v1/video/generations",
+	}
 }
 
-func duoYuanVideoPollURL(cred *model.ProviderCredential, upstreamTaskID string) string {
-	return strings.TrimRight(cred.UpstreamBase, "/") + "/api/v1/video/generations?task_id=" + url.QueryEscape(upstreamTaskID)
+func duoYuanVideoPollURL(cred *model.ProviderCredential, urlIndex int, upstreamTaskID string) string {
+	base := strings.TrimRight(cred.UpstreamBase, "/")
+	switch urlIndex {
+	case 1:
+		return base + "/v1/videos/generations/" + url.PathEscape(upstreamTaskID)
+	case 2:
+		return base + "/api/v1/video/generations?task_id=" + url.QueryEscape(upstreamTaskID)
+	default:
+		return base + "/v1/video/generations?task_id=" + url.QueryEscape(upstreamTaskID)
+	}
+}
+
+func shouldTryNextDuoYuanVideoCreateURL(err error) bool {
+	var httpErr *UpstreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusBadRequest
+	}
+	var businessErr *duoYuanVideoBusinessError
+	if errors.As(err, &businessErr) {
+		message := strings.ToLower(strings.TrimSpace(businessErr.Message))
+		return strings.Contains(message, "invalid url") || strings.Contains(message, "not found")
+	}
+	return false
+}
+
+func encodeDuoYuanUpstreamTaskID(urlIndex int, taskID string) string {
+	if urlIndex <= 0 {
+		return taskID
+	}
+	return fmt.Sprintf("dy%d:%s", urlIndex, taskID)
+}
+
+func decodeDuoYuanUpstreamTaskID(raw string) (int, string) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "dy1:") {
+		return 1, strings.TrimPrefix(raw, "dy1:")
+	}
+	if strings.HasPrefix(raw, "dy2:") {
+		return 2, strings.TrimPrefix(raw, "dy2:")
+	}
+	return 0, raw
 }
 
 func appendDuoYuanResultURLs(out *PollResult, urls []string, duration float64, mimeType string, width, height int) {
