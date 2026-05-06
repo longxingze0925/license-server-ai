@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"errors"
 	"license-server/internal/middleware"
 	"license-server/internal/model"
 	"license-server/internal/pkg/response"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +14,8 @@ import (
 )
 
 type CustomerHandler struct{}
+
+var errCustomerEmailExists = errors.New("customer email exists")
 
 func NewCustomerHandler() *CustomerHandler {
 	return &CustomerHandler{}
@@ -40,13 +44,7 @@ func (h *CustomerHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "参数错误: "+err.Error())
 		return
 	}
-
-	// 检查邮箱是否已存在（同一租户内）
-	var existingCustomer model.Customer
-	if err := model.DB.Unscoped().Where("email = ? AND tenant_id = ?", req.Email, tenantID).First(&existingCustomer).Error; err == nil {
-		response.Error(c, 400, "该邮箱已存在")
-		return
-	}
+	req.Email = strings.TrimSpace(req.Email)
 
 	// 如果没有指定所属成员，默认为当前用户
 	ownerID := req.OwnerID
@@ -89,8 +87,30 @@ func (h *CustomerHandler) Create(c *gin.Context) {
 		}
 	}
 
-	if err := model.DB.Create(&customer).Error; err != nil {
-		response.ServerError(c, "创建客户失败")
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		var existingCustomer model.Customer
+		err := tx.Unscoped().Where("email = ? AND tenant_id = ?", req.Email, tenantID).First(&existingCustomer).Error
+		if err == nil {
+			if !existingCustomer.DeletedAt.Valid {
+				return errCustomerEmailExists
+			}
+			if err := tx.Unscoped().
+				Model(&model.Customer{}).
+				Where("id = ? AND tenant_id = ? AND deleted_at IS NOT NULL", existingCustomer.ID, tenantID).
+				Update("email", archivedDeletedCustomerEmail(existingCustomer.ID)).Error; err != nil {
+				return err
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		return tx.Create(&customer).Error
+	}); err != nil {
+		if errors.Is(err, errCustomerEmailExists) {
+			response.Error(c, 400, "该邮箱已存在")
+			return
+		}
+		response.ServerError(c, "创建客户失败: "+err.Error())
 		return
 	}
 
@@ -102,6 +122,10 @@ func (h *CustomerHandler) Create(c *gin.Context) {
 		"status":     customer.Status,
 		"created_at": customer.CreatedAt,
 	})
+}
+
+func archivedDeletedCustomerEmail(customerID string) string {
+	return "deleted-" + customerID + "@deleted.local"
 }
 
 func scopedCustomerQuery(c *gin.Context) *gorm.DB {
