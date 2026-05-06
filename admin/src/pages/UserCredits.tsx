@@ -186,7 +186,7 @@ const UserCredits: React.FC = () => {
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={{ margin: 0 }}>用户额度</h2>
         <Space>
-          <Button icon={<PlusOutlined />} onClick={() => navigate('/customers')}>添加客户</Button>
+          <Button icon={<PlusOutlined />} onClick={() => navigate('/customers?create=1')}>添加客户</Button>
           <Input
             allowClear placeholder="按邮箱/姓名搜索" style={{ width: 220 }}
             prefix={<SearchOutlined />} value={keyword}
@@ -202,7 +202,7 @@ const UserCredits: React.FC = () => {
         locale={{
           emptyText: (
             <Empty description={keyword ? '没有匹配的客户' : '暂无客户，先添加客户后再设置额度'}>
-              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/customers')}>去添加客户</Button>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/customers?create=1')}>去添加客户</Button>
             </Empty>
           ),
         }}

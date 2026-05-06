@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Table, Button, Space, Tag, Modal, Form, Input, Select, message, Card,
   Popconfirm, Tooltip, Drawer, Descriptions, Tabs, List
@@ -66,10 +67,12 @@ interface Device {
 }
 
 const Customers: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuthStore();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [detailDrawerVisible, setDetailDrawerVisible] = useState(false);
@@ -124,6 +127,22 @@ const Customers: React.FC = () => {
     fetchCustomers();
   }, [fetchCustomers]);
 
+  useEffect(() => {
+    if (searchParams.get('create') !== '1' || !canUpdateCustomer) {
+      return;
+    }
+    setEditingCustomer(null);
+    form.resetFields();
+    setModalVisible(true);
+    setSearchParams({}, { replace: true });
+  }, [canUpdateCustomer, form, searchParams, setSearchParams]);
+
+  const openCreateModal = () => {
+    setEditingCustomer(null);
+    form.resetFields();
+    setModalVisible(true);
+  };
+
   const fetchCustomerDetails = async (id: string) => {
     try {
       const [detail, licenses, subscriptions, devices]: any = await Promise.all([
@@ -144,14 +163,17 @@ const Customers: React.FC = () => {
   const handleCreate = async (values: any) => {
     if (!canUpdateCustomer) return;
 
+    setSubmitting(true);
     try {
       await customerApi.create(values);
       message.success('客户创建成功');
       setModalVisible(false);
       form.resetFields();
       fetchCustomers(pagination.current, pagination.pageSize);
-    } catch {
-      // handled by interceptor
+    } catch (e: any) {
+      message.error(e?.message || '客户创建失败，请检查邮箱、密码和权限');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -159,6 +181,7 @@ const Customers: React.FC = () => {
     if (!canUpdateCustomer) return;
 
     if (!editingCustomer) return;
+    setSubmitting(true);
     try {
       await customerApi.update(editingCustomer.id, values);
       message.success('客户更新成功');
@@ -166,8 +189,10 @@ const Customers: React.FC = () => {
       setEditingCustomer(null);
       form.resetFields();
       fetchCustomers(pagination.current, pagination.pageSize);
-    } catch {
-      // handled by interceptor
+    } catch (e: any) {
+      message.error(e?.message || '客户更新失败，请稍后重试');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -426,7 +451,7 @@ const Customers: React.FC = () => {
             </Select>
           )}
           {canUpdateCustomer && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalVisible(true)}>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreateModal}>
               添加客户
             </Button>
           )}
@@ -461,6 +486,10 @@ const Customers: React.FC = () => {
           form={form}
           layout="vertical"
           onFinish={editingCustomer ? handleUpdate : handleCreate}
+          onFinishFailed={({ errorFields }) => {
+            const first = errorFields[0]?.errors?.[0];
+            message.warning(first || '请先补全客户信息');
+          }}
         >
           <Form.Item
             name="email"
@@ -513,10 +542,10 @@ const Customers: React.FC = () => {
           </Form.Item>
           <Form.Item>
             <Space>
-              <Button type="primary" htmlType="submit">
+              <Button type="primary" htmlType="submit" loading={submitting}>
                 {editingCustomer ? '保存' : '创建'}
               </Button>
-              <Button onClick={() => setModalVisible(false)}>取消</Button>
+              <Button disabled={submitting} onClick={() => setModalVisible(false)}>取消</Button>
             </Space>
           </Form.Item>
         </Form>
