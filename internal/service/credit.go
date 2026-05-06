@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -39,6 +40,13 @@ type ReserveTaskInput struct {
 	Task        *model.GenerationTask
 	RuleID      int64
 	LimitStatus []model.GenerationStatus
+}
+
+type FailTaskRefundResult struct {
+	Refunded     bool
+	Amount       int64
+	RefundStatus model.GenerationRefundStatus
+	RefundedAt   *time.Time
 }
 
 // EnsureUser 确保用户额度行存在；不存在则按默认值创建（balance=0, concurrent_limit=1）。
@@ -355,6 +363,127 @@ func (s *CreditService) Refund(taskID, note string) (*model.UserCredit, *model.C
 		return nil, nil, err
 	}
 	return &updated, &tx, nil
+}
+
+func (s *CreditService) FailTaskAndRefund(taskID, reason, refundNote string) (*FailTaskRefundResult, error) {
+	if taskID == "" {
+		return nil, errors.New("taskID 不能为空")
+	}
+	if refundNote == "" {
+		refundNote = reason
+	}
+
+	var result FailTaskRefundResult
+	err := model.DB.Transaction(func(db *gorm.DB) error {
+		var task model.GenerationTask
+		if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&task, "id = ?", taskID).Error; err != nil {
+			return err
+		}
+
+		now := time.Now()
+		if task.RefundStatus == "" {
+			task.RefundStatus = model.GenerationRefundNone
+		}
+
+		refundStatus := task.RefundStatus
+		refundAmount := task.RefundAmount
+		var refundedAt *time.Time
+		if task.RefundedAt != nil {
+			refundedAt = task.RefundedAt
+		}
+
+		if refundStatus != model.GenerationRefunded && refundStatus != model.GenerationRefundSkipped {
+			var existing int64
+			if err := db.Model(&model.CreditTransaction{}).
+				Where("task_id = ? AND type = ?", taskID, model.TransactionRefund).
+				Count(&existing).Error; err != nil {
+				return err
+			}
+
+			if existing > 0 {
+				refundStatus = model.GenerationRefunded
+				if refundedAt == nil {
+					refundedAt = &now
+				}
+				if refundAmount == 0 {
+					var refund model.CreditTransaction
+					if err := db.Where("task_id = ? AND type = ?", taskID, model.TransactionRefund).
+						Order("id ASC").
+						First(&refund).Error; err == nil {
+						refundAmount = refund.Amount
+					}
+				}
+			} else {
+				var consume model.CreditTransaction
+				if err := db.Where("task_id = ? AND type = ?", taskID, model.TransactionConsume).
+					Order("id ASC").
+					First(&consume).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						refundStatus = model.GenerationRefundSkipped
+					} else {
+						return err
+					}
+				} else {
+					amountToRefund := -consume.Amount
+					var row model.UserCredit
+					if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).
+						First(&row, "user_id = ?", consume.UserID).Error; err != nil {
+						return err
+					}
+					row.Balance += amountToRefund
+					row.TotalConsumed -= amountToRefund
+					if err := db.Save(&row).Error; err != nil {
+						return err
+					}
+
+					tx := model.CreditTransaction{
+						UserID:       consume.UserID,
+						Amount:       amountToRefund,
+						Type:         model.TransactionRefund,
+						TaskID:       taskID,
+						RuleID:       consume.RuleID,
+						BalanceAfter: row.Balance,
+						Note:         refundNote,
+					}
+					if err := db.Create(&tx).Error; err != nil {
+						return err
+					}
+					refundStatus = model.GenerationRefunded
+					refundAmount = amountToRefund
+					refundedAt = &now
+				}
+			}
+		}
+
+		errJSON, _ := json.Marshal(map[string]string{"reason": reason})
+		if err := db.Model(&model.GenerationTask{}).
+			Where("id = ?", taskID).
+			Updates(map[string]any{
+				"status":         model.GenerationFailed,
+				"error_json":     string(errJSON),
+				"upstream_error": reason,
+				"refund_status":  refundStatus,
+				"refund_amount":  refundAmount,
+				"refunded_at":    refundedAt,
+				"next_poll_at":   nil,
+				"completed_at":   &now,
+			}).Error; err != nil {
+			return err
+		}
+
+		result = FailTaskRefundResult{
+			Refunded:     refundStatus == model.GenerationRefunded,
+			Amount:       refundAmount,
+			RefundStatus: refundStatus,
+			RefundedAt:   refundedAt,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // SetConcurrentLimit 修改并发上限。

@@ -184,8 +184,7 @@ func (s *ProviderProxyService) Chat(ctx context.Context, in ChatInput) (*ChatOut
 	}
 
 	// 5) 所有 attempt 失败 → 退点 + 标 task failed
-	_, _, _ = s.credit.Refund(taskID, "上游全部凭证失败")
-	s.markTaskFailed(taskID, lastErr.Error())
+	s.failTaskAndRefund(taskID, lastErr.Error(), "上游全部凭证失败")
 	return nil, lastErr
 }
 
@@ -242,15 +241,19 @@ func (s *ProviderProxyService) tryChatOnce(ctx context.Context, a adapter.ChatAd
 	}
 }
 
-// markTaskFailed 写 generation_task(failed) + error_json。
-func (s *ProviderProxyService) markTaskFailed(taskID, reason string) {
-	now := time.Now()
-	errJSON, _ := json.Marshal(map[string]string{"reason": reason})
-	model.DB.Model(&model.GenerationTask{}).Where("id = ?", taskID).Updates(map[string]any{
-		"status":       model.GenerationFailed,
-		"error_json":   string(errJSON),
-		"completed_at": &now,
-	})
+func (s *ProviderProxyService) failTaskAndRefund(taskID, reason, refundNote string) {
+	if _, err := s.credit.FailTaskAndRefund(taskID, reason, refundNote); err != nil {
+		errJSON, _ := json.Marshal(map[string]string{"reason": reason, "refund_error": err.Error()})
+		now := time.Now()
+		model.DB.Model(&model.GenerationTask{}).Where("id = ?", taskID).Updates(map[string]any{
+			"status":         model.GenerationFailed,
+			"error_json":     string(errJSON),
+			"upstream_error": reason,
+			"refund_status":  model.GenerationRefundFailed,
+			"next_poll_at":   nil,
+			"completed_at":   &now,
+		})
+	}
 }
 
 // extractParams 从客户端请求体里抓出计价规则可能用到的字段。

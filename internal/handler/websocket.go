@@ -244,12 +244,17 @@ func (h *WebSocketHub) NotifyTaskStatus(task *model.GenerationTask) {
 		eventType = "task_failed"
 	}
 	payload, _ := json.Marshal(gin.H{
-		"task_id":      task.ID,
-		"status":       task.Status,
-		"progress":     task.Progress,
-		"result_json":  task.ResultJSON,
-		"error_json":   task.ErrorJSON,
-		"completed_at": task.CompletedAt,
+		"task_id":         task.ID,
+		"status":          task.Status,
+		"progress":        task.Progress,
+		"result_json":     task.ResultJSON,
+		"error_json":      task.ErrorJSON,
+		"upstream_status": task.UpstreamStatus,
+		"upstream_error":  task.UpstreamError,
+		"refund_status":   task.RefundStatus,
+		"refund_amount":   task.RefundAmount,
+		"refunded_at":     task.RefundedAt,
+		"completed_at":    task.CompletedAt,
 	})
 	message, _ := json.Marshal(WSMessage{
 		Type:    eventType,

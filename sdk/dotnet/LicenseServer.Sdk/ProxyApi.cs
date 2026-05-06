@@ -465,6 +465,21 @@ public sealed class ProxyApi
         [JsonPropertyName("result_json")]
         public string? ResultJson { get; set; }
 
+        [JsonPropertyName("upstream_status")]
+        public string UpstreamStatus { get; set; } = string.Empty;
+
+        [JsonPropertyName("upstream_error")]
+        public string UpstreamError { get; set; } = string.Empty;
+
+        [JsonPropertyName("refund_status")]
+        public string RefundStatus { get; set; } = string.Empty;
+
+        [JsonPropertyName("refund_amount")]
+        public long RefundAmount { get; set; }
+
+        [JsonPropertyName("refunded_at")]
+        public DateTime? RefundedAt { get; set; }
+
         [JsonPropertyName("created_at")]
         public DateTime CreatedAt { get; set; }
 

@@ -9,9 +9,7 @@ import (
 	"license-server/internal/service"
 )
 
-// AsyncPoller 周期性扫描 status=running 的生成任务，调上游推进状态。
-//
-// 默认每 5 秒一轮；任务量上去之后可以提到 2-3 秒，但要注意上游 rate limit。
+// AsyncPoller 高频轻量扫描到点任务，单个任务的上游查询节奏由 next_poll_at 控制。
 type AsyncPoller struct {
 	runner   *service.AsyncRunnerService
 	interval time.Duration
@@ -19,10 +17,10 @@ type AsyncPoller struct {
 	doneCh   chan struct{}
 }
 
-// NewAsyncPoller 创建一个 poller。interval 为 0 时默认 5s。
+// NewAsyncPoller 创建一个 poller。interval 为 0 时默认 1s。
 func NewAsyncPoller(runner *service.AsyncRunnerService, interval time.Duration) *AsyncPoller {
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = time.Second
 	}
 	return &AsyncPoller{
 		runner:   runner,

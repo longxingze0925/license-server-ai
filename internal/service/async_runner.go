@@ -113,6 +113,12 @@ type StartOutput struct {
 // 异步 create 容灾参数。
 const asyncCreateMaxAttempts = 3
 const defaultAsyncTaskTimeout = 2 * time.Hour
+const (
+	asyncInitialPollDelay  = 1 * time.Second
+	asyncProgressPollDelay = 2 * time.Second
+	asyncIdlePollDelay     = 5 * time.Second
+	asyncPollMaxBatch      = 50
+)
 
 // StartTask 同步部分：扣点 + create 上游 + 返回 task_id。
 func (r *AsyncRunnerService) StartTask(ctx context.Context, in StartInput) (*StartOutput, error) {
@@ -150,17 +156,20 @@ func (r *AsyncRunnerService) StartTask(ctx context.Context, in StartInput) (*Sta
 
 	// 预扣（一次）并创建任务。
 	taskID := uuid.New().String()
+	nextPollAt := time.Now().Add(asyncInitialPollDelay)
 	task := &model.GenerationTask{
-		BaseModel:   model.BaseModel{ID: taskID},
-		UserID:      in.UserID,
-		TenantID:    in.TenantID,
-		AppID:       in.AppID,
-		Provider:    in.Provider,
-		Mode:        in.Mode,
-		Status:      model.GenerationRunning,
-		RuleID:      priced.RuleID,
-		Cost:        priced.Cost,
-		RequestJSON: string(persistedBody),
+		BaseModel:    model.BaseModel{ID: taskID},
+		UserID:       in.UserID,
+		TenantID:     in.TenantID,
+		AppID:        in.AppID,
+		Provider:     in.Provider,
+		Mode:         in.Mode,
+		Status:       model.GenerationRunning,
+		RuleID:       priced.RuleID,
+		Cost:         priced.Cost,
+		RequestJSON:  string(persistedBody),
+		NextPollAt:   &nextPollAt,
+		PollInterval: int(asyncInitialPollDelay.Seconds()),
 	}
 	if _, _, err := r.credit.ReserveAndCreateTask(ReserveTaskInput{
 		UserID: in.UserID,
@@ -215,8 +224,7 @@ func (r *AsyncRunnerService) StartTask(ctx context.Context, in StartInput) (*Sta
 							err = fmt.Errorf("%w; 清理已保存结果失败: %v", err, cleanupErr)
 						}
 					}
-					_, _, _ = r.credit.Refund(taskID, "保存上游媒体失败")
-					r.markTaskFailed(taskID, err.Error())
+					r.failTaskAndRefund(taskID, err.Error(), "保存上游媒体失败")
 					return nil, err
 				}
 				zeroBytesService(plainKey)
@@ -259,8 +267,7 @@ func (r *AsyncRunnerService) StartTask(ctx context.Context, in StartInput) (*Sta
 	if !adapter.CreateErrorNeedsCredentialRetry(lastErr) {
 		refundReason = "任务创建失败"
 	}
-	_, _, _ = r.credit.Refund(taskID, refundReason)
-	r.markTaskFailed(taskID, lastErr.Error())
+	r.failTaskAndRefund(taskID, lastErr.Error(), refundReason)
 	return nil, lastErr
 }
 
@@ -273,8 +280,7 @@ func (r *AsyncRunnerService) selectCredentialForCreate(in StartInput, excluded [
 
 // PollOnce 轮询所有 status=running 的任务推进一次。返回处理数量。
 //
-// 调用方（worker）每隔几秒调一次。第一版没做任务粒度的 next_poll_at，
-// 是否到点全部一并轮询；任务量起来后再加 next_poll_at 字段做精细化调度。
+// 调用方（worker）高频轻量扫描，到点任务才查上游；单个任务最长 5 秒查一次。
 func (r *AsyncRunnerService) PollOnce(ctx context.Context) (int, error) {
 	recovered, err := r.cleanupTimedOutTasksWithoutUpstreamID(ctx)
 	if err != nil {
@@ -285,8 +291,9 @@ func (r *AsyncRunnerService) PollOnce(ctx context.Context) (int, error) {
 	if err := model.DB.
 		Where("status = ?", model.GenerationRunning).
 		Where("upstream_task_id <> ''").
-		Order("updated_at ASC").
-		Limit(20). // 一次最多推进 20 个，避免长事务
+		Where("(next_poll_at IS NULL OR next_poll_at <= ?)", time.Now()).
+		Order("next_poll_at ASC, updated_at ASC").
+		Limit(asyncPollMaxBatch).
 		Find(&tasks).Error; err != nil {
 		return 0, err
 	}
@@ -324,8 +331,7 @@ func (r *AsyncRunnerService) cleanupTimedOutTasksWithoutUpstreamID(ctx context.C
 
 	for i := range tasks {
 		task := &tasks[i]
-		_, _, _ = r.credit.Refund(task.ID, "任务超时且未获取上游任务编号")
-		r.markTaskFailed(task.ID, fmt.Sprintf("任务超时（>%s），未获取上游任务编号", r.taskTimeout))
+		r.failTaskAndRefund(task.ID, fmt.Sprintf("任务超时（>%s），未获取上游任务编号", r.taskTimeout), "任务超时且未获取上游任务编号")
 	}
 	return len(tasks), nil
 }
@@ -333,8 +339,7 @@ func (r *AsyncRunnerService) cleanupTimedOutTasksWithoutUpstreamID(ctx context.C
 func (r *AsyncRunnerService) advanceOne(ctx context.Context, t *model.GenerationTask) error {
 	// 超时检查
 	if r.taskTimeout > 0 && time.Since(t.CreatedAt) > r.taskTimeout {
-		_, _, _ = r.credit.Refund(t.ID, "任务超时")
-		r.markTaskFailed(t.ID, fmt.Sprintf("任务超时（>%s）", r.taskTimeout))
+		r.failTaskAndRefund(t.ID, fmt.Sprintf("任务超时（>%s）", r.taskTimeout), "任务超时")
 		return nil
 	}
 
@@ -342,8 +347,7 @@ func (r *AsyncRunnerService) advanceOne(ctx context.Context, t *model.Generation
 	cred, err := r.creds.Get(t.CredentialID)
 	if err != nil {
 		// 凭证被删 → 标任务失败 + 退点
-		_, _, _ = r.credit.Refund(t.ID, "凭证已被删除")
-		r.markTaskFailed(t.ID, "凭证已被删除: "+err.Error())
+		r.failTaskAndRefund(t.ID, "凭证已被删除: "+err.Error(), "凭证已被删除")
 		return nil
 	}
 	plainKey, err := r.creds.Decrypt(cred)
@@ -359,27 +363,24 @@ func (r *AsyncRunnerService) advanceOne(ctx context.Context, t *model.Generation
 
 	pollRes, err := a.Poll(ctx, cred, plainKey, t.UpstreamTaskID)
 	if err != nil {
+		r.scheduleNextPoll(t, asyncIdlePollDelay, "", err.Error(), t.Progress, false)
 		return err // 网络抖动等，下次再来
 	}
 
 	switch pollRes.Status {
 	case adapter.AsyncStatusRunning:
-		updates := map[string]any{
-			"progress":   pollRes.Progress,
-			"updated_at": time.Now(),
-		}
-		_ = model.DB.Model(&model.GenerationTask{}).Where("id = ?", t.ID).Updates(updates).Error
+		delay := resolveNextAsyncPollDelay(t.Progress, pollRes.Progress)
+		r.scheduleNextPoll(t, delay, string(pollRes.Status), pollRes.Error, pollRes.Progress, false)
 	case adapter.AsyncStatusFailed:
-		_, _, _ = r.credit.Refund(t.ID, "上游报告失败")
-		r.markTaskFailed(t.ID, pollRes.Error)
+		r.failTaskAndRefund(t.ID, firstNonEmptyService(pollRes.Error, "上游报告失败"), "上游报告失败")
 	case adapter.AsyncStatusSucceeded:
 		if len(pollRes.Media) == 0 {
-			_, _, _ = r.credit.Refund(t.ID, "上游未返回媒体文件")
-			r.markTaskFailed(t.ID, "上游任务成功但未返回任何媒体文件")
+			r.failTaskAndRefund(t.ID, "上游任务成功但未返回任何媒体文件", "上游未返回媒体文件")
 			return nil
 		}
 		if err := r.finalizeSucceeded(ctx, t, cred, plainKey, a, pollRes); err != nil {
 			// 下载阶段失败：保留任务为 running，等下次再试一次；如果反复失败，等 timeout 兜底
+			r.scheduleNextPoll(t, asyncIdlePollDelay, string(adapter.AsyncStatusSucceeded), err.Error(), t.Progress, false)
 			return err
 		}
 	}
@@ -426,10 +427,13 @@ func (r *AsyncRunnerService) finalizeSucceeded(
 	})
 	now := time.Now()
 	updates := map[string]any{
-		"status":       model.GenerationSucceeded,
-		"result_json":  string(resultJSON),
-		"completed_at": &now,
-		"progress":     1.0,
+		"status":          model.GenerationSucceeded,
+		"result_json":     string(resultJSON),
+		"completed_at":    &now,
+		"progress":        1.0,
+		"next_poll_at":    nil,
+		"poll_interval":   0,
+		"upstream_status": string(adapter.AsyncStatusSucceeded),
 	}
 	if err := model.DB.Model(&model.GenerationTask{}).Where("id = ?", t.ID).Updates(updates).Error; err != nil {
 		return err
@@ -498,23 +502,69 @@ func decodeDataURI(uri string) (io.Reader, error) {
 	return bytes.NewReader(data), nil
 }
 
-func (r *AsyncRunnerService) markTaskFailed(taskID, reason string) {
-	now := time.Now()
-	errJSON, _ := json.Marshal(map[string]string{"reason": reason})
-	updates := map[string]any{
-		"status":       model.GenerationFailed,
-		"error_json":   string(errJSON),
-		"completed_at": &now,
+func (r *AsyncRunnerService) failTaskAndRefund(taskID, reason, refundNote string) {
+	if _, err := r.credit.FailTaskAndRefund(taskID, reason, refundNote); err != nil {
+		errJSON, _ := json.Marshal(map[string]string{"reason": reason, "refund_error": err.Error()})
+		now := time.Now()
+		model.DB.Model(&model.GenerationTask{}).Where("id = ?", taskID).Updates(map[string]any{
+			"status":         model.GenerationFailed,
+			"error_json":     string(errJSON),
+			"upstream_error": reason,
+			"refund_status":  model.GenerationRefundFailed,
+			"next_poll_at":   nil,
+			"completed_at":   &now,
+		})
 	}
-	model.DB.Model(&model.GenerationTask{}).Where("id = ?", taskID).Updates(updates)
-
 	var task model.GenerationTask
 	if err := model.DB.First(&task, "id = ?", taskID).Error; err == nil {
 		task.Status = model.GenerationFailed
-		task.ErrorJSON = string(errJSON)
-		task.CompletedAt = &now
 		r.notifyTaskStatus(&task)
 	}
+}
+
+func (r *AsyncRunnerService) scheduleNextPoll(t *model.GenerationTask, delay time.Duration, upstreamStatus, upstreamError string, progress float32, notify bool) {
+	if delay <= 0 {
+		delay = asyncInitialPollDelay
+	}
+	if delay > asyncIdlePollDelay {
+		delay = asyncIdlePollDelay
+	}
+	nextPollAt := time.Now().Add(delay)
+	updates := map[string]any{
+		"progress":      progress,
+		"poll_interval": int(delay.Seconds()),
+		"next_poll_at":  &nextPollAt,
+		"updated_at":    time.Now(),
+	}
+	if upstreamStatus != "" {
+		updates["upstream_status"] = upstreamStatus
+	}
+	if upstreamError != "" {
+		updates["upstream_error"] = upstreamError
+	}
+	_ = model.DB.Model(&model.GenerationTask{}).Where("id = ?", t.ID).Updates(updates).Error
+	if notify {
+		var task model.GenerationTask
+		if err := model.DB.First(&task, "id = ?", t.ID).Error; err == nil {
+			r.notifyTaskStatus(&task)
+		}
+	}
+}
+
+func resolveNextAsyncPollDelay(previousProgress, nextProgress float32) time.Duration {
+	if nextProgress > previousProgress {
+		return asyncProgressPollDelay
+	}
+	return asyncIdlePollDelay
+}
+
+func firstNonEmptyService(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (r *AsyncRunnerService) notifyTaskStatus(task *model.GenerationTask) {

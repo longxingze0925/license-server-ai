@@ -14,24 +14,40 @@ const (
 	GenerationCanceled GenerationStatus = 4
 )
 
+type GenerationRefundStatus string
+
+const (
+	GenerationRefundNone    GenerationRefundStatus = "none"
+	GenerationRefunded      GenerationRefundStatus = "refunded"
+	GenerationRefundFailed  GenerationRefundStatus = "refund_failed"
+	GenerationRefundSkipped GenerationRefundStatus = "skipped"
+)
+
 // GenerationTask 服务端权威任务记录
 type GenerationTask struct {
 	BaseModel
-	UserID         string           `gorm:"type:varchar(36);not null;index:idx_user_status" json:"user_id"`
-	TenantID       string           `gorm:"type:varchar(36);index" json:"tenant_id,omitempty"`
-	AppID          string           `gorm:"type:varchar(36);not null" json:"app_id"`
-	Provider       ProviderKind     `gorm:"type:varchar(16);not null" json:"provider"`
-	Mode           string           `gorm:"type:varchar(32);not null" json:"mode"`
-	CredentialID   string           `gorm:"type:varchar(36)" json:"credential_id,omitempty"`
-	UpstreamTaskID string           `gorm:"type:varchar(128);index:idx_upstream" json:"upstream_task_id,omitempty"`
-	Status         GenerationStatus `gorm:"not null;index:idx_user_status" json:"status"`
-	Progress       float32          `gorm:"not null;default:0" json:"progress"`
-	RuleID         int64            `json:"rule_id,omitempty"`
-	Cost           int              `gorm:"not null;default:0" json:"cost"` // 扣点数（成功保留，失败已退）
-	RequestJSON    string           `gorm:"type:mediumtext;not null" json:"request_json"`
-	ResultJSON     string           `gorm:"type:mediumtext" json:"result_json,omitempty"`
-	ErrorJSON      string           `gorm:"type:text" json:"error_json,omitempty"`
-	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
+	UserID         string                 `gorm:"type:varchar(36);not null;index:idx_user_status" json:"user_id"`
+	TenantID       string                 `gorm:"type:varchar(36);index" json:"tenant_id,omitempty"`
+	AppID          string                 `gorm:"type:varchar(36);not null" json:"app_id"`
+	Provider       ProviderKind           `gorm:"type:varchar(16);not null" json:"provider"`
+	Mode           string                 `gorm:"type:varchar(32);not null" json:"mode"`
+	CredentialID   string                 `gorm:"type:varchar(36)" json:"credential_id,omitempty"`
+	UpstreamTaskID string                 `gorm:"type:varchar(128);index:idx_upstream" json:"upstream_task_id,omitempty"`
+	Status         GenerationStatus       `gorm:"not null;index:idx_user_status" json:"status"`
+	Progress       float32                `gorm:"not null;default:0" json:"progress"`
+	RuleID         int64                  `json:"rule_id,omitempty"`
+	Cost           int                    `gorm:"not null;default:0" json:"cost"` // 扣点数（成功保留，失败已退）
+	RequestJSON    string                 `gorm:"type:mediumtext;not null" json:"request_json"`
+	ResultJSON     string                 `gorm:"type:mediumtext" json:"result_json,omitempty"`
+	ErrorJSON      string                 `gorm:"type:text" json:"error_json,omitempty"`
+	NextPollAt     *time.Time             `gorm:"index" json:"next_poll_at,omitempty"`
+	PollInterval   int                    `gorm:"not null;default:1" json:"poll_interval_seconds"`
+	UpstreamStatus string                 `gorm:"type:varchar(64)" json:"upstream_status,omitempty"`
+	UpstreamError  string                 `gorm:"type:text" json:"upstream_error,omitempty"`
+	RefundStatus   GenerationRefundStatus `gorm:"type:varchar(20);not null;default:'none'" json:"refund_status"`
+	RefundAmount   int64                  `gorm:"not null;default:0" json:"refund_amount"`
+	RefundedAt     *time.Time             `json:"refunded_at,omitempty"`
+	CompletedAt    *time.Time             `json:"completed_at,omitempty"`
 }
 
 func (GenerationTask) TableName() string {

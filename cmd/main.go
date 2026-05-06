@@ -177,9 +177,9 @@ func main() {
 		service.NewGenerationFileService(),
 		adapter.NewAsyncRegistry(),
 	)
-	asyncPoller := worker.NewAsyncPoller(asyncRunner, 5*time.Second)
+	asyncPoller := worker.NewAsyncPoller(asyncRunner, time.Second)
 	asyncPoller.Start()
-	log.Println("异步任务轮询 worker 已启动（5s 间隔）")
+	log.Println("异步任务轮询 worker 已启动（1s 扫描，到点任务最长 5s 查询上游）")
 	defer asyncPoller.Stop()
 
 	// 启动过期文件清理 worker（每小时一次）

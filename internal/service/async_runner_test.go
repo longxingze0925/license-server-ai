@@ -49,3 +49,20 @@ func TestExistingSavedFileIDsClampsExtraRows(t *testing.T) {
 		t.Fatalf("fileIDs = %#v", fileIDs)
 	}
 }
+
+func TestResolveNextAsyncPollDelayUsesFastPollWhenProgressChanges(t *testing.T) {
+	got := resolveNextAsyncPollDelay(0.2, 0.3)
+	if got != asyncProgressPollDelay {
+		t.Fatalf("poll delay = %s, want %s", got, asyncProgressPollDelay)
+	}
+}
+
+func TestResolveNextAsyncPollDelayCapsIdlePollAtFiveSeconds(t *testing.T) {
+	got := resolveNextAsyncPollDelay(0.3, 0.3)
+	if got != asyncIdlePollDelay {
+		t.Fatalf("poll delay = %s, want %s", got, asyncIdlePollDelay)
+	}
+	if got > 5*time.Second {
+		t.Fatalf("poll delay should not exceed 5s, got %s", got)
+	}
+}
