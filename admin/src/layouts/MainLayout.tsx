@@ -79,7 +79,7 @@ const allMenuItems: MenuItem[] = [
     label: 'AI 转发',
     children: [
       { key: '/provider-credentials', icon: <ApiOutlined />, label: 'Provider 凭证' },
-      { key: '/pricing-rules', icon: <TagsOutlined />, label: '计价规则' },
+      { key: '/pricing-rules', icon: <TagsOutlined />, label: '模型价格' },
     ],
   },
   {
