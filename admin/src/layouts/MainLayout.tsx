@@ -51,6 +51,7 @@ const allMenuItems: MenuItem[] = [
       { key: '/customers', icon: <UsergroupAddOutlined />, label: '客户管理' },
       { key: '/licenses', icon: <KeyOutlined />, label: '授权码' },
       { key: '/subscriptions', icon: <CrownOutlined />, label: '订阅' },
+      { key: '/user-credits', icon: <DollarOutlined />, label: '用户额度' },
     ],
   },
   {
@@ -79,7 +80,6 @@ const allMenuItems: MenuItem[] = [
     children: [
       { key: '/provider-credentials', icon: <ApiOutlined />, label: 'Provider 凭证' },
       { key: '/pricing-rules', icon: <TagsOutlined />, label: '计价规则' },
-      { key: '/user-credits', icon: <DollarOutlined />, label: '用户额度' },
     ],
   },
   {
@@ -136,10 +136,10 @@ const getMenuItemsByRole = (role?: string): MenuItem[] => {
 
 const getParentKeyByPath = (path: string) => {
   if (['/', '/analytics'].includes(path)) return 'workspace';
-  if (['/customers', '/licenses', '/subscriptions'].includes(path)) return 'customer-auth';
+  if (['/customers', '/licenses', '/subscriptions', '/user-credits'].includes(path)) return 'customer-auth';
   if (['/devices', '/blacklist', '/instructions'].includes(path)) return 'device';
   if (['/apps', '/secure-scripts'].includes(path) || path.startsWith('/apps/')) return 'app-management';
-  if (['/provider-credentials', '/pricing-rules', '/user-credits'].includes(path)) return 'ai';
+  if (['/provider-credentials', '/pricing-rules'].includes(path)) return 'ai';
   if (['/team', '/backups', '/audit', '/export', '/settings'].includes(path)) return 'system';
   return '';
 };

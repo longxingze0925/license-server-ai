@@ -229,6 +229,7 @@ export const userCreditApi = {
   list: (params?: { keyword?: string; page?: number; page_size?: number }) =>
     request.get('/admin/credits/users', { params }),
   get: (id: string) => request.get(`/admin/credits/users/${id}`),
+  enable: (id: string) => request.post(`/admin/credits/users/${id}`),
   adjust: (id: string, data: { amount: number; note?: string }) =>
     request.post(`/admin/credits/users/${id}/adjust`, data),
   setLimits: (id: string, data: { concurrent_limit: number }) =>

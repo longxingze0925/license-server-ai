@@ -524,6 +524,7 @@ func SetupRouter(r *gin.Engine, asyncRunner *service.AsyncRunnerService) {
 		{
 			credits.GET("/users", adminCreditHandler.AdminListUsers)
 			credits.GET("/users/:id", adminCreditHandler.AdminGetUser)
+			credits.POST("/users/:id", middleware.PermissionMiddleware("credit:update"), adminCreditHandler.AdminEnableUser)
 			credits.POST("/users/:id/adjust", middleware.PermissionMiddleware("credit:update"), adminCreditHandler.AdminAdjust)
 			credits.PUT("/users/:id/limits", middleware.PermissionMiddleware("credit:update"), adminCreditHandler.AdminSetLimits)
 			credits.GET("/users/:id/transactions", adminCreditHandler.AdminUserTransactions)

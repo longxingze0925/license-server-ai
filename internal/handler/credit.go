@@ -82,6 +82,20 @@ func (h *CreditHandler) AdminGetUser(c *gin.Context) {
 	response.Success(c, row)
 }
 
+// AdminEnableUser POST /admin/credits/users/:id
+func (h *CreditHandler) AdminEnableUser(c *gin.Context) {
+	row, err := h.svc.EnableForTenant(c.Param("id"), middleware.GetTenantID(c))
+	if err != nil {
+		if errors.Is(err, service.ErrUserNotInTenant) {
+			response.NotFound(c, "用户不存在")
+			return
+		}
+		response.ServerError(c, err.Error())
+		return
+	}
+	response.Success(c, row)
+}
+
 type adjustRequest struct {
 	Amount int64  `json:"amount" binding:"required"` // 正负皆可
 	Note   string `json:"note"`

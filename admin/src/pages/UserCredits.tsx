@@ -13,6 +13,7 @@ import {
   Statistic,
   Card,
   Empty,
+  Select,
 } from 'antd';
 import {
   EditOutlined,
@@ -22,8 +23,7 @@ import {
   SearchOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
-import { userCreditApi } from '../api';
+import { customerApi, userCreditApi } from '../api';
 
 interface UserCreditRow {
   user_id: string;
@@ -49,6 +49,12 @@ interface TxRow {
   created_at: string;
 }
 
+interface CustomerOption {
+  id: string;
+  email: string;
+  name?: string;
+}
+
 const TYPE_TAG: Record<string, { color: string; label: string }> = {
   adjust: { color: 'blue', label: '调整' },
   consume: { color: 'orange', label: '消费' },
@@ -61,7 +67,6 @@ const USER_TYPE_TAG: Record<string, { color: string; label: string }> = {
 };
 
 const UserCredits: React.FC = () => {
-  const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<UserCreditRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -82,6 +87,12 @@ const UserCredits: React.FC = () => {
   const [txList, setTxList] = useState<TxRow[]>([]);
   const [txLoading, setTxLoading] = useState(false);
 
+  const [enableOpen, setEnableOpen] = useState(false);
+  const [enableLoading, setEnableLoading] = useState(false);
+  const [customerLoading, setCustomerLoading] = useState(false);
+  const [customers, setCustomers] = useState<CustomerOption[]>([]);
+  const [enableForm] = Form.useForm();
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
@@ -92,6 +103,31 @@ const UserCredits: React.FC = () => {
   }, [keyword, page, pageSize]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  const fetchCustomers = async (keyword = '') => {
+    setCustomerLoading(true);
+    try {
+      const result: any = await customerApi.list({ keyword, page: 1, page_size: 50, status: 'active' });
+      setCustomers(result?.list || []);
+    } finally { setCustomerLoading(false); }
+  };
+
+  const openEnable = () => {
+    enableForm.resetFields();
+    setEnableOpen(true);
+    fetchCustomers();
+  };
+
+  const submitEnable = async () => {
+    const v = await enableForm.validateFields();
+    setEnableLoading(true);
+    try {
+      await userCreditApi.enable(v.customer_id);
+      message.success('已添加到用户额度');
+      setEnableOpen(false);
+      fetchData();
+    } finally { setEnableLoading(false); }
+  };
 
   const openAdjust = (row: UserCreditRow) => {
     setAdjustTarget(row);
@@ -186,7 +222,7 @@ const UserCredits: React.FC = () => {
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={{ margin: 0 }}>用户额度</h2>
         <Space>
-          <Button icon={<PlusOutlined />} onClick={() => navigate('/customers?create=1')}>添加客户</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openEnable}>添加额度用户</Button>
           <Input
             allowClear placeholder="按邮箱/姓名搜索" style={{ width: 220 }}
             prefix={<SearchOutlined />} value={keyword}
@@ -201,8 +237,8 @@ const UserCredits: React.FC = () => {
         columns={columns} dataSource={data} rowKey={r => `${r.user_type || 'user'}:${r.user_id}`} loading={loading}
         locale={{
           emptyText: (
-            <Empty description={keyword ? '没有匹配的客户' : '暂无客户，先添加客户后再设置额度'}>
-              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/customers?create=1')}>去添加客户</Button>
+            <Empty description={keyword ? '没有匹配的额度用户' : '暂无额度用户，请先添加额度用户'}>
+              <Button type="primary" icon={<PlusOutlined />} onClick={openEnable}>添加额度用户</Button>
             </Empty>
           ),
         }}
@@ -212,6 +248,40 @@ const UserCredits: React.FC = () => {
           onChange: (p, ps) => { setPage(p); setPageSize(ps); },
         }}
       />
+
+      {/* 添加额度用户 */}
+      <Modal
+        title="添加额度用户"
+        open={enableOpen}
+        onOk={submitEnable}
+        onCancel={() => setEnableOpen(false)}
+        confirmLoading={enableLoading}
+        destroyOnClose
+      >
+        <Form form={enableForm} layout="vertical" preserve={false}>
+          <Form.Item
+            name="customer_id"
+            label="客户"
+            rules={[{ required: true, message: '请选择客户' }]}
+            extra="只会开通额度记录，不会创建新客户；客户不存在时请先到客户管理添加。"
+          >
+            <Select
+              showSearch
+              placeholder="搜索并选择客户"
+              filterOption={false}
+              loading={customerLoading}
+              onSearch={fetchCustomers}
+              notFoundContent={customerLoading ? '搜索中...' : '暂无客户'}
+            >
+              {customers.map(customer => (
+                <Select.Option key={customer.id} value={customer.id}>
+                  {customer.email}{customer.name ? ` (${customer.name})` : ''}
+                </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+        </Form>
+      </Modal>
 
       {/* 调余额 */}
       <Modal
