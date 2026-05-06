@@ -35,7 +35,16 @@ type VeoAdapter struct{}
 func (VeoAdapter) Provider() model.ProviderKind { return model.ProviderVeo }
 
 func (a VeoAdapter) Create(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, body []byte) (*CreateResult, error) {
-	if cred.Mode == "adapter" || cred.Mode == "duoyuan" {
+	if cred.Mode == "duoyuan" {
+		body = injectDefaultModel(body, cred.DefaultModel)
+		var err error
+		body, err = buildDuoYuanVideoBody(body, parseServerUploads(body))
+		if err != nil {
+			return nil, err
+		}
+		return createDuoYuanVideo(ctx, cred, plainKey, body)
+	}
+	if cred.Mode == "adapter" {
 		return (SoraAdapter{}).Create(ctx, cred, plainKey, body)
 	}
 	// GoogleNative：默认
@@ -94,7 +103,10 @@ func (a VeoAdapter) Create(ctx context.Context, cred *model.ProviderCredential, 
 }
 
 func (a VeoAdapter) Poll(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, upstreamTaskID string) (*PollResult, error) {
-	if cred.Mode == "adapter" || cred.Mode == "duoyuan" {
+	if cred.Mode == "duoyuan" {
+		return pollDuoYuanVideo(ctx, cred, plainKey, upstreamTaskID)
+	}
+	if cred.Mode == "adapter" {
 		return (SoraAdapter{}).Poll(ctx, cred, plainKey, upstreamTaskID)
 	}
 	upURL := fmt.Sprintf("%s/v1beta/%s?key=%s",

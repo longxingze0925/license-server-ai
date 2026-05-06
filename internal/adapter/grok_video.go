@@ -196,12 +196,24 @@ func isGrokThirdPartyMode(cred *model.ProviderCredential) bool {
 	}
 }
 
+func isGrokDuoYuanMode(cred *model.ProviderCredential) bool {
+	return grokCredentialMode(cred) == "duoyuan"
+}
+
 func (a GrokVideoAdapter) createOpenAICompatible(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, body []byte) (*CreateResult, error) {
 	body = injectDefaultModel(body, cred.DefaultModel)
 	var err error
-	body, err = buildGrokThirdPartyGenerateBody(body, parseServerUploads(body))
+	uploads := parseServerUploads(body)
+	if isGrokDuoYuanMode(cred) {
+		body, err = buildDuoYuanVideoBody(body, uploads)
+	} else {
+		body, err = buildGrokThirdPartyGenerateBody(body, uploads)
+	}
 	if err != nil {
 		return nil, err
+	}
+	if isGrokDuoYuanMode(cred) {
+		return createDuoYuanVideo(ctx, cred, plainKey, body)
 	}
 
 	url := strings.TrimRight(cred.UpstreamBase, "/") + "/v1/videos/generations"
@@ -220,7 +232,7 @@ func (a GrokVideoAdapter) createOpenAICompatible(ctx context.Context, cred *mode
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, newUpstreamHTTPError("create", resp.StatusCode, respBody, 200)
+		return nil, newUpstreamHTTPError("create "+url, resp.StatusCode, respBody, 200)
 	}
 
 	var parsed struct {
@@ -248,6 +260,10 @@ func (a GrokVideoAdapter) createOpenAICompatible(ctx context.Context, cred *mode
 }
 
 func (a GrokVideoAdapter) pollOpenAICompatible(ctx context.Context, cred *model.ProviderCredential, plainKey []byte, upstreamTaskID string) (*PollResult, error) {
+	if isGrokDuoYuanMode(cred) {
+		return pollDuoYuanVideo(ctx, cred, plainKey, upstreamTaskID)
+	}
+
 	url := strings.TrimRight(cred.UpstreamBase, "/") + "/v1/videos/generations/" + upstreamTaskID
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -160,10 +160,10 @@ func TestBuildGrokThirdPartyGenerateBody_AllowsLongReferenceDuration(t *testing.
 	}
 }
 
-func TestGrokCreate_ThirdPartyModeUsesCompatibleEndpoint(t *testing.T) {
+func TestGrokCreate_DuoYuanModeUsesDuoYuanEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/videos/generations" {
-			t.Fatalf("path = %q, want /v1/videos/generations", r.URL.Path)
+		if r.URL.Path != "/api/v1/video/generations" {
+			t.Fatalf("path = %q, want /api/v1/video/generations", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer key" {
 			t.Fatalf("authorization = %q", got)
@@ -172,14 +172,14 @@ func TestGrokCreate_ThirdPartyModeUsesCompatibleEndpoint(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
-		if _, ok := body["duration_seconds"]; !ok {
-			t.Fatalf("request body should keep duration_seconds: %#v", body)
+		if _, ok := body["durationSeconds"]; !ok {
+			t.Fatalf("request body should include durationSeconds: %#v", body)
 		}
-		if _, ok := body["duration"]; ok {
-			t.Fatalf("third-party body should not add duration: %#v", body)
+		if _, ok := body["duration_seconds"]; !ok {
+			t.Fatalf("request body should keep duration_seconds for compatibility: %#v", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"task-1"}`))
+		_, _ = w.Write([]byte(`{"code":200,"data":{"taskId":"task-1"}}`))
 	}))
 	defer server.Close()
 
@@ -193,6 +193,63 @@ func TestGrokCreate_ThirdPartyModeUsesCompatibleEndpoint(t *testing.T) {
 	}
 	if res.UpstreamTaskID != "task-1" {
 		t.Fatalf("task id = %q, want task-1", res.UpstreamTaskID)
+	}
+}
+
+func TestGrokCreate_SuChuangModeKeepsCompatibleEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/videos/generations" {
+			t.Fatalf("path = %q, want /v1/videos/generations", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"task-1"}`))
+	}))
+	defer server.Close()
+
+	res, err := (GrokVideoAdapter{}).Create(context.Background(), &model.ProviderCredential{
+		Mode:         "suchuang",
+		UpstreamBase: server.URL,
+		DefaultModel: "grok-video",
+	}, []byte("key"), []byte(`{"prompt":"test","duration_seconds":8}`))
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if res.UpstreamTaskID != "task-1" {
+		t.Fatalf("task id = %q, want task-1", res.UpstreamTaskID)
+	}
+}
+
+func TestGrokPoll_DuoYuanModeParsesResultJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/video/generations" {
+			t.Fatalf("path = %q, want /api/v1/video/generations", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("task_id"); got != "request-1" {
+			t.Fatalf("task_id = %q, want request-1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":{"state":"success","resultJson":"{\"resultUrls\":[\"https://cdn.example.test/duoyuan.mp4\"],\"videoDuration\":8,\"videoSize\":\"1920x1080\"}"}}`))
+	}))
+	defer server.Close()
+
+	res, err := (GrokVideoAdapter{}).Poll(context.Background(), &model.ProviderCredential{
+		Mode:         "duoyuan",
+		UpstreamBase: server.URL,
+	}, []byte("key"), "request-1")
+	if err != nil {
+		t.Fatalf("Poll returned error: %v", err)
+	}
+	if res.Status != AsyncStatusSucceeded {
+		t.Fatalf("status = %v, want succeeded", res.Status)
+	}
+	if len(res.Media) != 1 {
+		t.Fatalf("media count = %d, want 1", len(res.Media))
+	}
+	if res.Media[0].DownloadURL != "https://cdn.example.test/duoyuan.mp4" {
+		t.Fatalf("download url = %q", res.Media[0].DownloadURL)
+	}
+	if res.Media[0].DurationMs != 8000 || res.Media[0].Width != 1920 || res.Media[0].Height != 1080 {
+		t.Fatalf("media metadata = %#v", res.Media[0])
 	}
 }
 
@@ -232,7 +289,7 @@ func TestGrokPoll_ThirdPartyModeParsesCompatibleURLFields(t *testing.T) {
 	defer server.Close()
 
 	res, err := (GrokVideoAdapter{}).Poll(context.Background(), &model.ProviderCredential{
-		Mode:         "duoyuan",
+		Mode:         "suchuang",
 		UpstreamBase: server.URL,
 	}, []byte("key"), "request-1")
 	if err != nil {

@@ -415,12 +415,30 @@ const ProviderCredentials: React.FC = () => {
             <Select options={modeOptions} placeholder="选择接入方式（mode）" disabled={!!current} />
           </Form.Item>
 
-          {selectedProvider === 'grok' && selectedMode && selectedMode !== 'official' && (
+          {selectedProvider === 'grok' && selectedMode === 'duoyuan' && (
             <Alert
               showIcon
               type="info"
               style={{ marginBottom: 16 }}
-              message="该模式会下发为客户端可选生成通道；上游需兼容 /v1/videos/generations 异步视频接口。"
+              message="Grok 多元模式会调用 /api/v1/video/generations；默认模型建议填 grok-video-3。"
+            />
+          )}
+
+          {selectedProvider === 'grok' && selectedMode === 'suchuang' && (
+            <Alert
+              showIcon
+              type="info"
+              style={{ marginBottom: 16 }}
+              message="Grok 速创模式会调用 /v1/videos/generations；默认模型建议按速创平台文档填写。"
+            />
+          )}
+
+          {selectedProvider === 'veo' && selectedMode === 'duoyuan' && (
+            <Alert
+              showIcon
+              type="info"
+              style={{ marginBottom: 16 }}
+              message="Veo 多元模式会调用 /api/v1/video/generations；默认模型建议填 veo3。"
             />
           )}
 

@@ -106,8 +106,8 @@ func TestBuildProxyCapabilitiesExposesGrokThirdPartyModes(t *testing.T) {
 	if duoyuan.Mode != "duoyuan" {
 		t.Fatalf("first mode = %q, want duoyuan", duoyuan.Mode)
 	}
-	if duoyuan.DefaultModel != "grok-video" {
-		t.Fatalf("duoyuan default_model = %q, want grok-video", duoyuan.DefaultModel)
+	if duoyuan.DefaultModel != "grok-video-3" {
+		t.Fatalf("duoyuan default_model = %q, want grok-video-3", duoyuan.DefaultModel)
 	}
 	if !containsString(duoyuan.SupportedModes, "image_to_video") {
 		t.Fatalf("duoyuan supported_modes = %#v, want image_to_video", duoyuan.SupportedModes)
@@ -151,7 +151,6 @@ func TestBuildProxyCapabilitiesDoesNotExposeUnsupportedGenerationModes(t *testin
 			Mode:         "duoyuan",
 			ChannelName:  "Veo 多元",
 			UpstreamBase: "https://veo.example.test",
-			DefaultModel: "veo-3.1-generate-preview",
 			Enabled:      true,
 			HealthStatus: model.CredentialHealthUnknown,
 		},
@@ -181,8 +180,11 @@ func TestBuildProxyCapabilitiesDoesNotExposeUnsupportedGenerationModes(t *testin
 	if !containsString(veo.Channels[0].SupportedModes, "text_to_video") {
 		t.Fatalf("veo modes = %#v, want text_to_video", veo.Channels[0].SupportedModes)
 	}
-	if containsString(veo.Channels[0].SupportedModes, "image_to_video") {
-		t.Fatalf("veo duoyuan should not expose image_to_video: %#v", veo.Channels[0].SupportedModes)
+	if !containsString(veo.Channels[0].SupportedModes, "image_to_video") {
+		t.Fatalf("veo duoyuan should expose image_to_video: %#v", veo.Channels[0].SupportedModes)
+	}
+	if veo.Channels[0].DefaultModel != "veo3" {
+		t.Fatalf("veo duoyuan default_model = %q, want veo3", veo.Channels[0].DefaultModel)
 	}
 
 	gpt := findCapabilityProvider(got, "gpt")

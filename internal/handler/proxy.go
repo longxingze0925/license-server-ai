@@ -255,6 +255,9 @@ func supportedGenerationModes(provider model.ProviderKind, mode, modelID string)
 		if mode == "google" {
 			return []string{"text_to_video", "image_to_video"}
 		}
+		if mode == "duoyuan" {
+			return []string{"text_to_video", "image_to_video"}
+		}
 		return []string{"text_to_video"}
 	case model.ProviderGrok:
 		return []string{"text_to_video", "image_to_video"}
@@ -340,6 +343,9 @@ func providerDefaultModel(provider model.ProviderKind, mode string) string {
 		}
 		return ""
 	case model.ProviderVeo:
+		if mode == "duoyuan" {
+			return "veo3"
+		}
 		return "veo-3.1-generate-preview"
 	case model.ProviderSora:
 		if mode == "async" {
@@ -348,6 +354,9 @@ func providerDefaultModel(provider model.ProviderKind, mode string) string {
 		return ""
 	case model.ProviderGrok:
 		if mode == "duoyuan" || mode == "suchuang" {
+			if mode == "duoyuan" {
+				return "grok-video-3"
+			}
 			return "grok-video"
 		}
 		return "grok-imagine-video"
