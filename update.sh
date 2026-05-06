@@ -101,10 +101,12 @@ get_frontend_status_url() {
     local domain
     local http_port
     local https_port
+    local nginx_proxy_enabled
     server_ip=$(get_env_value "SERVER_IP" || echo "127.0.0.1")
     domain=$(get_env_value "DOMAIN" || echo "")
     http_port=$(get_env_value "HTTP_PORT" || echo "80")
     https_port=$(get_env_value "HTTPS_PORT" || echo "443")
+    nginx_proxy_enabled=$(get_env_value "NGINX_PROXY_ENABLED" || echo "no")
 
     local host_name="${domain:-$server_ip}"
     if [ "$SSL_MODE" = "http" ]; then
@@ -116,11 +118,29 @@ get_frontend_status_url() {
         return 0
     fi
 
-    if [ "$https_port" = "443" ]; then
+    if [ "$nginx_proxy_enabled" = "yes" ] || [ "$https_port" = "443" ]; then
         echo "https://${host_name}/"
     else
         echo "https://${host_name}:${https_port}/"
     fi
+}
+
+get_frontend_container_health_url() {
+    if [ "$COMPOSE_FILE" = "docker-compose.https.yml" ]; then
+        echo "https://127.0.0.1:443/"
+    else
+        echo "http://127.0.0.1:80/"
+    fi
+}
+
+check_backend_container_health() {
+    compose_cmd exec -T backend wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health >/dev/null 2>&1
+}
+
+check_frontend_container_health() {
+    local frontend_health_url
+    frontend_health_url=$(get_frontend_container_health_url)
+    compose_cmd exec -T frontend wget --no-verbose --tries=1 --spider --no-check-certificate "$frontend_health_url" >/dev/null 2>&1
 }
 
 # 显示当前版本
@@ -182,7 +202,7 @@ restart_services() {
 
     # 检查后端健康状态
     for i in {1..30}; do
-        if compose_cmd exec -T backend wget --no-verbose --tries=1 --spider http://localhost:8080/health 2>/dev/null; then
+        if check_backend_container_health; then
             log_success "后端服务就绪"
             break
         fi
@@ -193,12 +213,8 @@ restart_services() {
     compose_cmd up -d --no-deps frontend
 
     log_info "等待前端服务就绪..."
-    local frontend_health_url="http://127.0.0.1:80/"
-    if [ "$COMPOSE_FILE" = "docker-compose.https.yml" ]; then
-        frontend_health_url="https://127.0.0.1:443/"
-    fi
     for i in {1..30}; do
-        if compose_cmd exec -T frontend wget --no-verbose --tries=1 --spider --no-check-certificate "$frontend_health_url" 2>/dev/null; then
+        if check_frontend_container_health; then
             log_success "前端服务就绪"
             break
         fi
@@ -217,20 +233,27 @@ check_status() {
     echo ""
     log_info "健康检查..."
 
-    # 检查后端
-    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health | grep -q "200"; then
+    # 检查后端容器内部健康，避免 HTTPS/Nginx 模式下宿主机端口未暴露导致误报。
+    if check_backend_container_health; then
         log_success "后端服务: 正常"
     else
         log_error "后端服务: 异常"
     fi
 
-    # 检查前端
+    # 检查前端容器内部健康。
+    if check_frontend_container_health; then
+        log_success "前端服务: 正常"
+    else
+        log_error "前端服务: 异常（容器内部检查失败）"
+    fi
+
+    # 额外输出公网访问状态，不作为容器健康判断。
     local frontend_url
     frontend_url=$(get_frontend_status_url)
     if curl -k -s -o /dev/null -w "%{http_code}" "$frontend_url" | grep -q "200\|301\|302"; then
-        log_success "前端服务: 正常"
+        log_success "公网访问: 正常 (${frontend_url})"
     else
-        log_error "前端服务: 异常 (${frontend_url})"
+        log_warning "公网访问: 异常或暂未生效 (${frontend_url})"
     fi
 }
 

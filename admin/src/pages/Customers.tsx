@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  Table, Button, Space, Tag, Modal, Form, Input, Select, message, Card,
+  Table, Button, Space, Tag, Modal, Form, Input, Select, message, Card, Alert,
   Popconfirm, Tooltip, Drawer, Descriptions, Tabs, List
 } from 'antd';
 import {
@@ -73,6 +73,7 @@ const Customers: React.FC = () => {
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [modalVisible, setModalVisible] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [detailDrawerVisible, setDetailDrawerVisible] = useState(false);
@@ -139,6 +140,7 @@ const Customers: React.FC = () => {
 
   const openCreateModal = () => {
     setEditingCustomer(null);
+    setSubmitError('');
     form.resetFields();
     setModalVisible(true);
   };
@@ -164,6 +166,7 @@ const Customers: React.FC = () => {
     if (!canUpdateCustomer) return;
 
     setSubmitting(true);
+    setSubmitError('');
     try {
       await customerApi.create(values);
       message.success('客户创建成功');
@@ -171,7 +174,8 @@ const Customers: React.FC = () => {
       form.resetFields();
       fetchCustomers(pagination.current, pagination.pageSize);
     } catch (e: any) {
-      message.error(e?.message || '客户创建失败，请检查邮箱、密码和权限');
+      const errorMessage = e?.message || '客户创建失败，请检查邮箱、密码和权限';
+      setSubmitError(errorMessage);
     } finally {
       setSubmitting(false);
     }
@@ -182,6 +186,7 @@ const Customers: React.FC = () => {
 
     if (!editingCustomer) return;
     setSubmitting(true);
+    setSubmitError('');
     try {
       await customerApi.update(editingCustomer.id, values);
       message.success('客户更新成功');
@@ -190,7 +195,8 @@ const Customers: React.FC = () => {
       form.resetFields();
       fetchCustomers(pagination.current, pagination.pageSize);
     } catch (e: any) {
-      message.error(e?.message || '客户更新失败，请稍后重试');
+      const errorMessage = e?.message || '客户更新失败，请稍后重试';
+      setSubmitError(errorMessage);
     } finally {
       setSubmitting(false);
     }
@@ -303,6 +309,7 @@ const Customers: React.FC = () => {
                 icon={<EditOutlined />}
                 onClick={() => {
                   setEditingCustomer(record);
+                  setSubmitError('');
                   form.setFieldsValue(record);
                   setModalVisible(true);
                 }}
@@ -477,6 +484,7 @@ const Customers: React.FC = () => {
         onCancel={() => {
           setModalVisible(false);
           setEditingCustomer(null);
+          setSubmitError('');
           form.resetFields();
         }}
         footer={null}
@@ -491,6 +499,14 @@ const Customers: React.FC = () => {
             message.warning(first || '请先补全客户信息');
           }}
         >
+          {submitError && (
+            <Alert
+              type="error"
+              showIcon
+              message={submitError}
+              style={{ marginBottom: 16 }}
+            />
+          )}
           <Form.Item
             name="email"
             label="邮箱"

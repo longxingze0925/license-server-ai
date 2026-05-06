@@ -38,6 +38,13 @@ const needsCSRFToken = (method?: string) => {
   return !['get', 'head', 'options'].includes(normalized);
 };
 
+const getErrorMessage = (error: any, fallback = '网络错误') => (
+  error?.response?.data?.message
+  || error?.response?.data?.error
+  || error?.message
+  || fallback
+);
+
 const fetchCSRFToken = async (authToken: string) => {
   if (csrfToken && csrfTokenAuth === authToken) {
     return csrfToken;
@@ -136,8 +143,9 @@ request.interceptors.response.use(
     if (error.response?.status === 403 && String(error.response?.data?.message || '').includes('CSRF')) {
       clearCSRFToken();
     }
-    message.error(error.response?.data?.message || '网络错误');
-    return Promise.reject(error);
+    const errorMessage = getErrorMessage(error);
+    message.error(errorMessage);
+    return Promise.reject(new Error(errorMessage));
   }
 );
 
