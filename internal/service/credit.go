@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"time"
 
 	"license-server/internal/model"
 
@@ -411,47 +412,87 @@ func (s *CreditService) CheckIntegrity() ([]IntegrityIssue, error) {
 	return issues, nil
 }
 
-// ListUsers 后台分页列出所有有额度记录的用户。
+// ListUsers 后台分页列出可设置额度的用户。
+//
+// 客户即使还没有 user_credits 记录，也需要出现在后台额度页；否则新客户无法
+// 从页面上被选择并首次充值。团队成员只保留已有额度记录的兼容展示。
 type UserCreditWithEmail struct {
-	model.UserCredit
-	Email    string `json:"email"`
-	Name     string `json:"name"`
-	UserType string `json:"user_type"`
+	UserID          string    `gorm:"column:user_id" json:"user_id"`
+	Balance         int64     `gorm:"column:balance" json:"balance"`
+	TotalTopup      int64     `gorm:"column:total_topup" json:"total_topup"`
+	TotalConsumed   int64     `gorm:"column:total_consumed" json:"total_consumed"`
+	ConcurrentLimit int       `gorm:"column:concurrent_limit" json:"concurrent_limit"`
+	UpdatedAt       time.Time `gorm:"column:updated_at" json:"updated_at"`
+	CreatedAt       time.Time `gorm:"column:created_at" json:"created_at"`
+	Email           string    `gorm:"column:email" json:"email"`
+	Name            string    `gorm:"column:name" json:"name"`
+	UserType        string    `gorm:"column:user_type" json:"user_type"`
 }
 
 func (s *CreditService) ListUsers(tenantID, keyword string, page, pageSize int) ([]UserCreditWithEmail, int64, error) {
-	base := model.DB.Table("user_credits AS uc").
-		Joins("LEFT JOIN team_members AS tm ON tm.id = uc.user_id AND tm.tenant_id = ?", tenantID).
-		Joins("LEFT JOIN customers AS c ON c.id = uc.user_id AND c.tenant_id = ?", tenantID).
-		Where("tm.id IS NOT NULL OR c.id IS NOT NULL")
-	if keyword != "" {
-		like := "%" + keyword + "%"
-		base = base.Where("tm.email LIKE ? OR tm.name LIKE ? OR c.email LIKE ? OR c.name LIKE ?", like, like, like, like)
-	}
-
-	var total int64
-	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-
 	if page <= 0 {
 		page = 1
 	}
 	if pageSize <= 0 || pageSize > 200 {
 		pageSize = 50
 	}
+
+	customerWhere := "c.tenant_id = ? AND c.deleted_at IS NULL"
+	teamWhere := "tm.tenant_id = ? AND tm.deleted_at IS NULL"
+	customerArgs := []interface{}{tenantID}
+	teamArgs := []interface{}{tenantID}
+	if keyword != "" {
+		like := "%" + keyword + "%"
+		customerWhere += " AND (c.email LIKE ? OR c.name LIKE ? OR c.company LIKE ?)"
+		customerArgs = append(customerArgs, like, like, like)
+		teamWhere += " AND (tm.email LIKE ? OR tm.name LIKE ?)"
+		teamArgs = append(teamArgs, like, like)
+	}
+
+	unionSQL := `
+		SELECT
+			c.id AS user_id,
+			COALESCE(uc.balance, 0) AS balance,
+			COALESCE(uc.total_topup, 0) AS total_topup,
+			COALESCE(uc.total_consumed, 0) AS total_consumed,
+			COALESCE(uc.concurrent_limit, 1) AS concurrent_limit,
+			COALESCE(uc.updated_at, c.updated_at) AS updated_at,
+			COALESCE(uc.created_at, c.created_at) AS created_at,
+			c.email AS email,
+			c.name AS name,
+			'customer' AS user_type
+		FROM customers AS c
+		LEFT JOIN user_credits AS uc ON uc.user_id = c.id
+		WHERE ` + customerWhere + `
+		UNION ALL
+		SELECT
+			tm.id AS user_id,
+			uc.balance AS balance,
+			uc.total_topup AS total_topup,
+			uc.total_consumed AS total_consumed,
+			uc.concurrent_limit AS concurrent_limit,
+			uc.updated_at AS updated_at,
+			uc.created_at AS created_at,
+			tm.email AS email,
+			tm.name AS name,
+			'team_member' AS user_type
+		FROM team_members AS tm
+		JOIN user_credits AS uc ON uc.user_id = tm.id
+		WHERE ` + teamWhere
+
+	args := make([]interface{}, 0, len(customerArgs)+len(teamArgs))
+	args = append(args, customerArgs...)
+	args = append(args, teamArgs...)
+
+	var total int64
+	if err := model.DB.Raw("SELECT COUNT(*) FROM ("+unionSQL+") AS credit_users", args...).Scan(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
 	var rows []UserCreditWithEmail
-	if err := base.Session(&gorm.Session{}).
-		Select(`
-			uc.*,
-			COALESCE(NULLIF(tm.email, ''), c.email) AS email,
-			COALESCE(NULLIF(tm.name, ''), c.name) AS name,
-			CASE WHEN c.id IS NOT NULL THEN 'customer' ELSE 'team_member' END AS user_type
-		`).
-		Order("uc.updated_at DESC").
-		Offset((page - 1) * pageSize).
-		Limit(pageSize).
-		Find(&rows).Error; err != nil {
+	dataArgs := append([]interface{}{}, args...)
+	dataArgs = append(dataArgs, pageSize, (page-1)*pageSize)
+	if err := model.DB.Raw("SELECT * FROM ("+unionSQL+") AS credit_users ORDER BY updated_at DESC, email ASC LIMIT ? OFFSET ?", dataArgs...).Scan(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	return rows, total, nil

@@ -12,6 +12,7 @@ import {
   Drawer,
   Statistic,
   Card,
+  Empty,
 } from 'antd';
 import {
   EditOutlined,
@@ -19,7 +20,9 @@ import {
   DollarOutlined,
   HistoryOutlined,
   SearchOutlined,
+  PlusOutlined,
 } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import { userCreditApi } from '../api';
 
 interface UserCreditRow {
@@ -58,6 +61,7 @@ const USER_TYPE_TAG: Record<string, { color: string; label: string }> = {
 };
 
 const UserCredits: React.FC = () => {
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<UserCreditRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -182,6 +186,7 @@ const UserCredits: React.FC = () => {
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={{ margin: 0 }}>用户额度</h2>
         <Space>
+          <Button icon={<PlusOutlined />} onClick={() => navigate('/customers')}>添加客户</Button>
           <Input
             allowClear placeholder="按邮箱/姓名搜索" style={{ width: 220 }}
             prefix={<SearchOutlined />} value={keyword}
@@ -194,6 +199,13 @@ const UserCredits: React.FC = () => {
 
       <Table
         columns={columns} dataSource={data} rowKey={r => `${r.user_type || 'user'}:${r.user_id}`} loading={loading}
+        locale={{
+          emptyText: (
+            <Empty description={keyword ? '没有匹配的客户' : '暂无客户，先添加客户后再设置额度'}>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/customers')}>去添加客户</Button>
+            </Empty>
+          ),
+        }}
         pagination={{
           current: page, pageSize, total, showSizeChanger: true,
           showTotal: t => `共 ${t} 个用户`,
