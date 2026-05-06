@@ -70,6 +70,7 @@ security:
   api_rate_limit: 1000
   auth_rate_limit: 1000
   client_rate_limit: 1000
+  client_read_rate_limit: 1000
   client_auth_rate_limit: 1000
   heartbeat_rate_limit: 1000
   allowed_origins:

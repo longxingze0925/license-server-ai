@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,10 +85,55 @@ func RateLimitMiddleware(limiter *RateLimiter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := c.ClientIP()
 		if !limiter.Allow(key) {
+			c.Header("Retry-After", "10")
 			response.Error(c, 429, "请求过于频繁，请稍后再试")
 			c.Abort()
 			return
 		}
 		c.Next()
 	}
+}
+
+// RateLimitByMethodMiddleware lets polling/read endpoints use a wider bucket
+// while keeping write endpoints on the stricter limiter.
+func RateLimitByMethodMiddleware(readLimiter, writeLimiter *RateLimiter) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		limiter := writeLimiter
+		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead || c.Request.Method == http.MethodOptions {
+			limiter = readLimiter
+		}
+		if limiter == nil {
+			c.Next()
+			return
+		}
+		RateLimitMiddleware(limiter)(c)
+	}
+}
+
+// RateLimitExceptPathsMiddleware applies a limiter unless the request path
+// belongs to a route group with its own dedicated limiter.
+func RateLimitExceptPathsMiddleware(limiter *RateLimiter, excludedPrefixes ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		for _, prefix := range excludedPrefixes {
+			if hasExcludedPathPrefix(path, prefix) {
+				c.Next()
+				return
+			}
+		}
+		RateLimitMiddleware(limiter)(c)
+	}
+}
+
+func hasExcludedPathPrefix(path, prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	if path == prefix {
+		return true
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return strings.HasPrefix(path, prefix)
 }

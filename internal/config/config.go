@@ -151,6 +151,7 @@ type SecurityConfig struct {
 	APIRateLimit        int `yaml:"api_rate_limit"`
 	AuthRateLimit       int `yaml:"auth_rate_limit"`
 	ClientRateLimit     int `yaml:"client_rate_limit"`
+	ClientReadRateLimit int `yaml:"client_read_rate_limit"`
 	ClientAuthRateLimit int `yaml:"client_auth_rate_limit"`
 	HeartbeatRateLimit  int `yaml:"heartbeat_rate_limit"`
 }
@@ -266,6 +267,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Security.ClientRateLimit == 0 {
 		cfg.Security.ClientRateLimit = 30
+	}
+	if cfg.Security.ClientReadRateLimit == 0 {
+		cfg.Security.ClientReadRateLimit = 300
 	}
 	if cfg.Security.ClientAuthRateLimit == 0 {
 		cfg.Security.ClientAuthRateLimit = 5

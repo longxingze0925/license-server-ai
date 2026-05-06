@@ -30,6 +30,7 @@ func SetupRouter(r *gin.Engine, asyncRunner *service.AsyncRunnerService) {
 	limiter := middleware.NewRateLimiter(cfg.Security.APIRateLimit, time.Minute)                  // 普通接口
 	authLimiter := middleware.NewRateLimiter(cfg.Security.AuthRateLimit, time.Minute)             // 认证接口
 	clientLimiter := middleware.NewRateLimiter(cfg.Security.ClientRateLimit, time.Minute)         // 客户端接口
+	clientReadLimiter := middleware.NewRateLimiter(cfg.Security.ClientReadRateLimit, time.Minute) // 客户端读接口
 	clientAuthLimiter := middleware.NewRateLimiter(cfg.Security.ClientAuthRateLimit, time.Minute) // 客户端认证
 	heartbeatLimiter := middleware.NewRateLimiter(cfg.Security.HeartbeatRateLimit, time.Minute)   // 心跳接口
 
@@ -40,7 +41,7 @@ func SetupRouter(r *gin.Engine, asyncRunner *service.AsyncRunnerService) {
 
 	// API 路由组
 	api := r.Group("/api")
-	api.Use(middleware.RateLimitMiddleware(limiter))
+	api.Use(middleware.RateLimitExceptPathsMiddleware(limiter, "/api/client"))
 
 	// API 健康检查（供 Docker/K8s 使用）
 	api.GET("/health", func(c *gin.Context) {
@@ -83,7 +84,7 @@ func SetupRouter(r *gin.Engine, asyncRunner *service.AsyncRunnerService) {
 
 	// ==================== 客户端接口 ====================
 	client := api.Group("/client")
-	client.Use(middleware.RateLimitMiddleware(clientLimiter))
+	client.Use(middleware.RateLimitByMethodMiddleware(clientReadLimiter, clientLimiter))
 	{
 		// 授权码模式（认证接口使用更严格限制）
 		clientAuth := client.Group("/auth")

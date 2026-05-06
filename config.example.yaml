@@ -112,6 +112,7 @@ security:
   api_rate_limit: 300
   auth_rate_limit: 20
   client_rate_limit: 120
+  client_read_rate_limit: 600
   client_auth_rate_limit: 30
   heartbeat_rate_limit: 300
 
