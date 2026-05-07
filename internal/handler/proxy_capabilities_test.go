@@ -50,11 +50,11 @@ func TestBuildProxyCapabilitiesExposesEnabledOfficialGrok(t *testing.T) {
 	}
 
 	channel := provider.Channels[0]
-	if channel.ChannelID != "grok-official" {
+	if channel.ChannelID != "client-model:grok:grok-imagine:video" {
 		t.Fatalf("channel_id = %q", channel.ChannelID)
 	}
-	if channel.Mode != "official" {
-		t.Fatalf("mode = %q, want official", channel.Mode)
+	if channel.Mode != "" {
+		t.Fatalf("mode = %q, want empty client route mode", channel.Mode)
 	}
 	if !channel.IsDefault {
 		t.Fatal("first available channel should be default")
@@ -99,15 +99,15 @@ func TestBuildProxyCapabilitiesExposesGrokThirdPartyModes(t *testing.T) {
 	if provider == nil {
 		t.Fatal("grok provider should be exposed")
 	}
-	if len(provider.Channels) != 2 {
-		t.Fatalf("channels = %d, want 2", len(provider.Channels))
+	if len(provider.Channels) != 1 {
+		t.Fatalf("channels = %d, want 1", len(provider.Channels))
 	}
 	duoyuan := provider.Channels[0]
-	if duoyuan.Mode != "duoyuan" {
-		t.Fatalf("first mode = %q, want duoyuan", duoyuan.Mode)
+	if duoyuan.Mode != "" {
+		t.Fatalf("client route mode = %q, want empty", duoyuan.Mode)
 	}
-	if duoyuan.DefaultModel != "grok-video-3" {
-		t.Fatalf("duoyuan default_model = %q, want grok-video-3", duoyuan.DefaultModel)
+	if duoyuan.DefaultModel != "grok-imagine" {
+		t.Fatalf("client default_model = %q, want grok-imagine", duoyuan.DefaultModel)
 	}
 	if !containsString(duoyuan.SupportedModes, "image_to_video") {
 		t.Fatalf("duoyuan supported_modes = %#v, want image_to_video", duoyuan.SupportedModes)
@@ -115,15 +115,8 @@ func TestBuildProxyCapabilitiesExposesGrokThirdPartyModes(t *testing.T) {
 	if !containsString(duoyuan.SupportedDurations, "8") {
 		t.Fatalf("duoyuan supported_durations = %#v, want 8", duoyuan.SupportedDurations)
 	}
-	suchuang := provider.Channels[1]
-	if suchuang.Mode != "suchuang" {
-		t.Fatalf("second mode = %q, want suchuang", suchuang.Mode)
-	}
-	if suchuang.DefaultModel != "grok-video" {
-		t.Fatalf("suchuang default_model = %q, want grok-video", suchuang.DefaultModel)
-	}
-	if !containsString(suchuang.SupportedDurations, "30") {
-		t.Fatalf("suchuang supported_durations = %#v, want 30", suchuang.SupportedDurations)
+	if !containsString(duoyuan.SupportedDurations, "30") {
+		t.Fatalf("merged supported_durations = %#v, want 30", duoyuan.SupportedDurations)
 	}
 }
 
@@ -183,8 +176,8 @@ func TestBuildProxyCapabilitiesDoesNotExposeUnsupportedGenerationModes(t *testin
 	if !containsString(veo.Channels[0].SupportedModes, "image_to_video") {
 		t.Fatalf("veo duoyuan should expose image_to_video: %#v", veo.Channels[0].SupportedModes)
 	}
-	if veo.Channels[0].DefaultModel != "veo3" {
-		t.Fatalf("veo duoyuan default_model = %q, want veo3", veo.Channels[0].DefaultModel)
+	if veo.Channels[0].DefaultModel != "veo-3.1" {
+		t.Fatalf("veo client default_model = %q, want veo-3.1", veo.Channels[0].DefaultModel)
 	}
 
 	gpt := findCapabilityProvider(got, "gpt")
@@ -282,11 +275,104 @@ func TestBuildProxyCapabilitiesDefaultsFirstVisibleChannel(t *testing.T) {
 	if sora == nil || len(sora.Channels) != 1 {
 		t.Fatalf("sora provider/channels = %#v", sora)
 	}
-	if sora.Channels[0].ChannelID != "sora-async" {
-		t.Fatalf("channel_id = %q, want sora-async", sora.Channels[0].ChannelID)
+	if sora.Channels[0].ChannelID != "client-model:sora:sora-2:video" {
+		t.Fatalf("channel_id = %q, want client-model:sora:sora-2:video", sora.Channels[0].ChannelID)
 	}
 	if !sora.Channels[0].IsDefault {
 		t.Fatal("first visible channel should be default")
+	}
+}
+
+func TestBuildProxyCapabilitiesCollapsesThirdPartyRoutesToClientModels(t *testing.T) {
+	got := buildProxyCapabilities([]model.ProviderCredential{
+		{
+			BaseModel: model.BaseModel{ID: "veo-duoyuan", CreatedAt: time.Unix(1, 0)},
+			Provider:     model.ProviderVeo,
+			Mode:         "duoyuan",
+			ChannelName:  "Veo 多元",
+			UpstreamBase: "https://duoyuan.example.test",
+			DefaultModel: "veo3",
+			Enabled:      true,
+			HealthStatus: model.CredentialHealthUnknown,
+		},
+		{
+			BaseModel: model.BaseModel{ID: "grok-duoyuan", CreatedAt: time.Unix(2, 0)},
+			Provider:     model.ProviderGrok,
+			Mode:         "duoyuan",
+			ChannelName:  "Grok 多元",
+			UpstreamBase: "https://duoyuan.example.test",
+			DefaultModel: "grok-video-3",
+			Enabled:      true,
+			HealthStatus: model.CredentialHealthUnknown,
+		},
+		{
+			BaseModel: model.BaseModel{ID: "grok-suchuang", CreatedAt: time.Unix(3, 0)},
+			Provider:     model.ProviderGrok,
+			Mode:         "suchuang",
+			ChannelName:  "Grok 速创",
+			UpstreamBase: "https://suchuang.example.test",
+			DefaultModel: "grok-video",
+			Enabled:      true,
+			HealthStatus: model.CredentialHealthUnknown,
+		},
+	})
+
+	veo := findCapabilityProvider(got, "veo")
+	if veo == nil || len(veo.Channels) != 1 {
+		t.Fatalf("veo provider/channels = %#v", veo)
+	}
+	if veo.Channels[0].ChannelName != "后台路由" || veo.Channels[0].DefaultModel != "veo-3.1" {
+		t.Fatalf("veo client channel = %#v", veo.Channels[0])
+	}
+	if veo.Channels[0].Models[0].DisplayName != "Veo 3.1" {
+		t.Fatalf("veo model display = %q", veo.Channels[0].Models[0].DisplayName)
+	}
+
+	grok := findCapabilityProvider(got, "grok")
+	if grok == nil || len(grok.Channels) != 1 {
+		t.Fatalf("grok provider/channels = %#v", grok)
+	}
+	if grok.Channels[0].DefaultModel != "grok-imagine" {
+		t.Fatalf("grok client model = %q", grok.Channels[0].DefaultModel)
+	}
+	if grok.Channels[0].Models[0].DisplayName != "Grok Imagine" {
+		t.Fatalf("grok model display = %q", grok.Channels[0].Models[0].DisplayName)
+	}
+	if !containsString(grok.Channels[0].SupportedDurations, "30") {
+		t.Fatalf("grok durations should merge routes: %#v", grok.Channels[0].SupportedDurations)
+	}
+}
+
+func TestSelectClientModelRouteUsesConfiguredPriority(t *testing.T) {
+	rows := []model.ProviderCredential{
+		{
+			BaseModel: model.BaseModel{ID: "grok-low", CreatedAt: time.Unix(1, 0)},
+			Provider:     model.ProviderGrok,
+			Mode:         "duoyuan",
+			ChannelName:  "Grok 多元低优先级",
+			DefaultModel: "grok-video-3",
+			Enabled:      true,
+			Priority:     1,
+			HealthStatus: model.CredentialHealthUnknown,
+		},
+		{
+			BaseModel: model.BaseModel{ID: "grok-high", CreatedAt: time.Unix(2, 0)},
+			Provider:     model.ProviderGrok,
+			Mode:         "suchuang",
+			ChannelName:  "Grok 速创高优先级",
+			DefaultModel: "grok-video",
+			Enabled:      true,
+			Priority:     9,
+			HealthStatus: model.CredentialHealthUnknown,
+		},
+	}
+
+	route, ok := selectClientModelRoute(rows, model.ProviderGrok, "grok-imagine", model.PricingScopeVideo)
+	if !ok {
+		t.Fatal("route should be selected")
+	}
+	if route.CredentialID != "grok-high" || route.Mode != "suchuang" || route.UpstreamModel != "grok-video" {
+		t.Fatalf("route = %#v", route)
 	}
 }
 

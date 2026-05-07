@@ -91,6 +91,23 @@ type proxyCapabilityModel struct {
 	SupportedScopes []string `json:"supported_scopes"`
 }
 
+type clientModelRoute struct {
+	Provider      model.ProviderKind
+	ClientModel   string
+	DisplayName   string
+	Scope         model.PricingScope
+	Mode          string
+	CredentialID  string
+	UpstreamModel string
+	SupportedModes        []string
+	SupportedScopes       []string
+	SupportedAspectRatios []string
+	SupportedDurations    []string
+	IsDefault     bool
+	Priority      int
+	SortOrder     int
+}
+
 // Capabilities GET /api/proxy/capabilities
 //
 // 客户端用它把后台真实启用的 provider_credentials 变成渠道/mode/model 选择；
@@ -169,6 +186,7 @@ func buildProxyCapabilities(rows []model.ProviderCredential) proxyCapabilitiesRe
 			continue
 		}
 		ensureCapabilityDefaultChannel(channels)
+		channels = collapseCapabilityChannelsForClient(provider, channels)
 
 		defaultChannel := channels[0]
 		providers = append(providers, proxyCapabilityProvider{
@@ -185,6 +203,248 @@ func buildProxyCapabilities(rows []model.ProviderCredential) proxyCapabilitiesRe
 		return providers[i].Provider < providers[j].Provider
 	})
 	return proxyCapabilitiesResponse{Providers: providers}
+}
+
+func collapseCapabilityChannelsForClient(provider model.ProviderKind, channels []proxyCapabilityChannel) []proxyCapabilityChannel {
+	routes := make([]clientModelRoute, 0, len(channels))
+	for _, channel := range channels {
+		models := channel.Models
+		if len(models) == 0 && strings.TrimSpace(channel.DefaultModel) != "" {
+			models = []proxyCapabilityModel{{
+				ID:              channel.DefaultModel,
+				DisplayName:     channel.DefaultModel,
+				SupportedModes:  nonNilStrings(channel.SupportedModes),
+				SupportedScopes: nonNilStrings(channel.SupportedScopes),
+			}}
+		}
+		for _, m := range models {
+			upstreamModel := firstNonEmpty(m.ID, channel.DefaultModel)
+			clientModel := publicClientModelID(provider, upstreamModel)
+			if clientModel == "" {
+				clientModel = upstreamModel
+			}
+			if strings.TrimSpace(clientModel) == "" {
+				continue
+			}
+			scopes := nonNilStrings(m.SupportedScopes)
+			if len(scopes) == 0 {
+				scopes = nonNilStrings(channel.SupportedScopes)
+			}
+			scope := routePricingScope(scopes)
+			routes = append(routes, clientModelRoute{
+				Provider:               provider,
+				ClientModel:            clientModel,
+				DisplayName:            publicClientModelDisplayName(provider, clientModel, firstNonEmpty(m.DisplayName, upstreamModel)),
+				Scope:                  scope,
+				Mode:                   channel.Mode,
+				CredentialID:           channel.ChannelID,
+				UpstreamModel:          upstreamModel,
+				SupportedModes:         nonNilStrings(firstNonEmptyStringSlice(m.SupportedModes, channel.SupportedModes)),
+				SupportedScopes:        scopes,
+				SupportedAspectRatios:  nonNilStrings(channel.SupportedAspectRatios),
+				SupportedDurations:     nonNilStrings(channel.SupportedDurations),
+				IsDefault:              channel.IsDefault,
+				Priority:               channel.Priority,
+				SortOrder:              channel.SortOrder,
+			})
+		}
+	}
+
+	if len(routes) == 0 {
+		return channels
+	}
+	sort.SliceStable(routes, lessClientModelRoute(routes))
+	grouped := make(map[string][]clientModelRoute)
+	var keys []string
+	for _, route := range routes {
+		key := clientModelRouteKey(route.Provider, route.ClientModel, route.Scope)
+		if _, ok := grouped[key]; !ok {
+			keys = append(keys, key)
+		}
+		grouped[key] = append(grouped[key], route)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		a := grouped[keys[i]][0]
+		b := grouped[keys[j]][0]
+		if a.Provider != b.Provider {
+			return a.Provider < b.Provider
+		}
+		if a.SortOrder != b.SortOrder {
+			return a.SortOrder < b.SortOrder
+		}
+		return a.DisplayName < b.DisplayName
+	})
+
+	out := make([]proxyCapabilityChannel, 0, len(keys))
+	for index, key := range keys {
+		group := grouped[key]
+		sort.SliceStable(group, lessClientModelRoute(group))
+		first := group[0]
+		modes := mergeRouteStrings(group, func(route clientModelRoute) []string { return route.SupportedModes })
+		scopes := mergeRouteStrings(group, func(route clientModelRoute) []string { return route.SupportedScopes })
+		aspectRatios := mergeRouteStrings(group, func(route clientModelRoute) []string { return route.SupportedAspectRatios })
+		durations := mergeRouteStrings(group, func(route clientModelRoute) []string { return route.SupportedDurations })
+		out = append(out, proxyCapabilityChannel{
+			ChannelID:             "client-model:" + string(first.Provider) + ":" + first.ClientModel + ":" + string(first.Scope),
+			ChannelName:           "后台路由",
+			Mode:                  "",
+			BaseURL:               "",
+			DefaultModel:          first.ClientModel,
+			Priority:              first.Priority,
+			SortOrder:             index,
+			IsDefault:             index == 0,
+			Enabled:               true,
+			HealthStatus:          string(model.CredentialHealthHealthy),
+			SupportedModes:        modes,
+			SupportedScopes:       scopes,
+			SupportedAspectRatios: aspectRatios,
+			SupportedDurations:    durations,
+			Models: []proxyCapabilityModel{{
+				ID:              first.ClientModel,
+				DisplayName:     first.DisplayName,
+				SupportedModes:  modes,
+				SupportedScopes: scopes,
+			}},
+		})
+	}
+	return out
+}
+
+func buildClientModelRoutes(rows []model.ProviderCredential) []clientModelRoute {
+	routes := make([]clientModelRoute, 0, len(rows))
+	for index, row := range rows {
+		if !row.Enabled || row.HealthStatus == model.CredentialHealthDown {
+			continue
+		}
+		channel := credentialToCapabilityChannel(row, index)
+		if len(channel.SupportedModes) == 0 && len(channel.SupportedScopes) == 0 {
+			continue
+		}
+		models := channel.Models
+		if len(models) == 0 && strings.TrimSpace(channel.DefaultModel) != "" {
+			models = []proxyCapabilityModel{{
+				ID:              channel.DefaultModel,
+				DisplayName:     channel.DefaultModel,
+				SupportedModes:  nonNilStrings(channel.SupportedModes),
+				SupportedScopes: nonNilStrings(channel.SupportedScopes),
+			}}
+		}
+		for _, m := range models {
+			upstreamModel := firstNonEmpty(m.ID, channel.DefaultModel)
+			clientModel := publicClientModelID(row.Provider, upstreamModel)
+			if clientModel == "" {
+				clientModel = upstreamModel
+			}
+			if strings.TrimSpace(clientModel) == "" {
+				continue
+			}
+			scopes := nonNilStrings(m.SupportedScopes)
+			if len(scopes) == 0 {
+				scopes = nonNilStrings(channel.SupportedScopes)
+			}
+			routes = append(routes, clientModelRoute{
+				Provider:              row.Provider,
+				ClientModel:           clientModel,
+				DisplayName:           publicClientModelDisplayName(row.Provider, clientModel, firstNonEmpty(m.DisplayName, upstreamModel)),
+				Scope:                 routePricingScope(scopes),
+				Mode:                  channel.Mode,
+				CredentialID:          row.ID,
+				UpstreamModel:         upstreamModel,
+				SupportedModes:        nonNilStrings(firstNonEmptyStringSlice(m.SupportedModes, channel.SupportedModes)),
+				SupportedScopes:       scopes,
+				SupportedAspectRatios: nonNilStrings(channel.SupportedAspectRatios),
+				SupportedDurations:    nonNilStrings(channel.SupportedDurations),
+				IsDefault:             channel.IsDefault,
+				Priority:              channel.Priority,
+				SortOrder:             channel.SortOrder,
+			})
+		}
+	}
+	sort.SliceStable(routes, lessClientModelRoute(routes))
+	return routes
+}
+
+func selectClientModelRoute(rows []model.ProviderCredential, provider model.ProviderKind, clientModel string, scope model.PricingScope) (*clientModelRoute, bool) {
+	clientModel = normalizePublicClientModelID(provider, clientModel)
+	if clientModel == "" {
+		return nil, false
+	}
+	routes := buildClientModelRoutes(rows)
+	for i := range routes {
+		route := &routes[i]
+		if route.Provider != provider || route.ClientModel != clientModel {
+			continue
+		}
+		if scope != "" && route.Scope != "" && route.Scope != scope {
+			continue
+		}
+		return route, true
+	}
+	return nil, false
+}
+
+func lessClientModelRoute(routes []clientModelRoute) func(i, j int) bool {
+	return func(i, j int) bool {
+		if routes[i].IsDefault != routes[j].IsDefault {
+			return routes[i].IsDefault
+		}
+		if routes[i].Priority != routes[j].Priority {
+			return routes[i].Priority > routes[j].Priority
+		}
+		if routes[i].SortOrder != routes[j].SortOrder {
+			return routes[i].SortOrder < routes[j].SortOrder
+		}
+		return routes[i].CredentialID < routes[j].CredentialID
+	}
+}
+
+func firstNonEmptyStringSlice(values ...[]string) []string {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return []string{}
+}
+
+func mergeRouteStrings(routes []clientModelRoute, selectValues func(clientModelRoute) []string) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, route := range routes {
+		for _, value := range selectValues(route) {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			key := strings.ToLower(value)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func routePricingScope(scopes []string) model.PricingScope {
+	for _, scope := range scopes {
+		switch strings.ToLower(strings.TrimSpace(scope)) {
+		case string(model.PricingScopeImage):
+			return model.PricingScopeImage
+		case string(model.PricingScopeVideo):
+			return model.PricingScopeVideo
+		case string(model.PricingScopeAnalysis):
+			return model.PricingScopeAnalysis
+		case string(model.PricingScopeChat), "text":
+			return model.PricingScopeChat
+		}
+	}
+	return model.PricingScopeVideo
+}
+
+func clientModelRouteKey(provider model.ProviderKind, clientModel string, scope model.PricingScope) string {
+	return string(provider) + ":" + strings.ToLower(strings.TrimSpace(clientModel)) + ":" + string(scope)
 }
 
 func ensureCapabilityDefaultChannel(channels []proxyCapabilityChannel) {
@@ -365,6 +625,47 @@ func providerDefaultModel(provider model.ProviderKind, mode string) string {
 	default:
 		return ""
 	}
+}
+
+func publicClientModelID(provider model.ProviderKind, upstreamModel string) string {
+	return normalizePublicClientModelID(provider, upstreamModel)
+}
+
+func normalizePublicClientModelID(provider model.ProviderKind, modelID string) string {
+	value := strings.ToLower(strings.TrimSpace(modelID))
+	value = strings.ReplaceAll(value, "_", "-")
+	switch provider {
+	case model.ProviderVeo:
+		switch value {
+		case "veo3", "veo-3", "veo-3.1", "veo-3.1-generate-preview":
+			return "veo-3.1"
+		case "veo3-fast", "veo-3-fast", "veo-3.1-fast", "veo-3.1-fast-generate-preview":
+			return "veo-3.1-fast"
+		}
+	case model.ProviderGrok:
+		switch value {
+		case "grok-video", "grok-video-3", "grok-imagine-video":
+			return "grok-imagine"
+		}
+	}
+	return value
+}
+
+func publicClientModelDisplayName(provider model.ProviderKind, clientModel, fallback string) string {
+	switch provider {
+	case model.ProviderVeo:
+		switch normalizePublicClientModelID(provider, clientModel) {
+		case "veo-3.1":
+			return "Veo 3.1"
+		case "veo-3.1-fast":
+			return "Veo 3.1 Fast"
+		}
+	case model.ProviderGrok:
+		if normalizePublicClientModelID(provider, clientModel) == "grok-imagine" {
+			return "Grok Imagine"
+		}
+	}
+	return firstNonEmpty(fallback, clientModel)
 }
 
 func isGptImageModel(modelID string) bool {
@@ -877,6 +1178,35 @@ func (h *ProxyHandler) Generate(c *gin.Context) {
 	}
 	mode, scope := extractModeAndScope(rawBody, c)
 	mode = resolveProxyRequestMode(providerKind, mode)
+	credentialID := extractCredentialID(rawBody, c)
+	clientModel := extractClientModel(rawBody, c)
+	if clientModel != "" {
+		if h.credService == nil {
+			cleanup()
+			response.ServerError(c, "Provider 凭证服务未初始化")
+			return
+		}
+		rows, err := h.listEnabledCredentials(middleware.GetTenantID(c))
+		if err != nil {
+			cleanup()
+			response.ServerError(c, "查询模型路由失败: "+err.Error())
+			return
+		}
+		route, ok := selectClientModelRoute(rows, providerKind, clientModel, scope)
+		if !ok {
+			cleanup()
+			response.BadRequest(c, "客户端模型未配置可用渠道: "+clientModel)
+			return
+		}
+		mode = route.Mode
+		credentialID = route.CredentialID
+		rawBody, persistedBody, err = rewriteGenerateModel(rawBody, persistedBody, route.UpstreamModel, route.ClientModel)
+		if err != nil {
+			cleanup()
+			response.BadRequest(c, "处理客户端模型失败: "+err.Error())
+			return
+		}
+	}
 	appID, err := resolveProxyAppID(c, rawBody)
 	if err != nil {
 		cleanup()
@@ -891,7 +1221,7 @@ func (h *ProxyHandler) Generate(c *gin.Context) {
 		Provider:      providerKind,
 		Mode:          mode,
 		Scope:         scope,
-		CredentialID:  extractCredentialID(rawBody, c),
+		CredentialID:  credentialID,
 		Body:          rawBody,
 		PersistedBody: persistedBody,
 	})
@@ -977,6 +1307,50 @@ func extractCredentialID(body []byte, c *gin.Context) string {
 		return ""
 	}
 	return id
+}
+
+func extractClientModel(body []byte, c *gin.Context) string {
+	modelID := firstNonEmpty(c.Query("client_model"), c.Query("public_model"))
+	if modelID == "" {
+		var probe map[string]any
+		if json.Unmarshal(body, &probe) == nil {
+			if v, ok := probe["client_model"].(string); ok {
+				modelID = v
+			} else if v, ok := probe["public_model"].(string); ok {
+				modelID = v
+			}
+		}
+	}
+	return strings.TrimSpace(modelID)
+}
+
+func rewriteGenerateModel(body []byte, persistedBody []byte, upstreamModel string, clientModel string) ([]byte, []byte, error) {
+	rewrittenBody, err := rewriteJSONModel(body, upstreamModel, clientModel)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(persistedBody) == 0 {
+		return rewrittenBody, rewrittenBody, nil
+	}
+	rewrittenPersisted, err := rewriteJSONModel(persistedBody, upstreamModel, clientModel)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rewrittenBody, rewrittenPersisted, nil
+}
+
+func rewriteJSONModel(body []byte, upstreamModel string, clientModel string) ([]byte, error) {
+	var probe map[string]any
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(upstreamModel) != "" {
+		probe["model"] = strings.TrimSpace(upstreamModel)
+	}
+	if strings.TrimSpace(clientModel) != "" {
+		probe["client_model"] = strings.TrimSpace(clientModel)
+	}
+	return json.Marshal(probe)
 }
 
 func resolveProxyAppID(c *gin.Context, body []byte) (string, error) {

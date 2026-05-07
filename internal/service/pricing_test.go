@@ -120,6 +120,17 @@ func TestExtractParams_NormalizesVeoGoogleParameters(t *testing.T) {
 	}
 }
 
+func TestExtractParams_UsesClientModelForPricing(t *testing.T) {
+	params := extractParams([]byte(`{"model":"grok-video-3","client_model":"grok-imagine","duration_seconds":8}`))
+
+	if params["model"] != "grok-imagine" {
+		t.Fatalf("model = %#v, want client model", params["model"])
+	}
+	if params["client_model"] != "grok-imagine" {
+		t.Fatalf("client_model = %#v", params["client_model"])
+	}
+}
+
 func TestNormalizePricingParamsAddsDurationAliases(t *testing.T) {
 	params := NormalizePricingParams(map[string]any{"duration_seconds": float64(10)})
 	if params["duration"] != float64(10) {

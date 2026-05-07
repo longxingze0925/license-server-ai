@@ -66,7 +66,15 @@ public sealed class ProxyApi
 
     public async Task<GenerateResult> GenerateAsync(string providerSlug, object body, string? mode, string? scope, string? channelId, CancellationToken ct = default)
     {
-        var query = BuildProxyQuery(mode, scope, channelId);
+        var query = BuildProxyQuery(mode, scope, channelId, clientModel: null);
+        var result = await SendProxyJsonAsync(HttpMethod.Post, $"/{providerSlug}/generate{query}", body, static () => new GenerateResult(), ct).ConfigureAwait(false);
+        Normalize(result);
+        return result;
+    }
+
+    public async Task<GenerateResult> GenerateAsync(string providerSlug, object body, string? mode, string? scope, string? channelId, string? clientModel, CancellationToken ct = default)
+    {
+        var query = BuildProxyQuery(mode, scope, channelId, clientModel);
         var result = await SendProxyJsonAsync(HttpMethod.Post, $"/{providerSlug}/generate{query}", body, static () => new GenerateResult(), ct).ConfigureAwait(false);
         Normalize(result);
         return result;
@@ -76,13 +84,16 @@ public sealed class ProxyApi
         => GenerateAsync(providerSlug, body, uploads, mode, scope, channelId: null, ct);
 
     public async Task<GenerateResult> GenerateAsync(string providerSlug, object body, IReadOnlyList<GenerateUploadFile> uploads, string? mode, string? scope, string? channelId, CancellationToken ct = default)
+        => await GenerateAsync(providerSlug, body, uploads, mode, scope, channelId, clientModel: null, ct).ConfigureAwait(false);
+
+    public async Task<GenerateResult> GenerateAsync(string providerSlug, object body, IReadOnlyList<GenerateUploadFile> uploads, string? mode, string? scope, string? channelId, string? clientModel, CancellationToken ct = default)
     {
         if (uploads.Count == 0)
         {
-            return await GenerateAsync(providerSlug, body, mode, scope, channelId, ct).ConfigureAwait(false);
+            return await GenerateAsync(providerSlug, body, mode, scope, channelId, clientModel, ct).ConfigureAwait(false);
         }
 
-        var query = BuildProxyQuery(mode, scope, channelId);
+        var query = BuildProxyQuery(mode, scope, channelId, clientModel);
         using var content = new MultipartFormDataContent();
         var payload = JsonSerializer.Serialize(body, LicenseServerClient.JsonOptions);
         content.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload");
@@ -289,8 +300,11 @@ public sealed class ProxyApi
     }
 
     private static string BuildProxyQuery(string? mode, string? scope, string? channelId)
+        => BuildProxyQuery(mode, scope, channelId, clientModel: null);
+
+    private static string BuildProxyQuery(string? mode, string? scope, string? channelId, string? clientModel)
     {
-        var parts = new List<string>(capacity: 3);
+        var parts = new List<string>(capacity: 4);
         if (!string.IsNullOrWhiteSpace(mode))
         {
             parts.Add("mode=" + Uri.EscapeDataString(mode));
@@ -302,6 +316,10 @@ public sealed class ProxyApi
         if (!string.IsNullOrWhiteSpace(channelId))
         {
             parts.Add("channel_id=" + Uri.EscapeDataString(channelId));
+        }
+        if (!string.IsNullOrWhiteSpace(clientModel))
+        {
+            parts.Add("client_model=" + Uri.EscapeDataString(clientModel));
         }
 
         return parts.Count == 0 ? string.Empty : "?" + string.Join("&", parts);

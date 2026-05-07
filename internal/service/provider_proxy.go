@@ -257,17 +257,20 @@ func (s *ProviderProxyService) failTaskAndRefund(taskID, reason, refundNote stri
 }
 
 // extractParams 从客户端请求体里抓出计价规则可能用到的字段。
-// 当前抓取：model / duration(_seconds) / resolution / size / n / aspect_ratio / reference_image_count。
+// 当前抓取：model / client_model / duration(_seconds) / resolution / size / n / aspect_ratio / reference_image_count。
 func extractParams(body []byte) map[string]any {
 	out := map[string]any{}
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return out
 	}
-	for _, k := range []string{"model", "duration_seconds", "duration", "resolution", "size", "n", "aspect_ratio", "reference_image_count", "input_image_count"} {
+	for _, k := range []string{"model", "client_model", "duration_seconds", "duration", "resolution", "size", "n", "aspect_ratio", "reference_image_count", "input_image_count"} {
 		if v, ok := m[k]; ok {
 			out[k] = v
 		}
+	}
+	if v, ok := out["client_model"]; ok {
+		out["model"] = v
 	}
 	if v, ok := m["durationSeconds"]; ok {
 		setPricingParamIfMissing(out, "duration_seconds", v)
