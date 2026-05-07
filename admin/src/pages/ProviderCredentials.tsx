@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AutoComplete,
   Table,
   Button,
   Space,
@@ -22,7 +23,7 @@ import {
   ThunderboltOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import { providerCredentialApi } from '../api';
+import { clientModelApi, providerCredentialApi } from '../api';
 
 type ProviderOption = { value: string; label: string; disabled?: boolean };
 
@@ -90,10 +91,33 @@ interface CredentialRow {
   created_at: string;
 }
 
+interface ClientModelRow {
+  id: string;
+  model_key: string;
+  display_name: string;
+  provider: string;
+  scope: string;
+  enabled: boolean;
+  routes?: unknown[];
+}
+
+interface UpstreamCapabilityRow {
+  provider: string;
+  mode: string;
+  model: string;
+  display_name: string;
+  aspect_ratios: string[];
+  durations: string[];
+  resolutions: string[];
+  max_images: number;
+}
+
 const ProviderCredentials: React.FC = () => {
   const { modal } = App.useApp();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<CredentialRow[]>([]);
+  const [clientModels, setClientModels] = useState<ClientModelRow[]>([]);
+  const [upstreamCapabilities, setUpstreamCapabilities] = useState<UpstreamCapabilityRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -104,6 +128,8 @@ const ProviderCredentials: React.FC = () => {
   const selectedMode = Form.useWatch('mode', form);
   const [providerFilter, setProviderFilter] = useState<string>();
   const [modeOptions, setModeOptions] = useState<{ value: string; label: string }[]>([]);
+  const selectedBindClientModelId = Form.useWatch('bind_client_model_id', form);
+  const selectedBindUpstreamModel = Form.useWatch('bind_upstream_model', form);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -122,20 +148,71 @@ const ProviderCredentials: React.FC = () => {
     }
   }, [page, pageSize, providerFilter]);
 
+  const fetchClientModels = useCallback(async () => {
+    const result: any = await clientModelApi.list({ include_disabled: true, page: 1, page_size: 500 });
+    setClientModels(result?.list || []);
+  }, []);
+
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
+  useEffect(() => {
+    fetchClientModels().catch(console.error);
+  }, [fetchClientModels]);
+
+  useEffect(() => {
+    if (!selectedProvider || !selectedMode) {
+      setUpstreamCapabilities([]);
+      return;
+    }
+    clientModelApi.upstreamCapabilities({
+      provider: selectedProvider,
+      mode: selectedMode,
+    }).then((result: any) => {
+      setUpstreamCapabilities(result || []);
+    }).catch((error) => {
+      console.error(error);
+      setUpstreamCapabilities([]);
+    });
+  }, [selectedProvider, selectedMode]);
+
+  const bindClientModelOptions = useMemo(() => clientModels
+    .filter(item => !selectedProvider || item.provider === selectedProvider)
+    .map(item => ({
+      value: item.id,
+      label: `${item.display_name} / ${item.model_key}`,
+      disabled: !item.enabled,
+    })), [clientModels, selectedProvider]);
+
+  const selectedBindClientModel = useMemo(
+    () => clientModels.find(item => item.id === selectedBindClientModelId),
+    [clientModels, selectedBindClientModelId]
+  );
+
+  const upstreamModelOptions = useMemo(() => upstreamCapabilities.map(item => ({
+    value: item.model,
+    label: `${item.display_name || item.model}${item.model ? ` / ${item.model}` : ''}`,
+  })), [upstreamCapabilities]);
+
+  const selectedBindCapability = useMemo(
+    () => upstreamCapabilities.find(item => item.model === selectedBindUpstreamModel),
+    [upstreamCapabilities, selectedBindUpstreamModel]
+  );
+
   const handleProviderChange = (provider: string) => {
     setModeOptions(MODE_OPTIONS_BY_PROVIDER[provider] ?? []);
     form.setFieldValue('mode', undefined);
+    form.setFieldValue('bind_client_model_id', undefined);
+    form.setFieldValue('bind_upstream_model', undefined);
   };
 
   const handleCreate = () => {
     setCurrent(null);
     form.resetFields();
     setModeOptions([]);
-    form.setFieldsValue({ enabled: true, priority: 0, is_default: false });
+    setUpstreamCapabilities([]);
+    form.setFieldsValue({ enabled: true, priority: 0, is_default: false, bind_route_enabled: true });
     setModalVisible(true);
   };
 
@@ -190,11 +267,42 @@ const ProviderCredentials: React.FC = () => {
           message.error('新建必须填写 API Key');
           return;
         }
-        await providerCredentialApi.create(values);
-        message.success('创建成功');
+        const {
+          bind_client_model_id,
+          bind_upstream_model,
+          bind_route_enabled,
+          ...credentialPayload
+        } = values;
+        if (bind_client_model_id && !bind_upstream_model) {
+          message.error('绑定客户端模型时请选择或填写上游真实模型');
+          return;
+        }
+        const created: any = await providerCredentialApi.create(credentialPayload);
+        if (bind_client_model_id) {
+          if (!created?.id) {
+            message.warning('凭证已创建，但接口没有返回凭证 ID，未能自动绑定客户端模型');
+          } else {
+            await clientModelApi.createRoute(bind_client_model_id, {
+              credential_id: created.id,
+              upstream_model: bind_upstream_model,
+              enabled: bind_route_enabled !== false,
+              is_default: (selectedBindClientModel?.routes?.length || 0) === 0,
+              priority: credentialPayload.priority || 0,
+              sort_order: selectedBindClientModel?.routes?.length || 0,
+              aspect_ratios: selectedBindCapability?.aspect_ratios || [],
+              durations: selectedBindCapability?.durations || [],
+              resolutions: selectedBindCapability?.resolutions || [],
+              max_images: selectedBindCapability?.max_images || 0,
+            });
+            message.success('创建成功，已绑定客户端模型');
+          }
+        } else {
+          message.success('创建成功');
+        }
       }
       setModalVisible(false);
       fetchData();
+      fetchClientModels().catch(console.error);
     } catch {
       // form 校验错误已被 antd 捕获
     }
@@ -479,6 +587,48 @@ const ProviderCredentials: React.FC = () => {
           <Form.Item name="default_model" label="默认模型 (可选)">
             <Input placeholder="例如：gpt-4o-mini / gemini-2.5-flash / veo-3" />
           </Form.Item>
+
+          {!current && (
+            <>
+              <Alert
+                showIcon
+                type="info"
+                style={{ marginBottom: 16 }}
+                message="如果这个凭证要给客户端模型使用，可以在这里直接绑定；保存后会自动创建一条真实渠道路由。"
+              />
+              <Form.Item name="bind_client_model_id" label="绑定到客户端模型（可选）">
+                <Select
+                  allowClear
+                  showSearch
+                  options={bindClientModelOptions}
+                  optionFilterProp="label"
+                  placeholder="例如：Veo 3.1 Fast"
+                />
+              </Form.Item>
+              {selectedBindClientModelId && (
+                <>
+                  <Form.Item
+                    name="bind_upstream_model"
+                    label="上游真实模型"
+                    rules={[{ required: true, message: '请选择或填写上游真实模型' }, { max: 120 }]}
+                    extra="客户端仍然只显示上面的客户端模型名称；这里填的是发给真实渠道的模型 ID。"
+                  >
+                    <AutoComplete
+                      options={upstreamModelOptions}
+                      filterOption={(input, option) =>
+                        String(option?.label ?? '').toLowerCase().includes(input.toLowerCase())
+                        || String(option?.value ?? '').toLowerCase().includes(input.toLowerCase())
+                      }
+                      placeholder="例如：veo_3_1-fast / grok-video-3"
+                    />
+                  </Form.Item>
+                  <Form.Item name="bind_route_enabled" label="路由启用" valuePropName="checked">
+                    <Switch />
+                  </Form.Item>
+                </>
+              )}
+            </>
+          )}
 
           <Form.Item name="custom_headers" label="自定义请求头 JSON (可选)">
             <Input.TextArea rows={2} placeholder='{"X-DuoYuan-Token": "xxx"}' />
