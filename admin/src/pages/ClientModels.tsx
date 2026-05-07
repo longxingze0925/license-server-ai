@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   App,
+  AutoComplete,
   Button,
   Form,
   Input,
@@ -80,8 +81,28 @@ interface ClientModelRouteRow {
   is_default: boolean;
   priority: number;
   sort_order: number;
+  aspect_ratios: string[];
+  durations: string[];
+  resolutions: string[];
+  max_images: number;
+  effective_aspect_ratios?: string[];
+  effective_durations?: string[];
+  effective_resolutions?: string[];
+  effective_max_images?: number;
   note?: string;
   credential?: CredentialRow;
+}
+
+interface UpstreamCapabilityRow {
+  provider: string;
+  mode: string;
+  model: string;
+  display_name: string;
+  aspect_ratios: string[];
+  durations: string[];
+  resolutions: string[];
+  max_images: number;
+  note?: string;
 }
 
 interface ClientModelRow {
@@ -111,9 +132,12 @@ const ClientModels: React.FC = () => {
   const [currentModel, setCurrentModel] = useState<ClientModelRow | null>(null);
   const [currentRoute, setCurrentRoute] = useState<ClientModelRouteRow | null>(null);
   const [routeModel, setRouteModel] = useState<ClientModelRow | null>(null);
+  const [upstreamCapabilities, setUpstreamCapabilities] = useState<UpstreamCapabilityRow[]>([]);
   const [modelForm] = Form.useForm();
   const [routeForm] = Form.useForm();
   const selectedScope = Form.useWatch('scope', modelForm);
+  const selectedRouteCredentialId = Form.useWatch('credential_id', routeForm);
+  const selectedUpstreamModel = Form.useWatch('upstream_model', routeForm);
 
   const fetchCredentials = useCallback(async () => {
     const result: any = await providerCredentialApi.list({ page: 1, page_size: 200, enabled: true });
@@ -158,6 +182,48 @@ const ClientModels: React.FC = () => {
         label: `${item.channel_name} / ${item.mode}${item.default_model ? ` / ${item.default_model}` : ''}`,
       }));
   }, [credentials, routeModel]);
+
+  const selectedRouteCredential = useMemo(
+    () => credentials.find(item => item.id === selectedRouteCredentialId),
+    [credentials, selectedRouteCredentialId]
+  );
+
+  const upstreamModelOptions = useMemo(() => upstreamCapabilities.map(item => ({
+    value: item.model,
+    label: `${item.display_name || item.model}${item.model ? ` / ${item.model}` : ''}`,
+  })), [upstreamCapabilities]);
+
+  useEffect(() => {
+    if (!selectedRouteCredential) {
+      setUpstreamCapabilities([]);
+      return;
+    }
+    clientModelApi.upstreamCapabilities({
+      provider: selectedRouteCredential.provider,
+      mode: selectedRouteCredential.mode,
+    }).then((result: any) => {
+      setUpstreamCapabilities(result || []);
+    }).catch((error) => {
+      console.error(error);
+      setUpstreamCapabilities([]);
+    });
+  }, [selectedRouteCredential]);
+
+  useEffect(() => {
+    if (!selectedUpstreamModel || currentRoute) {
+      return;
+    }
+    const capability = upstreamCapabilities.find(item => item.model === selectedUpstreamModel);
+    if (!capability) {
+      return;
+    }
+    routeForm.setFieldsValue({
+      aspect_ratios: capability.aspect_ratios || [],
+      durations: capability.durations || [],
+      resolutions: capability.resolutions || [],
+      max_images: capability.max_images || 0,
+    });
+  }, [selectedUpstreamModel, upstreamCapabilities, currentRoute, routeForm]);
 
   const handleCreateModel = () => {
     setCurrentModel(null);
@@ -231,6 +297,10 @@ const ClientModels: React.FC = () => {
       is_default: record.routes.length === 0,
       priority: 0,
       sort_order: 0,
+      aspect_ratios: [],
+      durations: [],
+      resolutions: [],
+      max_images: 0,
     });
     setRouteModalVisible(true);
   };
@@ -245,6 +315,10 @@ const ClientModels: React.FC = () => {
       is_default: route.is_default,
       priority: route.priority,
       sort_order: route.sort_order,
+      aspect_ratios: route.aspect_ratios || route.effective_aspect_ratios || [],
+      durations: route.durations || route.effective_durations || [],
+      resolutions: route.resolutions || route.effective_resolutions || [],
+      max_images: route.max_images || route.effective_max_images || 0,
       note: route.note,
     });
     setRouteModalVisible(true);
@@ -308,6 +382,17 @@ const ClientModels: React.FC = () => {
             title: '上游模型',
             dataIndex: 'upstream_model',
             key: 'upstream_model',
+          },
+          {
+            title: '能力',
+            key: 'capability',
+            render: (_: any, route: ClientModelRouteRow) => (
+              <Space wrap>
+                {(route.effective_aspect_ratios || []).slice(0, 3).map(value => <Tag key={`a-${value}`}>{value}</Tag>)}
+                {(route.effective_durations || []).slice(0, 3).map(value => <Tag key={`d-${value}`}>{value}s</Tag>)}
+                {route.effective_max_images ? <Tag>图 {route.effective_max_images}</Tag> : null}
+              </Space>
+            ),
           },
           {
             title: '默认',
@@ -508,7 +593,26 @@ const ClientModels: React.FC = () => {
             />
           </Form.Item>
           <Form.Item name="upstream_model" label="上游真实模型" rules={[{ required: true, message: '请输入上游模型' }, { max: 120 }]}>
-            <Input placeholder="例如：veo3 / grok-video-3" />
+            <AutoComplete
+              options={upstreamModelOptions}
+              filterOption={(input, option) =>
+                String(option?.label ?? '').toLowerCase().includes(input.toLowerCase())
+                || String(option?.value ?? '').toLowerCase().includes(input.toLowerCase())
+              }
+              placeholder="选择或输入上游模型"
+            />
+          </Form.Item>
+          <Form.Item name="aspect_ratios" label="比例选项">
+            <Select mode="tags" placeholder="例如 16:9、9:16、1:1" />
+          </Form.Item>
+          <Form.Item name="durations" label="时长选项">
+            <Select mode="tags" placeholder="例如 5、8、12" />
+          </Form.Item>
+          <Form.Item name="resolutions" label="分辨率选项">
+            <Select mode="tags" placeholder="例如 720p、1080p、4K" />
+          </Form.Item>
+          <Form.Item name="max_images" label="最大参考图数量">
+            <InputNumber min={0} max={20} />
           </Form.Item>
           <Space size="large">
             <Form.Item name="enabled" label="启用" valuePropName="checked">

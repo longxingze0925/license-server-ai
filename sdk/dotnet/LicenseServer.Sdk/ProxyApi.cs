@@ -396,6 +396,9 @@ public sealed class ProxyApi
         [JsonPropertyName("supported_durations")]
         public List<string> SupportedDurations { get; set; } = [];
 
+        [JsonPropertyName("supported_resolutions")]
+        public List<string> SupportedResolutions { get; set; } = [];
+
         [JsonPropertyName("models")]
         public List<ProviderModelInfo> Models { get; set; } = [];
     }

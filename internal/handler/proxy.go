@@ -83,6 +83,7 @@ type proxyCapabilityChannel struct {
 	SupportedScopes       []string               `json:"supported_scopes"`
 	SupportedAspectRatios []string               `json:"supported_aspect_ratios"`
 	SupportedDurations    []string               `json:"supported_durations"`
+	SupportedResolutions  []string               `json:"supported_resolutions"`
 	Models                []proxyCapabilityModel `json:"models"`
 }
 
@@ -105,6 +106,7 @@ type clientModelRoute struct {
 	SupportedScopes       []string
 	SupportedAspectRatios []string
 	SupportedDurations    []string
+	SupportedResolutions  []string
 	IsDefault             bool
 	Priority              int
 	SortOrder             int
@@ -246,8 +248,15 @@ func buildConfiguredProxyCapabilities(clientModels []service.ClientModelWithRout
 		if len(modes) == 0 {
 			modes = defaultClientModelSupportedModes(cm.Scope)
 		}
-		aspectRatios := nonNilStrings(service.ParseClientModelJSONStrings(cm.AspectRatios))
-		durations := nonNilStrings(service.ParseClientModelJSONStrings(cm.Durations))
+		aspectRatios := routeCapabilityIntersection(item.Routes, service.ResolveRouteAspectRatios)
+		if len(aspectRatios) == 0 {
+			aspectRatios = nonNilStrings(service.ParseClientModelJSONStrings(cm.AspectRatios))
+		}
+		durations := routeCapabilityIntersection(item.Routes, service.ResolveRouteDurations)
+		if len(durations) == 0 {
+			durations = nonNilStrings(service.ParseClientModelJSONStrings(cm.Durations))
+		}
+		resolutions := routeCapabilityIntersection(item.Routes, service.ResolveRouteResolutions)
 		channel := proxyCapabilityChannel{
 			ChannelID:             "client-model:" + string(cm.Provider) + ":" + cm.ModelKey + ":" + string(cm.Scope),
 			ChannelName:           "后台路由",
@@ -263,6 +272,7 @@ func buildConfiguredProxyCapabilities(clientModels []service.ClientModelWithRout
 			SupportedScopes:       scopes,
 			SupportedAspectRatios: aspectRatios,
 			SupportedDurations:    durations,
+			SupportedResolutions:  resolutions,
 			Models: []proxyCapabilityModel{{
 				ID:              cm.ModelKey,
 				DisplayName:     firstNonEmpty(cm.DisplayName, cm.ModelKey),
@@ -310,6 +320,54 @@ func defaultClientModelSupportedModes(scope model.PricingScope) []string {
 	}
 }
 
+func routeCapabilityIntersection(routes []model.ClientModelRoute, selectValues func(model.ClientModelRoute) []string) []string {
+	var out []string
+	initialized := false
+	for _, route := range routes {
+		if !route.Enabled || route.Credential == nil || !route.Credential.Enabled || route.Credential.HealthStatus == model.CredentialHealthDown {
+			continue
+		}
+		values := nonNilStrings(selectValues(route))
+		if len(values) == 0 {
+			continue
+		}
+		if !initialized {
+			out = append(out, values...)
+			initialized = true
+			continue
+		}
+		out = intersectStrings(out, values)
+	}
+	return nonNilStrings(out)
+}
+
+func intersectStrings(left, right []string) []string {
+	rightSet := map[string]string{}
+	for _, value := range right {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		rightSet[strings.ToLower(strings.TrimSpace(value))] = strings.TrimSpace(value)
+	}
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, value := range left {
+		key := strings.ToLower(strings.TrimSpace(value))
+		if key == "" {
+			continue
+		}
+		if _, ok := rightSet[key]; !ok {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, strings.TrimSpace(value))
+	}
+	return out
+}
+
 func collapseCapabilityChannelsForClient(provider model.ProviderKind, channels []proxyCapabilityChannel) []proxyCapabilityChannel {
 	routes := make([]clientModelRoute, 0, len(channels))
 	for _, channel := range channels {
@@ -348,6 +406,7 @@ func collapseCapabilityChannelsForClient(provider model.ProviderKind, channels [
 				SupportedScopes:       scopes,
 				SupportedAspectRatios: nonNilStrings(channel.SupportedAspectRatios),
 				SupportedDurations:    nonNilStrings(channel.SupportedDurations),
+				SupportedResolutions:  nonNilStrings(channel.SupportedResolutions),
 				IsDefault:             channel.IsDefault,
 				Priority:              channel.Priority,
 				SortOrder:             channel.SortOrder,
@@ -389,6 +448,7 @@ func collapseCapabilityChannelsForClient(provider model.ProviderKind, channels [
 		scopes := mergeRouteStrings(group, func(route clientModelRoute) []string { return route.SupportedScopes })
 		aspectRatios := mergeRouteStrings(group, func(route clientModelRoute) []string { return route.SupportedAspectRatios })
 		durations := mergeRouteStrings(group, func(route clientModelRoute) []string { return route.SupportedDurations })
+		resolutions := mergeRouteStrings(group, func(route clientModelRoute) []string { return route.SupportedResolutions })
 		out = append(out, proxyCapabilityChannel{
 			ChannelID:             "client-model:" + string(first.Provider) + ":" + first.ClientModel + ":" + string(first.Scope),
 			ChannelName:           "后台路由",
@@ -404,6 +464,7 @@ func collapseCapabilityChannelsForClient(provider model.ProviderKind, channels [
 			SupportedScopes:       scopes,
 			SupportedAspectRatios: aspectRatios,
 			SupportedDurations:    durations,
+			SupportedResolutions:  resolutions,
 			Models: []proxyCapabilityModel{{
 				ID:              first.ClientModel,
 				DisplayName:     first.DisplayName,
@@ -459,6 +520,7 @@ func buildClientModelRoutes(rows []model.ProviderCredential) []clientModelRoute 
 				SupportedScopes:       scopes,
 				SupportedAspectRatios: nonNilStrings(channel.SupportedAspectRatios),
 				SupportedDurations:    nonNilStrings(channel.SupportedDurations),
+				SupportedResolutions:  nonNilStrings(channel.SupportedResolutions),
 				IsDefault:             channel.IsDefault,
 				Priority:              channel.Priority,
 				SortOrder:             channel.SortOrder,
@@ -582,6 +644,7 @@ func credentialToCapabilityChannel(row model.ProviderCredential, index int) prox
 		SupportedScopes:       scopes,
 		SupportedAspectRatios: nonNilStrings(supportedAspectRatios(row.Provider, mode)),
 		SupportedDurations:    nonNilStrings(supportedDurations(row.Provider, mode)),
+		SupportedResolutions:  []string{},
 		Models:                models,
 	}
 }
@@ -1298,7 +1361,11 @@ func (h *ProxyHandler) Generate(c *gin.Context) {
 		var routeClientModel string
 		ok := false
 		if h.clientModelService != nil {
-			cm, configuredRoute, err := h.clientModelService.SelectRoute(tenantID, providerKind, clientModel, scope)
+			var requestParams map[string]any
+			if json.Unmarshal(rawBody, &requestParams) != nil {
+				requestParams = map[string]any{}
+			}
+			cm, configuredRoute, err := h.clientModelService.SelectRouteForParams(tenantID, providerKind, clientModel, scope, requestParams)
 			if err == nil && cm != nil && configuredRoute != nil && configuredRoute.Credential != nil {
 				routeMode = service.NormalizeProviderCredentialMode(configuredRoute.Credential.Provider, configuredRoute.Credential.Mode)
 				routeCredentialID = configuredRoute.CredentialID

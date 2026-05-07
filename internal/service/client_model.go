@@ -37,6 +37,10 @@ type ClientModelRouteInput struct {
 	IsDefault     bool
 	Priority      int
 	SortOrder     int
+	AspectRatios  []string
+	Durations     []string
+	Resolutions   []string
+	MaxImages     int
 	Note          string
 }
 
@@ -197,6 +201,10 @@ func (s *ClientModelService) UpdateRoute(tenantID, routeID string, in ClientMode
 	row.IsDefault = updated.IsDefault
 	row.Priority = updated.Priority
 	row.SortOrder = updated.SortOrder
+	row.AspectRatios = updated.AspectRatios
+	row.Durations = updated.Durations
+	row.Resolutions = updated.Resolutions
+	row.MaxImages = updated.MaxImages
 	row.Note = updated.Note
 	if err := s.validateRouteCredential(&row); err != nil {
 		return nil, err
@@ -260,6 +268,116 @@ func (s *ClientModelService) SelectRoute(tenantID string, provider model.Provide
 		return &cm, route, nil
 	}
 	return nil, nil, gorm.ErrRecordNotFound
+}
+
+func (s *ClientModelService) SelectRouteForParams(tenantID string, provider model.ProviderKind, clientModel string, scope model.PricingScope, params map[string]any) (*model.ClientModel, *model.ClientModelRoute, error) {
+	clientModel = strings.TrimSpace(clientModel)
+	if clientModel == "" {
+		return nil, nil, gorm.ErrRecordNotFound
+	}
+	var cm model.ClientModel
+	q := model.DB.Where("tenant_id = ? AND provider = ? AND model_key = ? AND enabled = ?", strings.TrimSpace(tenantID), provider, clientModel, true)
+	if scope != "" {
+		q = q.Where("scope = ?", scope)
+	}
+	if err := q.First(&cm).Error; err != nil {
+		return nil, nil, err
+	}
+	routes, err := s.ListRoutes(tenantID, cm.ID, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.SliceStable(routes, func(i, j int) bool {
+		if routes[i].IsDefault != routes[j].IsDefault {
+			return routes[i].IsDefault
+		}
+		if routes[i].Priority != routes[j].Priority {
+			return routes[i].Priority > routes[j].Priority
+		}
+		return routes[i].SortOrder < routes[j].SortOrder
+	})
+	for i := range routes {
+		route := &routes[i]
+		if route.Credential == nil || !route.Credential.Enabled || route.Credential.HealthStatus == model.CredentialHealthDown {
+			continue
+		}
+		if route.Credential.Provider != provider {
+			continue
+		}
+		if !routeMatchesRequestParamsWithParams(*route, params) {
+			continue
+		}
+		return &cm, route, nil
+	}
+	return nil, nil, gorm.ErrRecordNotFound
+}
+
+func routeMatchesRequestParamsWithParams(route model.ClientModelRoute, params map[string]any) bool {
+	params = NormalizePricingParams(params)
+	if aspectRatio := paramString(params, "aspect_ratio"); aspectRatio != "" {
+		if values := ResolveRouteAspectRatios(route); len(values) > 0 && !containsStringFold(values, aspectRatio) {
+			return false
+		}
+	}
+	if resolution := paramString(params, "resolution"); resolution != "" {
+		if values := ResolveRouteResolutions(route); len(values) > 0 && !containsStringFold(values, resolution) {
+			return false
+		}
+	}
+	if duration := paramInt(params, "duration_seconds"); duration > 0 {
+		if values := ResolveRouteDurations(route); len(values) > 0 && !containsStringFold(values, fmt.Sprint(duration)) {
+			return false
+		}
+	}
+	if maxImages := ResolveRouteMaxImages(route); maxImages > 0 {
+		count := max(paramInt(params, "reference_image_count"), paramInt(params, "input_image_count"))
+		if count > maxImages {
+			return false
+		}
+	}
+	return true
+}
+
+func paramString(params map[string]any, key string) string {
+	value, ok := params[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func paramInt(params map[string]any, key string) int {
+	value, ok := params[key]
+	if !ok || value == nil {
+		return 0
+	}
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		i, _ := v.Int64()
+		return int(i)
+	case string:
+		var i int
+		if _, err := fmt.Sscan(strings.TrimSpace(v), &i); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+func containsStringFold(values []string, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), target) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ClientModelService) HasEnabledModels(tenantID string) (bool, error) {
@@ -380,6 +498,10 @@ func buildClientModelRouteRow(tenantID, clientModelID string, in ClientModelRout
 		IsDefault:     in.IsDefault,
 		Priority:      in.Priority,
 		SortOrder:     in.SortOrder,
+		AspectRatios:  mustJSONStrings(normalizeStringList(in.AspectRatios)),
+		Durations:     mustJSONStrings(normalizeStringList(in.Durations)),
+		Resolutions:   mustJSONStrings(normalizeStringList(in.Resolutions)),
+		MaxImages:     max(in.MaxImages, 0),
 		Note:          strings.TrimSpace(in.Note),
 	}, nil
 }

@@ -32,6 +32,10 @@ type ClientModelRoute struct {
 	IsDefault     bool   `gorm:"not null;default:false;index" json:"is_default"`
 	Priority      int    `gorm:"not null;default:0;index" json:"priority"`
 	SortOrder     int    `gorm:"not null;default:0;index" json:"sort_order"`
+	AspectRatios  string `gorm:"type:json" json:"aspect_ratios"`
+	Durations     string `gorm:"type:json" json:"durations"`
+	Resolutions   string `gorm:"type:json" json:"resolutions"`
+	MaxImages     int    `gorm:"not null;default:0" json:"max_images"`
 	Note          string `gorm:"type:varchar(256)" json:"note"`
 
 	Credential *ProviderCredential `gorm:"-" json:"credential,omitempty"`

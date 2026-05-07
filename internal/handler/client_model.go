@@ -38,13 +38,17 @@ type clientModelRequest struct {
 }
 
 type clientModelRouteRequest struct {
-	CredentialID  string `json:"credential_id" binding:"required"`
-	UpstreamModel string `json:"upstream_model" binding:"required"`
-	Enabled       *bool  `json:"enabled"`
-	IsDefault     *bool  `json:"is_default"`
-	Priority      int    `json:"priority"`
-	SortOrder     int    `json:"sort_order"`
-	Note          string `json:"note"`
+	CredentialID  string   `json:"credential_id" binding:"required"`
+	UpstreamModel string   `json:"upstream_model" binding:"required"`
+	Enabled       *bool    `json:"enabled"`
+	IsDefault     *bool    `json:"is_default"`
+	Priority      int      `json:"priority"`
+	SortOrder     int      `json:"sort_order"`
+	AspectRatios  []string `json:"aspect_ratios"`
+	Durations     []string `json:"durations"`
+	Resolutions   []string `json:"resolutions"`
+	MaxImages     int      `json:"max_images"`
+	Note          string   `json:"note"`
 }
 
 func (h *ClientModelHandler) List(c *gin.Context) {
@@ -166,6 +170,12 @@ func (h *ClientModelHandler) DeleteRoute(c *gin.Context) {
 	response.Success(c, gin.H{"id": c.Param("route_id")})
 }
 
+func (h *ClientModelHandler) ListUpstreamCapabilities(c *gin.Context) {
+	provider := model.ProviderKind(strings.ToLower(strings.TrimSpace(c.Query("provider"))))
+	mode := strings.TrimSpace(c.Query("mode"))
+	response.Success(c, service.ListUpstreamModelCapabilities(provider, mode))
+}
+
 func clientModelInputFromRequest(req clientModelRequest) service.ClientModelInput {
 	enabled := true
 	if req.Enabled != nil {
@@ -202,6 +212,10 @@ func clientModelRouteInputFromRequest(req clientModelRouteRequest) service.Clien
 		IsDefault:     isDefault,
 		Priority:      req.Priority,
 		SortOrder:     req.SortOrder,
+		AspectRatios:  req.AspectRatios,
+		Durations:     req.Durations,
+		Resolutions:   req.Resolutions,
+		MaxImages:     req.MaxImages,
 		Note:          strings.TrimSpace(req.Note),
 	}
 }
@@ -233,18 +247,26 @@ func clientModelToView(row model.ClientModel, routes []model.ClientModelRoute) g
 
 func clientModelRouteToView(row model.ClientModelRoute) gin.H {
 	view := gin.H{
-		"id":              row.ID,
-		"tenant_id":       row.TenantID,
-		"client_model_id": row.ClientModelID,
-		"credential_id":   row.CredentialID,
-		"upstream_model":  row.UpstreamModel,
-		"enabled":         row.Enabled,
-		"is_default":      row.IsDefault,
-		"priority":        row.Priority,
-		"sort_order":      row.SortOrder,
-		"note":            row.Note,
-		"created_at":      row.CreatedAt,
-		"updated_at":      row.UpdatedAt,
+		"id":                      row.ID,
+		"tenant_id":               row.TenantID,
+		"client_model_id":         row.ClientModelID,
+		"credential_id":           row.CredentialID,
+		"upstream_model":          row.UpstreamModel,
+		"enabled":                 row.Enabled,
+		"is_default":              row.IsDefault,
+		"priority":                row.Priority,
+		"sort_order":              row.SortOrder,
+		"aspect_ratios":           service.ParseClientModelJSONStrings(row.AspectRatios),
+		"durations":               service.ParseClientModelJSONStrings(row.Durations),
+		"resolutions":             service.ParseClientModelJSONStrings(row.Resolutions),
+		"max_images":              row.MaxImages,
+		"effective_aspect_ratios": service.ResolveRouteAspectRatios(row),
+		"effective_durations":     service.ResolveRouteDurations(row),
+		"effective_resolutions":   service.ResolveRouteResolutions(row),
+		"effective_max_images":    service.ResolveRouteMaxImages(row),
+		"note":                    row.Note,
+		"created_at":              row.CreatedAt,
+		"updated_at":              row.UpdatedAt,
 	}
 	if row.Credential != nil {
 		view["credential"] = credentialToView(row.Credential)

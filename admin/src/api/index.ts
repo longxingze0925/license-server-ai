@@ -279,6 +279,8 @@ export const providerCredentialApi = {
 export const clientModelApi = {
   list: (params?: { include_disabled?: boolean; page?: number; page_size?: number }) =>
     request.get('/admin/client-models', { params }),
+  upstreamCapabilities: (params?: { provider?: string; mode?: string }) =>
+    request.get('/admin/client-models/upstream-capabilities', { params }),
   get: (id: string) => request.get(`/admin/client-models/${id}`),
   create: (data: {
     model_key: string;
@@ -304,6 +306,10 @@ export const clientModelApi = {
       is_default?: boolean;
       priority?: number;
       sort_order?: number;
+      aspect_ratios?: string[];
+      durations?: string[];
+      resolutions?: string[];
+      max_images?: number;
       note?: string;
     }
   ) => request.post(`/admin/client-models/${id}/routes`, data),

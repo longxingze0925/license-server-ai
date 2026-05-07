@@ -524,6 +524,7 @@ func SetupRouter(r *gin.Engine, asyncRunner *service.AsyncRunnerService) {
 		clientModels.Use(middleware.PermissionMiddleware("proxy_credential:read"))
 		{
 			clientModels.GET("", clientModelHandler.List)
+			clientModels.GET("/upstream-capabilities", clientModelHandler.ListUpstreamCapabilities)
 			clientModels.GET("/:id", clientModelHandler.Get)
 			clientModels.POST("", middleware.PermissionMiddleware("proxy_credential:create"), clientModelHandler.Create)
 			clientModels.PUT("/:id", middleware.PermissionMiddleware("proxy_credential:update"), clientModelHandler.Update)
