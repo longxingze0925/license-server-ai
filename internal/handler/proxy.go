@@ -25,9 +25,10 @@ import (
 
 // ProxyHandler AI Provider 转发与凭证管理的 HTTP 入口。
 type ProxyHandler struct {
-	credService *service.ProviderCredentialService
-	proxy       *service.ProviderProxyService
-	async       *service.AsyncRunnerService
+	credService        *service.ProviderCredentialService
+	clientModelService *service.ClientModelService
+	proxy              *service.ProviderProxyService
+	async              *service.AsyncRunnerService
 }
 
 func NewProxyHandler(asyncRunner *service.AsyncRunnerService) *ProxyHandler {
@@ -40,7 +41,8 @@ func NewProxyHandler(asyncRunner *service.AsyncRunnerService) *ProxyHandler {
 		)
 	}
 	return &ProxyHandler{
-		credService: credSvc,
+		credService:        credSvc,
+		clientModelService: service.NewClientModelService(),
 		proxy: service.NewProviderProxyService(
 			pricing, credit, credSvc, adapter.NewRegistry(),
 		),
@@ -92,20 +94,20 @@ type proxyCapabilityModel struct {
 }
 
 type clientModelRoute struct {
-	Provider      model.ProviderKind
-	ClientModel   string
-	DisplayName   string
-	Scope         model.PricingScope
-	Mode          string
-	CredentialID  string
-	UpstreamModel string
+	Provider              model.ProviderKind
+	ClientModel           string
+	DisplayName           string
+	Scope                 model.PricingScope
+	Mode                  string
+	CredentialID          string
+	UpstreamModel         string
 	SupportedModes        []string
 	SupportedScopes       []string
 	SupportedAspectRatios []string
 	SupportedDurations    []string
-	IsDefault     bool
-	Priority      int
-	SortOrder     int
+	IsDefault             bool
+	Priority              int
+	SortOrder             int
 }
 
 // Capabilities GET /api/proxy/capabilities
@@ -123,10 +125,23 @@ func (h *ProxyHandler) Capabilities(c *gin.Context) {
 		return
 	}
 
-	rows, err := h.listEnabledCredentials(middleware.GetTenantID(c))
+	tenantID := middleware.GetTenantID(c)
+	rows, err := h.listEnabledCredentials(tenantID)
 	if err != nil {
 		response.ServerError(c, "查询能力失败: "+err.Error())
 		return
+	}
+
+	if h.clientModelService != nil {
+		clientModels, err := h.clientModelService.List(tenantID, false)
+		if err != nil {
+			response.ServerError(c, "查询客户端模型失败: "+err.Error())
+			return
+		}
+		if configured := buildConfiguredProxyCapabilities(clientModels); len(configured.Providers) > 0 {
+			response.Success(c, configured)
+			return
+		}
 	}
 
 	response.Success(c, buildProxyCapabilities(rows))
@@ -205,6 +220,96 @@ func buildProxyCapabilities(rows []model.ProviderCredential) proxyCapabilitiesRe
 	return proxyCapabilitiesResponse{Providers: providers}
 }
 
+func buildConfiguredProxyCapabilities(clientModels []service.ClientModelWithRoutes) proxyCapabilitiesResponse {
+	grouped := map[model.ProviderKind][]proxyCapabilityChannel{}
+	for _, item := range clientModels {
+		cm := item.Model
+		if !cm.Enabled {
+			continue
+		}
+		hasEnabledRoute := false
+		for _, route := range item.Routes {
+			if route.Enabled && route.Credential != nil && route.Credential.Enabled && route.Credential.HealthStatus != model.CredentialHealthDown {
+				hasEnabledRoute = true
+				break
+			}
+		}
+		if !hasEnabledRoute {
+			continue
+		}
+
+		modes := nonNilStrings(service.ParseClientModelJSONStrings(cm.SupportedModes))
+		scopes := nonNilStrings(service.ParseClientModelJSONStrings(cm.SupportedScopes))
+		if len(scopes) == 0 {
+			scopes = []string{string(cm.Scope)}
+		}
+		if len(modes) == 0 {
+			modes = defaultClientModelSupportedModes(cm.Scope)
+		}
+		aspectRatios := nonNilStrings(service.ParseClientModelJSONStrings(cm.AspectRatios))
+		durations := nonNilStrings(service.ParseClientModelJSONStrings(cm.Durations))
+		channel := proxyCapabilityChannel{
+			ChannelID:             "client-model:" + string(cm.Provider) + ":" + cm.ModelKey + ":" + string(cm.Scope),
+			ChannelName:           "后台路由",
+			Mode:                  "",
+			BaseURL:               "",
+			DefaultModel:          cm.ModelKey,
+			Priority:              0,
+			SortOrder:             cm.SortOrder,
+			IsDefault:             false,
+			Enabled:               true,
+			HealthStatus:          string(model.CredentialHealthHealthy),
+			SupportedModes:        modes,
+			SupportedScopes:       scopes,
+			SupportedAspectRatios: aspectRatios,
+			SupportedDurations:    durations,
+			Models: []proxyCapabilityModel{{
+				ID:              cm.ModelKey,
+				DisplayName:     firstNonEmpty(cm.DisplayName, cm.ModelKey),
+				SupportedModes:  modes,
+				SupportedScopes: scopes,
+			}},
+		}
+		grouped[cm.Provider] = append(grouped[cm.Provider], channel)
+	}
+
+	providers := make([]proxyCapabilityProvider, 0, len(grouped))
+	for provider, channels := range grouped {
+		sort.SliceStable(channels, func(i, j int) bool {
+			if channels[i].SortOrder != channels[j].SortOrder {
+				return channels[i].SortOrder < channels[j].SortOrder
+			}
+			return channels[i].DefaultModel < channels[j].DefaultModel
+		})
+		ensureCapabilityDefaultChannel(channels)
+		defaultChannel := channels[0]
+		providers = append(providers, proxyCapabilityProvider{
+			Provider:       string(provider),
+			DisplayName:    providerDisplayName(provider),
+			Description:    providerDescription(provider),
+			DefaultBaseURL: providerDefaultBaseURL(provider),
+			DefaultModel:   defaultChannel.DefaultModel,
+			Channels:       channels,
+		})
+	}
+
+	sort.SliceStable(providers, func(i, j int) bool {
+		return providers[i].Provider < providers[j].Provider
+	})
+	return proxyCapabilitiesResponse{Providers: providers}
+}
+
+func defaultClientModelSupportedModes(scope model.PricingScope) []string {
+	switch scope {
+	case model.PricingScopeVideo:
+		return []string{"text_to_video", "image_to_video"}
+	case model.PricingScopeImage:
+		return []string{"text_to_image", "image_to_image"}
+	default:
+		return []string{}
+	}
+}
+
 func collapseCapabilityChannelsForClient(provider model.ProviderKind, channels []proxyCapabilityChannel) []proxyCapabilityChannel {
 	routes := make([]clientModelRoute, 0, len(channels))
 	for _, channel := range channels {
@@ -232,20 +337,20 @@ func collapseCapabilityChannelsForClient(provider model.ProviderKind, channels [
 			}
 			scope := routePricingScope(scopes)
 			routes = append(routes, clientModelRoute{
-				Provider:               provider,
-				ClientModel:            clientModel,
-				DisplayName:            publicClientModelDisplayName(provider, clientModel, firstNonEmpty(m.DisplayName, upstreamModel)),
-				Scope:                  scope,
-				Mode:                   channel.Mode,
-				CredentialID:           channel.ChannelID,
-				UpstreamModel:          upstreamModel,
-				SupportedModes:         nonNilStrings(firstNonEmptyStringSlice(m.SupportedModes, channel.SupportedModes)),
-				SupportedScopes:        scopes,
-				SupportedAspectRatios:  nonNilStrings(channel.SupportedAspectRatios),
-				SupportedDurations:     nonNilStrings(channel.SupportedDurations),
-				IsDefault:              channel.IsDefault,
-				Priority:               channel.Priority,
-				SortOrder:              channel.SortOrder,
+				Provider:              provider,
+				ClientModel:           clientModel,
+				DisplayName:           publicClientModelDisplayName(provider, clientModel, firstNonEmpty(m.DisplayName, upstreamModel)),
+				Scope:                 scope,
+				Mode:                  channel.Mode,
+				CredentialID:          channel.ChannelID,
+				UpstreamModel:         upstreamModel,
+				SupportedModes:        nonNilStrings(firstNonEmptyStringSlice(m.SupportedModes, channel.SupportedModes)),
+				SupportedScopes:       scopes,
+				SupportedAspectRatios: nonNilStrings(channel.SupportedAspectRatios),
+				SupportedDurations:    nonNilStrings(channel.SupportedDurations),
+				IsDefault:             channel.IsDefault,
+				Priority:              channel.Priority,
+				SortOrder:             channel.SortOrder,
 			})
 		}
 	}
@@ -1186,21 +1291,50 @@ func (h *ProxyHandler) Generate(c *gin.Context) {
 			response.ServerError(c, "Provider 凭证服务未初始化")
 			return
 		}
-		rows, err := h.listEnabledCredentials(middleware.GetTenantID(c))
-		if err != nil {
-			cleanup()
-			response.ServerError(c, "查询模型路由失败: "+err.Error())
-			return
+		tenantID := middleware.GetTenantID(c)
+		var routeMode string
+		var routeCredentialID string
+		var routeUpstreamModel string
+		var routeClientModel string
+		ok := false
+		if h.clientModelService != nil {
+			cm, configuredRoute, err := h.clientModelService.SelectRoute(tenantID, providerKind, clientModel, scope)
+			if err == nil && cm != nil && configuredRoute != nil && configuredRoute.Credential != nil {
+				routeMode = service.NormalizeProviderCredentialMode(configuredRoute.Credential.Provider, configuredRoute.Credential.Mode)
+				routeCredentialID = configuredRoute.CredentialID
+				routeUpstreamModel = configuredRoute.UpstreamModel
+				routeClientModel = cm.ModelKey
+				ok = true
+			} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				cleanup()
+				response.ServerError(c, "查询客户端模型路由失败: "+err.Error())
+				return
+			}
 		}
-		route, ok := selectClientModelRoute(rows, providerKind, clientModel, scope)
+		if !ok {
+			rows, err := h.listEnabledCredentials(tenantID)
+			if err != nil {
+				cleanup()
+				response.ServerError(c, "查询模型路由失败: "+err.Error())
+				return
+			}
+			route, found := selectClientModelRoute(rows, providerKind, clientModel, scope)
+			if found {
+				routeMode = route.Mode
+				routeCredentialID = route.CredentialID
+				routeUpstreamModel = route.UpstreamModel
+				routeClientModel = route.ClientModel
+				ok = true
+			}
+		}
 		if !ok {
 			cleanup()
 			response.BadRequest(c, "客户端模型未配置可用渠道: "+clientModel)
 			return
 		}
-		mode = route.Mode
-		credentialID = route.CredentialID
-		rawBody, persistedBody, err = rewriteGenerateModel(rawBody, persistedBody, route.UpstreamModel, route.ClientModel)
+		mode = routeMode
+		credentialID = routeCredentialID
+		rawBody, persistedBody, err = rewriteGenerateModel(rawBody, persistedBody, routeUpstreamModel, routeClientModel)
 		if err != nil {
 			cleanup()
 			response.BadRequest(c, "处理客户端模型失败: "+err.Error())

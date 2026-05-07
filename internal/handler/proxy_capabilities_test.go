@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"license-server/internal/model"
+	"license-server/internal/service"
 )
 
 func TestBuildProxyCapabilitiesExposesEnabledOfficialGrok(t *testing.T) {
@@ -286,7 +287,7 @@ func TestBuildProxyCapabilitiesDefaultsFirstVisibleChannel(t *testing.T) {
 func TestBuildProxyCapabilitiesCollapsesThirdPartyRoutesToClientModels(t *testing.T) {
 	got := buildProxyCapabilities([]model.ProviderCredential{
 		{
-			BaseModel: model.BaseModel{ID: "veo-duoyuan", CreatedAt: time.Unix(1, 0)},
+			BaseModel:    model.BaseModel{ID: "veo-duoyuan", CreatedAt: time.Unix(1, 0)},
 			Provider:     model.ProviderVeo,
 			Mode:         "duoyuan",
 			ChannelName:  "Veo 多元",
@@ -296,7 +297,7 @@ func TestBuildProxyCapabilitiesCollapsesThirdPartyRoutesToClientModels(t *testin
 			HealthStatus: model.CredentialHealthUnknown,
 		},
 		{
-			BaseModel: model.BaseModel{ID: "grok-duoyuan", CreatedAt: time.Unix(2, 0)},
+			BaseModel:    model.BaseModel{ID: "grok-duoyuan", CreatedAt: time.Unix(2, 0)},
 			Provider:     model.ProviderGrok,
 			Mode:         "duoyuan",
 			ChannelName:  "Grok 多元",
@@ -306,7 +307,7 @@ func TestBuildProxyCapabilitiesCollapsesThirdPartyRoutesToClientModels(t *testin
 			HealthStatus: model.CredentialHealthUnknown,
 		},
 		{
-			BaseModel: model.BaseModel{ID: "grok-suchuang", CreatedAt: time.Unix(3, 0)},
+			BaseModel:    model.BaseModel{ID: "grok-suchuang", CreatedAt: time.Unix(3, 0)},
 			Provider:     model.ProviderGrok,
 			Mode:         "suchuang",
 			ChannelName:  "Grok 速创",
@@ -343,10 +344,74 @@ func TestBuildProxyCapabilitiesCollapsesThirdPartyRoutesToClientModels(t *testin
 	}
 }
 
+func TestBuildConfiguredProxyCapabilitiesUsesAdminClientModels(t *testing.T) {
+	got := buildConfiguredProxyCapabilities([]service.ClientModelWithRoutes{
+		{
+			Model: model.ClientModel{
+				BaseModel:       model.BaseModel{ID: "cm-1"},
+				TenantID:        "tenant-1",
+				ModelKey:        "my-public-video",
+				DisplayName:     "我的视频模型",
+				Provider:        model.ProviderGrok,
+				Scope:           model.PricingScopeVideo,
+				Enabled:         true,
+				SortOrder:       3,
+				SupportedModes:  `["text_to_video"]`,
+				SupportedScopes: `["video"]`,
+				AspectRatios:    `["9:16"]`,
+				Durations:       `["8"]`,
+			},
+			Routes: []model.ClientModelRoute{
+				{
+					BaseModel:     model.BaseModel{ID: "route-1"},
+					TenantID:      "tenant-1",
+					ClientModelID: "cm-1",
+					CredentialID:  "cred-1",
+					UpstreamModel: "grok-video-3",
+					Enabled:       true,
+					Credential: &model.ProviderCredential{
+						BaseModel:    model.BaseModel{ID: "cred-1"},
+						Provider:     model.ProviderGrok,
+						Mode:         "duoyuan",
+						ChannelName:  "多元",
+						Enabled:      true,
+						HealthStatus: model.CredentialHealthUnknown,
+						DefaultModel: "grok-video-3",
+						UpstreamBase: "https://example.test",
+						CustomHeader: "{}",
+						APIKeyEnc:    []byte("x"),
+						DEKEnc:       []byte("x"),
+						EncAlg:       "AES-256-GCM",
+						KeyID:        "test",
+					},
+				},
+			},
+		},
+	})
+
+	grok := findCapabilityProvider(got, "grok")
+	if grok == nil || len(grok.Channels) != 1 {
+		t.Fatalf("grok provider/channels = %#v", grok)
+	}
+	channel := grok.Channels[0]
+	if channel.ChannelID != "client-model:grok:my-public-video:video" {
+		t.Fatalf("channel_id = %q", channel.ChannelID)
+	}
+	if channel.DefaultModel != "my-public-video" {
+		t.Fatalf("default_model = %q", channel.DefaultModel)
+	}
+	if channel.Models[0].DisplayName != "我的视频模型" {
+		t.Fatalf("display_name = %q", channel.Models[0].DisplayName)
+	}
+	if !containsString(channel.SupportedModes, "text_to_video") || containsString(channel.SupportedModes, "image_to_video") {
+		t.Fatalf("supported_modes = %#v", channel.SupportedModes)
+	}
+}
+
 func TestSelectClientModelRouteUsesConfiguredPriority(t *testing.T) {
 	rows := []model.ProviderCredential{
 		{
-			BaseModel: model.BaseModel{ID: "grok-low", CreatedAt: time.Unix(1, 0)},
+			BaseModel:    model.BaseModel{ID: "grok-low", CreatedAt: time.Unix(1, 0)},
 			Provider:     model.ProviderGrok,
 			Mode:         "duoyuan",
 			ChannelName:  "Grok 多元低优先级",
@@ -356,7 +421,7 @@ func TestSelectClientModelRouteUsesConfiguredPriority(t *testing.T) {
 			HealthStatus: model.CredentialHealthUnknown,
 		},
 		{
-			BaseModel: model.BaseModel{ID: "grok-high", CreatedAt: time.Unix(2, 0)},
+			BaseModel:    model.BaseModel{ID: "grok-high", CreatedAt: time.Unix(2, 0)},
 			Provider:     model.ProviderGrok,
 			Mode:         "suchuang",
 			ChannelName:  "Grok 速创高优先级",

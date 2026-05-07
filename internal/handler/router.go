@@ -518,6 +518,25 @@ func SetupRouter(r *gin.Engine, asyncRunner *service.AsyncRunnerService) {
 		}
 		admin.POST("/pricing/preview", middleware.PermissionMiddleware("pricing:read"), pricingHandler.Preview)
 
+		// 客户端模型：客户端看到什么模型由这里配置；真实渠道只在后台路由。
+		clientModelHandler := NewClientModelHandler()
+		clientModels := admin.Group("/client-models")
+		clientModels.Use(middleware.PermissionMiddleware("proxy_credential:read"))
+		{
+			clientModels.GET("", clientModelHandler.List)
+			clientModels.GET("/:id", clientModelHandler.Get)
+			clientModels.POST("", middleware.PermissionMiddleware("proxy_credential:create"), clientModelHandler.Create)
+			clientModels.PUT("/:id", middleware.PermissionMiddleware("proxy_credential:update"), clientModelHandler.Update)
+			clientModels.DELETE("/:id", middleware.PermissionMiddleware("proxy_credential:delete"), clientModelHandler.Delete)
+			clientModels.POST("/:id/routes", middleware.PermissionMiddleware("proxy_credential:update"), clientModelHandler.CreateRoute)
+		}
+		clientModelRoutes := admin.Group("/client-model-routes")
+		clientModelRoutes.Use(middleware.PermissionMiddleware("proxy_credential:read"))
+		{
+			clientModelRoutes.PUT("/:route_id", middleware.PermissionMiddleware("proxy_credential:update"), clientModelHandler.UpdateRoute)
+			clientModelRoutes.DELETE("/:route_id", middleware.PermissionMiddleware("proxy_credential:delete"), clientModelHandler.DeleteRoute)
+		}
+
 		// 用户额度（后台管理）
 		adminCreditHandler := NewCreditHandler()
 		credits := admin.Group("/credits")

@@ -274,3 +274,39 @@ export const providerCredentialApi = {
   delete: (id: string) => request.delete(`/admin/proxy/credentials/${id}`),
   test: (id: string) => request.post(`/admin/proxy/credentials/${id}/test`),
 };
+
+// 客户端模型：客户端展示模型与后台真实渠道路由
+export const clientModelApi = {
+  list: (params?: { include_disabled?: boolean; page?: number; page_size?: number }) =>
+    request.get('/admin/client-models', { params }),
+  get: (id: string) => request.get(`/admin/client-models/${id}`),
+  create: (data: {
+    model_key: string;
+    display_name: string;
+    provider: string;
+    scope: string;
+    enabled?: boolean;
+    sort_order?: number;
+    supported_modes?: string[];
+    supported_scopes?: string[];
+    aspect_ratios?: string[];
+    durations?: string[];
+    note?: string;
+  }) => request.post('/admin/client-models', data),
+  update: (id: string, data: any) => request.put(`/admin/client-models/${id}`, data),
+  delete: (id: string) => request.delete(`/admin/client-models/${id}`),
+  createRoute: (
+    id: string,
+    data: {
+      credential_id: string;
+      upstream_model: string;
+      enabled?: boolean;
+      is_default?: boolean;
+      priority?: number;
+      sort_order?: number;
+      note?: string;
+    }
+  ) => request.post(`/admin/client-models/${id}/routes`, data),
+  updateRoute: (routeId: string, data: any) => request.put(`/admin/client-model-routes/${routeId}`, data),
+  deleteRoute: (routeId: string) => request.delete(`/admin/client-model-routes/${routeId}`),
+};

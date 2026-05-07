@@ -79,6 +79,7 @@ const allMenuItems: MenuItem[] = [
     label: 'AI 转发',
     children: [
       { key: '/provider-credentials', icon: <ApiOutlined />, label: 'Provider 凭证' },
+      { key: '/client-models', icon: <AppstoreOutlined />, label: '客户端模型' },
       { key: '/pricing-rules', icon: <TagsOutlined />, label: '模型价格' },
     ],
   },
@@ -104,7 +105,7 @@ const canShowMenuItem = (key: string, role?: string) => {
   if (role === 'viewer' && viewerHiddenMenus.includes(key)) {
     return false;
   }
-  if ((key === 'ai' || key === '/provider-credentials' || key === '/pricing-rules' || key === '/user-credits' || key === '/backups' || key === '/audit') && !aiManagerRoles.includes(role || '')) {
+  if ((key === 'ai' || key === '/provider-credentials' || key === '/client-models' || key === '/pricing-rules' || key === '/user-credits' || key === '/backups' || key === '/audit') && !aiManagerRoles.includes(role || '')) {
     return false;
   }
   if ((key === '/instructions' || key === '/secure-scripts' || key === '/team' || key === '/export') && !appManagerRoles.includes(role || '')) {
@@ -139,7 +140,7 @@ const getParentKeyByPath = (path: string) => {
   if (['/customers', '/licenses', '/subscriptions', '/user-credits'].includes(path)) return 'customer-auth';
   if (['/devices', '/blacklist', '/instructions'].includes(path)) return 'device';
   if (['/apps', '/secure-scripts'].includes(path) || path.startsWith('/apps/')) return 'app-management';
-  if (['/provider-credentials', '/pricing-rules'].includes(path)) return 'ai';
+  if (['/provider-credentials', '/client-models', '/pricing-rules'].includes(path)) return 'ai';
   if (['/team', '/backups', '/audit', '/export', '/settings'].includes(path)) return 'system';
   return '';
 };

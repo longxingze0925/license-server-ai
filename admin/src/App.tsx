@@ -23,6 +23,7 @@ const DataExport = lazy(() => import('./pages/DataExport'));
 const DataBackups = lazy(() => import('./pages/DataBackups'));
 const SecureScripts = lazy(() => import('./pages/SecureScripts'));
 const ProviderCredentials = lazy(() => import('./pages/ProviderCredentials'));
+const ClientModels = lazy(() => import('./pages/ClientModels'));
 const PricingRules = lazy(() => import('./pages/PricingRules'));
 const UserCredits = lazy(() => import('./pages/UserCredits'));
 
@@ -75,6 +76,7 @@ const App: React.FC = () => {
                 <Route path="export" element={<RoleRoute roles={['owner', 'admin', 'developer']}><DataExport /></RoleRoute>} />
                 <Route path="backups" element={<RoleRoute roles={['owner', 'admin']}><DataBackups /></RoleRoute>} />
                 <Route path="provider-credentials" element={<RoleRoute roles={['owner', 'admin']}><ProviderCredentials /></RoleRoute>} />
+                <Route path="client-models" element={<RoleRoute roles={['owner', 'admin']}><ClientModels /></RoleRoute>} />
                 <Route path="pricing-rules" element={<RoleRoute roles={['owner', 'admin']}><PricingRules /></RoleRoute>} />
                 <Route path="user-credits" element={<RoleRoute roles={['owner', 'admin']}><UserCredits /></RoleRoute>} />
                 <Route path="profile" element={<Profile />} />

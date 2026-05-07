@@ -95,6 +95,8 @@ func AutoMigrate() error {
 		&ClientSession{},
 		// AI Provider 转发与计费
 		&ProviderCredential{},
+		&ClientModel{},
+		&ClientModelRoute{},
 		&UserCredit{},
 		&CreditTransaction{},
 		&PricingRule{},
