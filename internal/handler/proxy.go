@@ -248,15 +248,9 @@ func buildConfiguredProxyCapabilities(clientModels []service.ClientModelWithRout
 		if len(modes) == 0 {
 			modes = defaultClientModelSupportedModes(cm.Scope)
 		}
-		aspectRatios := routeCapabilityIntersection(item.Routes, service.ResolveRouteAspectRatios)
-		if len(aspectRatios) == 0 {
-			aspectRatios = nonNilStrings(service.ParseClientModelJSONStrings(cm.AspectRatios))
-		}
-		durations := routeCapabilityIntersection(item.Routes, service.ResolveRouteDurations)
-		if len(durations) == 0 {
-			durations = nonNilStrings(service.ParseClientModelJSONStrings(cm.Durations))
-		}
-		resolutions := routeCapabilityIntersection(item.Routes, service.ResolveRouteResolutions)
+		aspectRatios := routeCapabilityUnion(item.Routes, service.ResolveRouteAspectRatios)
+		durations := routeCapabilityUnion(item.Routes, service.ResolveRouteDurations)
+		resolutions := routeCapabilityUnion(item.Routes, service.ResolveRouteResolutions)
 		channel := proxyCapabilityChannel{
 			ChannelID:             "client-model:" + string(cm.Provider) + ":" + cm.ModelKey + ":" + string(cm.Scope),
 			ChannelName:           "后台路由",
@@ -320,52 +314,27 @@ func defaultClientModelSupportedModes(scope model.PricingScope) []string {
 	}
 }
 
-func routeCapabilityIntersection(routes []model.ClientModelRoute, selectValues func(model.ClientModelRoute) []string) []string {
+func routeCapabilityUnion(routes []model.ClientModelRoute, selectValues func(model.ClientModelRoute) []string) []string {
 	var out []string
-	initialized := false
+	seen := map[string]struct{}{}
 	for _, route := range routes {
 		if !route.Enabled || route.Credential == nil || !route.Credential.Enabled || route.Credential.HealthStatus == model.CredentialHealthDown {
 			continue
 		}
 		values := nonNilStrings(selectValues(route))
-		if len(values) == 0 {
-			continue
+		for _, value := range values {
+			key := strings.ToLower(strings.TrimSpace(value))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, strings.TrimSpace(value))
 		}
-		if !initialized {
-			out = append(out, values...)
-			initialized = true
-			continue
-		}
-		out = intersectStrings(out, values)
 	}
 	return nonNilStrings(out)
-}
-
-func intersectStrings(left, right []string) []string {
-	rightSet := map[string]string{}
-	for _, value := range right {
-		if strings.TrimSpace(value) == "" {
-			continue
-		}
-		rightSet[strings.ToLower(strings.TrimSpace(value))] = strings.TrimSpace(value)
-	}
-	out := []string{}
-	seen := map[string]struct{}{}
-	for _, value := range left {
-		key := strings.ToLower(strings.TrimSpace(value))
-		if key == "" {
-			continue
-		}
-		if _, ok := rightSet[key]; !ok {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, strings.TrimSpace(value))
-	}
-	return out
 }
 
 func collapseCapabilityChannelsForClient(provider model.ProviderKind, channels []proxyCapabilityChannel) []proxyCapabilityChannel {

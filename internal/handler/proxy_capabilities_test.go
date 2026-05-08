@@ -358,8 +358,8 @@ func TestBuildConfiguredProxyCapabilitiesUsesAdminClientModels(t *testing.T) {
 				SortOrder:       3,
 				SupportedModes:  `["text_to_video"]`,
 				SupportedScopes: `["video"]`,
-				AspectRatios:    `["9:16"]`,
-				Durations:       `["8"]`,
+				AspectRatios:    `["4:3"]`,
+				Durations:       `["30"]`,
 			},
 			Routes: []model.ClientModelRoute{
 				{
@@ -405,6 +405,75 @@ func TestBuildConfiguredProxyCapabilitiesUsesAdminClientModels(t *testing.T) {
 	}
 	if !containsString(channel.SupportedModes, "text_to_video") || containsString(channel.SupportedModes, "image_to_video") {
 		t.Fatalf("supported_modes = %#v", channel.SupportedModes)
+	}
+	if containsString(channel.SupportedAspectRatios, "4:3") || containsString(channel.SupportedDurations, "30") {
+		t.Fatalf("model-level aspect/duration should not leak into client capability: %#v %#v", channel.SupportedAspectRatios, channel.SupportedDurations)
+	}
+	if !containsString(channel.SupportedAspectRatios, "16:9") || !containsString(channel.SupportedDurations, "8") {
+		t.Fatalf("route capability should be exposed: %#v %#v", channel.SupportedAspectRatios, channel.SupportedDurations)
+	}
+}
+
+func TestBuildConfiguredProxyCapabilitiesUnionsRouteCapabilities(t *testing.T) {
+	got := buildConfiguredProxyCapabilities([]service.ClientModelWithRoutes{
+		{
+			Model: model.ClientModel{
+				BaseModel:       model.BaseModel{ID: "cm-1"},
+				TenantID:        "tenant-1",
+				ModelKey:        "veo-fast",
+				DisplayName:     "Veo Fast",
+				Provider:        model.ProviderVeo,
+				Scope:           model.PricingScopeVideo,
+				Enabled:         true,
+				SupportedModes:  `["text_to_video"]`,
+				SupportedScopes: `["video"]`,
+			},
+			Routes: []model.ClientModelRoute{
+				{
+					BaseModel:     model.BaseModel{ID: "route-1"},
+					TenantID:      "tenant-1",
+					ClientModelID: "cm-1",
+					CredentialID:  "cred-1",
+					UpstreamModel: "veo_3_1-fast",
+					Enabled:       true,
+					AspectRatios:  `["16:9"]`,
+					Durations:     `["8"]`,
+					Credential: &model.ProviderCredential{
+						BaseModel:    model.BaseModel{ID: "cred-1"},
+						Provider:     model.ProviderVeo,
+						Mode:         "duoyuan",
+						Enabled:      true,
+						HealthStatus: model.CredentialHealthUnknown,
+					},
+				},
+				{
+					BaseModel:     model.BaseModel{ID: "route-2"},
+					TenantID:      "tenant-1",
+					ClientModelID: "cm-1",
+					CredentialID:  "cred-2",
+					UpstreamModel: "veo_3_1-fast",
+					Enabled:       true,
+					AspectRatios:  `["9:16"]`,
+					Durations:     `["8"]`,
+					Credential: &model.ProviderCredential{
+						BaseModel:    model.BaseModel{ID: "cred-2"},
+						Provider:     model.ProviderVeo,
+						Mode:         "duoyuan",
+						Enabled:      true,
+						HealthStatus: model.CredentialHealthUnknown,
+					},
+				},
+			},
+		},
+	})
+
+	veo := findCapabilityProvider(got, "veo")
+	if veo == nil || len(veo.Channels) != 1 {
+		t.Fatalf("veo provider/channels = %#v", veo)
+	}
+	channel := veo.Channels[0]
+	if !containsString(channel.SupportedAspectRatios, "16:9") || !containsString(channel.SupportedAspectRatios, "9:16") {
+		t.Fatalf("route aspect ratios should be unioned: %#v", channel.SupportedAspectRatios)
 	}
 }
 

@@ -53,15 +53,6 @@ const DEFAULT_MODES_BY_SCOPE: Record<string, string[]> = {
   chat: [],
 };
 
-const DEFAULT_ASPECTS_BY_SCOPE: Record<string, string[]> = {
-  video: ['16:9', '9:16', '1:1'],
-  image: ['16:9', '9:16', '1:1'],
-};
-
-const DEFAULT_DURATIONS_BY_SCOPE: Record<string, string[]> = {
-  video: ['5', '8', '12'],
-};
-
 interface CredentialRow {
   id: string;
   provider: string;
@@ -168,8 +159,6 @@ const ClientModels: React.FC = () => {
     modelForm.setFieldsValue({
       supported_scopes: [selectedScope],
       supported_modes: DEFAULT_MODES_BY_SCOPE[selectedScope] ?? [],
-      aspect_ratios: DEFAULT_ASPECTS_BY_SCOPE[selectedScope] ?? [],
-      durations: DEFAULT_DURATIONS_BY_SCOPE[selectedScope] ?? [],
     });
   }, [selectedScope, currentModel, modelForm]);
 
@@ -192,6 +181,15 @@ const ClientModels: React.FC = () => {
     value: item.model,
     label: `${item.display_name || item.model}${item.model ? ` / ${item.model}` : ''}`,
   })), [upstreamCapabilities]);
+
+  const summarizeRouteCapabilities = (record: ClientModelRow) => {
+    const enabledRoutes = (record.routes || []).filter(route => route.enabled && route.credential?.enabled !== false);
+    const aspectRatios = uniqueRouteValues(enabledRoutes, route => route.effective_aspect_ratios || route.aspect_ratios || []);
+    const durations = uniqueRouteValues(enabledRoutes, route => route.effective_durations || route.durations || []);
+    const resolutions = uniqueRouteValues(enabledRoutes, route => route.effective_resolutions || route.resolutions || []);
+    const maxImages = Math.max(0, ...enabledRoutes.map(route => route.effective_max_images || route.max_images || 0));
+    return { aspectRatios, durations, resolutions, maxImages };
+  };
 
   useEffect(() => {
     if (!selectedRouteCredential) {
@@ -234,8 +232,6 @@ const ClientModels: React.FC = () => {
       scope: 'video',
       supported_scopes: ['video'],
       supported_modes: DEFAULT_MODES_BY_SCOPE.video,
-      aspect_ratios: DEFAULT_ASPECTS_BY_SCOPE.video,
-      durations: DEFAULT_DURATIONS_BY_SCOPE.video,
     });
     setModelModalVisible(true);
   };
@@ -251,8 +247,6 @@ const ClientModels: React.FC = () => {
       sort_order: record.sort_order,
       supported_modes: record.supported_modes || [],
       supported_scopes: record.supported_scopes || [record.scope],
-      aspect_ratios: record.aspect_ratios || [],
-      durations: record.durations || [],
       note: record.note,
     });
     setModelModalVisible(true);
@@ -486,6 +480,28 @@ const ClientModels: React.FC = () => {
             ),
           },
           {
+            title: '路由能力',
+            key: 'route_capability',
+            render: (_: any, record: ClientModelRow) => {
+              const capability = summarizeRouteCapabilities(record);
+              const empty = capability.aspectRatios.length === 0
+                && capability.durations.length === 0
+                && capability.resolutions.length === 0
+                && capability.maxImages === 0;
+              if (empty) {
+                return <Tag color="default">添加路由后自动生成</Tag>;
+              }
+              return (
+                <Space wrap>
+                  {capability.aspectRatios.slice(0, 3).map(value => <Tag key={`a-${value}`}>{value}</Tag>)}
+                  {capability.durations.slice(0, 3).map(value => <Tag key={`d-${value}`}>{value}s</Tag>)}
+                  {capability.resolutions.slice(0, 2).map(value => <Tag key={`r-${value}`}>{value}</Tag>)}
+                  {capability.maxImages > 0 ? <Tag>图 {capability.maxImages}</Tag> : null}
+                </Space>
+              );
+            },
+          },
+          {
             title: '路由数',
             key: 'routes',
             width: 80,
@@ -558,12 +574,9 @@ const ClientModels: React.FC = () => {
           <Form.Item name="supported_scopes" label="支持能力">
             <Select mode="tags" options={SCOPE_OPTIONS} placeholder="选择或输入能力类型" />
           </Form.Item>
-          <Form.Item name="aspect_ratios" label="比例选项">
-            <Select mode="tags" placeholder="例如 16:9、9:16、1:1" />
-          </Form.Item>
-          <Form.Item name="durations" label="时长选项">
-            <Select mode="tags" placeholder="例如 5、8、12" />
-          </Form.Item>
+          <Tag color="blue" style={{ marginBottom: 16 }}>
+            比例、时长、分辨率由真实渠道路由自动汇总
+          </Tag>
           <Space size="large">
             <Form.Item name="enabled" label="启用" valuePropName="checked">
               <Switch />
@@ -641,5 +654,25 @@ const ClientModels: React.FC = () => {
     </div>
   );
 };
+
+function uniqueRouteValues(
+  routes: ClientModelRouteRow[],
+  selectValues: (route: ClientModelRouteRow) => string[]
+) {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  routes.forEach(route => {
+    selectValues(route).forEach(value => {
+      const normalized = String(value || '').trim();
+      const key = normalized.toLowerCase();
+      if (!key || seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      out.push(normalized);
+    });
+  });
+  return out;
+}
 
 export default ClientModels;
