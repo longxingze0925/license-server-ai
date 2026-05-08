@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   App,
+  Alert,
   AutoComplete,
   Button,
   Form,
@@ -574,9 +575,12 @@ const ClientModels: React.FC = () => {
           <Form.Item name="supported_scopes" label="支持能力">
             <Select mode="tags" options={SCOPE_OPTIONS} placeholder="选择或输入能力类型" />
           </Form.Item>
-          <Tag color="blue" style={{ marginBottom: 16 }}>
-            比例、时长、分辨率由真实渠道路由自动汇总
-          </Tag>
+          <Alert
+            showIcon
+            type="info"
+            style={{ marginBottom: 16 }}
+            message="比例、时长、分辨率由真实渠道路由自动汇总"
+          />
           <Space size="large">
             <Form.Item name="enabled" label="启用" valuePropName="checked">
               <Switch />
