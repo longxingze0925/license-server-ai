@@ -3,6 +3,7 @@ package adapter
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -19,6 +20,19 @@ func TestCreateErrorNeedsCredentialRetry(t *testing.T) {
 	}
 	if CreateErrorNeedsCredentialRetry(newUpstreamHTTPError("create", 400, []byte("bad request"), 200)) {
 		t.Fatal("400 should not retry another credential")
+	}
+	if !CreateErrorNeedsCredentialRetry(&url.Error{Op: "Post", URL: "https://example.test", Err: errors.New("i/o timeout")}) {
+		t.Fatal("network errors should retry")
+	}
+}
+
+func TestNetworkCreateErrorOnlyDegradesCredential(t *testing.T) {
+	err := &url.Error{Op: "Post", URL: "https://example.test", Err: errors.New("i/o timeout")}
+	if !CreateErrorIsNetwork(err) {
+		t.Fatal("url error should be treated as network error")
+	}
+	if CreateErrorMarksCredentialDown(err) {
+		t.Fatal("network errors should not mark credential down")
 	}
 }
 

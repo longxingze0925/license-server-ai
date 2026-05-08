@@ -212,7 +212,7 @@ func (s *ProviderProxyService) tryChatOnce(ctx context.Context, a adapter.ChatAd
 
 	resp, err := s.http.Do(req)
 	if err != nil {
-		_ = s.creds.MarkHealth(cred.ID, model.CredentialHealthDown)
+		_ = s.creds.MarkHealth(cred.ID, model.CredentialHealthDegraded)
 		return nil, true, fmt.Errorf("上游网络错误: %w", err)
 	}
 	defer resp.Body.Close()

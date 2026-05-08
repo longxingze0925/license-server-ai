@@ -7,6 +7,18 @@ import (
 	"net/url"
 )
 
+func CreateErrorIsNetwork(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
+}
+
 // UpstreamHTTPError carries an upstream non-2xx status so callers can decide
 // whether switching credentials can help.
 type UpstreamHTTPError struct {
@@ -55,10 +67,5 @@ func CreateErrorDegradesCredential(err error) bool {
 }
 
 func CreateErrorMarksCredentialDown(err error) bool {
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	var urlErr *url.Error
-	return errors.As(err, &urlErr)
+	return false
 }

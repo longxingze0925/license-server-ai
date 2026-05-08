@@ -112,6 +112,8 @@ type StartOutput struct {
 
 // 异步 create 容灾参数。
 const asyncCreateMaxAttempts = 3
+const asyncCreateNetworkRetryAttempts = 2
+const asyncCreateNetworkRetryDelay = 300 * time.Millisecond
 const defaultAsyncTaskTimeout = 2 * time.Hour
 const (
 	asyncInitialPollDelay  = 1 * time.Second
@@ -203,7 +205,7 @@ func (r *AsyncRunnerService) StartTask(ctx context.Context, in StartInput) (*Sta
 			continue
 		}
 
-		cr, createErr := a.Create(ctx, cred, plainKey, in.Body)
+		cr, createErr := r.createWithNetworkRetry(ctx, a, cred, plainKey, in.Body)
 		if createErr == nil {
 			if cr == nil {
 				zeroBytesService(plainKey)
@@ -251,7 +253,9 @@ func (r *AsyncRunnerService) StartTask(ctx context.Context, in StartInput) (*Sta
 		if !adapter.CreateErrorNeedsCredentialRetry(createErr) {
 			break
 		}
-		if adapter.CreateErrorDegradesCredential(createErr) {
+		if adapter.CreateErrorIsNetwork(createErr) {
+			_ = r.creds.MarkHealth(cred.ID, model.CredentialHealthDegraded)
+		} else if adapter.CreateErrorDegradesCredential(createErr) {
 			_ = r.creds.MarkHealth(cred.ID, model.CredentialHealthDegraded)
 		} else if adapter.CreateErrorMarksCredentialDown(createErr) {
 			_ = r.creds.MarkHealth(cred.ID, model.CredentialHealthDown)
@@ -268,6 +272,29 @@ func (r *AsyncRunnerService) StartTask(ctx context.Context, in StartInput) (*Sta
 		refundReason = "任务创建失败"
 	}
 	r.failTaskAndRefund(taskID, lastErr.Error(), refundReason)
+	return nil, lastErr
+}
+
+func (r *AsyncRunnerService) createWithNetworkRetry(
+	ctx context.Context,
+	a adapter.AsyncAdapter,
+	cred *model.ProviderCredential,
+	plainKey []byte,
+	body []byte,
+) (*adapter.CreateResult, error) {
+	var lastErr error
+	for attempt := 1; attempt <= asyncCreateNetworkRetryAttempts; attempt++ {
+		cr, err := a.Create(ctx, cred, plainKey, body)
+		if err == nil || !adapter.CreateErrorIsNetwork(err) || attempt == asyncCreateNetworkRetryAttempts {
+			return cr, err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(asyncCreateNetworkRetryDelay * time.Duration(attempt)):
+		}
+	}
 	return nil, lastErr
 }
 
