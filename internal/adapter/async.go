@@ -75,10 +75,11 @@ type AsyncRegistry struct {
 func NewAsyncRegistry() *AsyncRegistry {
 	return &AsyncRegistry{
 		adapters: map[model.ProviderKind]AsyncAdapter{
-			model.ProviderSora: &SoraAdapter{},
-			model.ProviderVeo:  &VeoAdapter{},
-			model.ProviderGpt:  &OpenAIImageAdapter{}, // 仅支持图片生成
-			model.ProviderGrok: &GrokVideoAdapter{},
+			model.ProviderSora:   &SoraAdapter{},
+			model.ProviderVeo:    &VeoAdapter{},
+			model.ProviderGpt:    &OpenAIImageAdapter{}, // 仅支持图片生成
+			model.ProviderGrok:   &GrokVideoAdapter{},
+			model.ProviderGemini: &GeminiImageAdapter{}, // 多元 Gemini 图片生成
 		},
 	}
 }

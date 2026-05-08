@@ -100,6 +100,26 @@ func normalizeCapabilityModelKey(value string) string {
 
 var builtinUpstreamModelCapabilities = []UpstreamModelCapability{
 	{
+		Provider:     model.ProviderGemini,
+		Mode:         "duoyuan",
+		Model:        "gemini-2.5-flash-image",
+		DisplayName:  "Gemini 2.5 Flash Image",
+		AspectRatios: []string{"21:9", "16:9", "9:16", "5:4", "4:5", "4:3", "3:4", "3:2", "2:3", "1:1"},
+		Resolutions:  []string{"1024", "2K", "4K"},
+		MaxImages:    16,
+		Note:         "DuoYuan Gemini image model, supports text-to-image and reference-image generation.",
+	},
+	{
+		Provider:     model.ProviderGemini,
+		Mode:         "duoyuan",
+		Model:        "gemini-3-pro-image-preview",
+		DisplayName:  "Gemini 3 Pro Image",
+		AspectRatios: []string{"21:9", "16:9", "9:16", "5:4", "4:5", "4:3", "3:4", "3:2", "2:3", "1:1"},
+		Resolutions:  []string{"1024", "2K", "4K"},
+		MaxImages:    16,
+		Note:         "DuoYuan Gemini Pro image preview model, supports text-to-image and reference-image generation.",
+	},
+	{
 		Provider:     model.ProviderVeo,
 		Mode:         "duoyuan",
 		Model:        "veo_3_1",

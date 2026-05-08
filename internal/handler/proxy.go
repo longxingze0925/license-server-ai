@@ -643,6 +643,11 @@ func normalizeCredentialMode(provider model.ProviderKind, mode string) string {
 
 func supportedGenerationModes(provider model.ProviderKind, mode, modelID string) []string {
 	switch provider {
+	case model.ProviderGemini:
+		if mode == "duoyuan" && isGeminiImageModel(modelID) {
+			return []string{"text_to_image", "image_to_image"}
+		}
+		return nil
 	case model.ProviderGpt:
 		if isGptImageModel(modelID) {
 			return []string{"text_to_image", "image_to_image"}
@@ -671,6 +676,9 @@ func supportedGenerationModes(provider model.ProviderKind, mode, modelID string)
 func supportedProviderScopes(provider model.ProviderKind, mode, modelID string) []string {
 	switch provider {
 	case model.ProviderGemini:
+		if mode == "duoyuan" && isGeminiImageModel(modelID) {
+			return []string{"image"}
+		}
 		return []string{"analysis"}
 	case model.ProviderGpt:
 		if isGptImageModel(modelID) {
@@ -733,6 +741,9 @@ func supportedDurations(provider model.ProviderKind, mode string) []string {
 func providerDefaultModel(provider model.ProviderKind, mode string) string {
 	switch provider {
 	case model.ProviderGemini:
+		if mode == "duoyuan" {
+			return "gemini-2.5-flash-image"
+		}
 		return "gemini-2.5-flash"
 	case model.ProviderGpt:
 		if mode == "gzxsy" {
@@ -790,6 +801,13 @@ func normalizePublicClientModelID(provider model.ProviderKind, modelID string) s
 
 func publicClientModelDisplayName(provider model.ProviderKind, clientModel, fallback string) string {
 	switch provider {
+	case model.ProviderGemini:
+		switch normalizePublicClientModelID(provider, clientModel) {
+		case "gemini-2.5-flash-image":
+			return "Gemini 2.5 Flash Image"
+		case "gemini-3-pro-image-preview":
+			return "Gemini 3 Pro Image"
+		}
 	case model.ProviderVeo:
 		switch normalizePublicClientModelID(provider, clientModel) {
 		case "veo-3.1":
@@ -813,6 +831,15 @@ func isGptImageModel(modelID string) bool {
 	return strings.HasPrefix(modelID, "gpt-image") ||
 		strings.HasPrefix(modelID, "dall-e") ||
 		strings.Contains(modelID, "image")
+}
+
+func isGeminiImageModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return false
+	}
+	return strings.Contains(modelID, "image") ||
+		strings.Contains(modelID, "banana")
 }
 
 func providerDefaultBaseURL(provider model.ProviderKind) string {
